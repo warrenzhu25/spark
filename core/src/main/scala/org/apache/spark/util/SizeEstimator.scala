@@ -214,7 +214,9 @@ object SizeEstimator extends Logging {
       // Hadoop JobConfs created in the interpreter have a ClassLoader, which greatly confuses
       // the size estimator since it references the whole REPL. Do nothing in this case. In
       // general all ClassLoaders and Classes will be shared between objects anyway.
-    } else {
+    } else if (classOf[SizeAware].isAssignableFrom(cls)) {
+        state.size += obj.asInstanceOf[SizeAware].getSize()
+    }else {
       obj match {
         case s: KnownSizeEstimation =>
           state.size += s.estimatedSize
@@ -236,7 +238,6 @@ object SizeEstimator extends Logging {
     val length = ScalaRunTime.array_length(array)
     val elementClass = arrayClass.getComponentType()
 
-    // Arrays have object header and length field which is an integer
     var arrSize: Long = alignSize(objectSize + INT_SIZE)
 
     if (elementClass.isPrimitive) {

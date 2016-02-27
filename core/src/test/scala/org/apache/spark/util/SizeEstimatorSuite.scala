@@ -66,6 +66,15 @@ class DummyClass8 extends KnownSizeEstimation {
   override def estimatedSize: Long = 2015
 }
 
+class DummyClass9(val sizeToReport: Long) extends SizeAware {
+  def getSize() : Long = {
+    return sizeToReport
+  }
+}
+
+class DummyClass10(val dc8: DummyClass9) {
+}
+
 class SizeEstimatorSuite
   extends SparkFunSuite
   with BeforeAndAfterEach
@@ -229,5 +238,16 @@ class SizeEstimatorSuite
     // DummyClass8 provides its size estimation.
     assertResult(2015)(SizeEstimator.estimate(new DummyClass8))
     assertResult(20206)(SizeEstimator.estimate(Array.fill(10)(new DummyClass8)))
+  }
+
+  test("custom size estimators") {
+    // DummyClass9 should be taken directly from getSize method
+    assertResult(190)(SizeEstimator.estimate(new DummyClass9(190)))
+
+    // 16 bytes for DummyClass10 definition 190 because of DummyClass9 getSize
+    assertResult(206)(SizeEstimator.estimate(new DummyClass10(new DummyClass9(190))))
+
+    // 16 bytes for array definition, 4*4 bytes for pointers to the elements, 20 + 30 + 40 for the first 3 elements, 16 + 50 for the last element
+    assertResult(188)(SizeEstimator.estimate(Array(new DummyClass9(20), new DummyClass9(30), new DummyClass9(40), new DummyClass10(new DummyClass9(50)))))
   }
 }
