@@ -812,14 +812,17 @@ private[spark] class BlockManager(
    * automatically be freed once the result's `data` iterator is fully consumed.
    */
   def get[T: ClassTag](blockId: BlockId): Option[BlockResult] = {
+    val startTime = System.nanoTime
     val local = getLocalValues(blockId)
     if (local.isDefined) {
-      logInfo(s"Found block $blockId locally")
+      logInfo(s"Found block $blockId locally in " + (System.nanoTime - startTime) / 1e6 + " ms")
       return local
     }
+    val startRemoteTime = System.nanoTime
     val remote = getRemoteValues[T](blockId)
     if (remote.isDefined) {
-      logInfo(s"Found block $blockId remotely")
+      logInfo(s"Found block $blockId remotely in " + (System.nanoTime - startTime) / 1e6 +
+        " ms, out of which local lookup took " + (startRemoteTime - startTime) / 1e6 + " ms")
       return remote
     }
     None
