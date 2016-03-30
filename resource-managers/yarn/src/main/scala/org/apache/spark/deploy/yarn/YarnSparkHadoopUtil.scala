@@ -24,6 +24,7 @@ import scala.collection.mutable.{HashMap, ListBuffer}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.hadoop.yarn.api.ApplicationConstants
+import org.apache.hadoop.yarn.api.ApplicationConstants.Environment
 import org.apache.hadoop.yarn.api.records.{ApplicationAccessType, ContainerId, Priority}
 import org.apache.hadoop.yarn.util.ConverterUtils
 
@@ -31,6 +32,8 @@ import org.apache.spark.{SecurityManager, SparkConf}
 import org.apache.spark.deploy.yarn.config._
 import org.apache.spark.launcher.YarnCommandBuilderUtils
 import org.apache.spark.util.Utils
+
+import scala.util.Try
 
 object YarnSparkHadoopUtil {
 
@@ -221,4 +224,16 @@ object YarnSparkHadoopUtil {
     hadoopFilesystems + stagingFS
   }
 
+  /**
+   * Expand environment variable using Yarn API.
+   * If environment.$$() is implemented, return the result of it.
+   * Otherwise, return the result of environment.$()
+   * Note: $$() is added in Hadoop 2.4.
+   */
+  private lazy val expandMethod =
+    Try(classOf[Environment].getMethod("$$"))
+      .getOrElse(classOf[Environment].getMethod("$"))
+
+  def expandEnvironment(environment: Environment): String =
+    expandMethod.invoke(environment).asInstanceOf[String]
 }

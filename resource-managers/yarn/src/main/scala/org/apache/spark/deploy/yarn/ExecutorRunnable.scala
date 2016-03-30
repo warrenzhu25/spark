@@ -198,8 +198,21 @@ private[yarn] class ExecutorRunnable(
     }.toSeq
 
     YarnSparkHadoopUtil.addOutOfMemoryErrorArgument(javaOpts)
-    val commands = prefixEnv ++
-      Seq(Environment.JAVA_HOME.$$() + "/bin/java", "-server") ++
+    var prepostCmds : Seq[String] = Seq()
+
+    val prefixCmd = sparkConf.getOption("spark.executor.prefixCmd")
+    if(prefixCmd.isDefined) {
+      prepostCmds = prepostCmds ++ Seq("--prefix-cmd", "\"" + prefixCmd.get + "\"")
+    }
+
+    val postfixCmd = sparkConf.getOption("spark.executor.postfixCmd")
+    if(postfixCmd.isDefined) {
+      prepostCmds = prepostCmds ++ Seq("--postfix-cmd", "\"" + postfixCmd.get + "\"")
+    }
+
+    val commands = prefixEnv ++ Seq(
+      YarnSparkHadoopUtil.expandEnvironment(Environment.JAVA_HOME) + "/bin/java",
+      "-server") ++
       javaOpts ++
       Seq("org.apache.spark.executor.CoarseGrainedExecutorBackend",
         "--driver-url", masterAddress,
@@ -207,6 +220,7 @@ private[yarn] class ExecutorRunnable(
         "--hostname", hostname,
         "--cores", executorCores.toString,
         "--app-id", appId) ++
+      prepostCmds ++
       userClassPath ++
       Seq(
         s"1>${ApplicationConstants.LOG_DIR_EXPANSION_VAR}/stdout",

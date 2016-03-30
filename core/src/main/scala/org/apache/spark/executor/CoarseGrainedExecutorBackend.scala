@@ -36,6 +36,7 @@ import org.apache.spark.scheduler.{ExecutorLossReason, TaskDescription}
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages._
 import org.apache.spark.serializer.SerializerInstance
 import org.apache.spark.util.{ThreadUtils, Utils}
+import scala.sys.process._
 
 private[spark] class CoarseGrainedExecutorBackend(
     override val rpcEnv: RpcEnv,
@@ -238,6 +239,8 @@ private[spark] object CoarseGrainedExecutorBackend extends Logging {
     var appId: String = null
     var workerUrl: Option[String] = None
     val userClassPath = new mutable.ListBuffer[URL]()
+    var prefixCmd : String = null
+    var postfixCmd : String = null
 
     var argv = args.toList
     while (!argv.isEmpty) {
@@ -264,6 +267,12 @@ private[spark] object CoarseGrainedExecutorBackend extends Logging {
         case ("--user-class-path") :: value :: tail =>
           userClassPath += new URL(value)
           argv = tail
+        case ("--prefix-cmd") :: value :: tail =>
+          prefixCmd = value
+          argv = tail
+        case ("--postfix-cmd") :: value :: tail =>
+          postfixCmd = value
+          argv = tail
         case Nil =>
         case tail =>
           // scalastyle:off println
@@ -278,7 +287,40 @@ private[spark] object CoarseGrainedExecutorBackend extends Logging {
       printUsageAndExit()
     }
 
+    if(prefixCmd != null) {
+      val prefixCmdModified: String =
+        prefixCmd.replaceAll("\\{appid\\}", appId).
+          replaceAll("\\{executorid\\}", executorId)
+
+      logInfo("Executing prefix cmd:: " + prefixCmdModified)
+      try {
+        val result = prefixCmdModified.!!
+        logInfo("Finished executing prefix cmd: " + result)
+      }
+      catch {
+        case e: RuntimeException => logError("Failed executing prefix cmd: ", e)
+        case default => logError("Failed executing prefix cmd: ")
+      }
+    }
+
     run(driverUrl, executorId, hostname, cores, appId, workerUrl, userClassPath)
+
+    if(postfixCmd != null) {
+      val postfixCmdModified: String =
+        postfixCmd.replaceAll("\\{appid\\}", appId).
+          replaceAll("\\{executorid\\}", executorId)
+
+      logInfo("Executing postfix cmd:: " + postfixCmdModified)
+      try {
+        val result = postfixCmdModified.!!
+        logInfo("Finished executing postfix cmd: " + result)
+      }
+      catch {
+        case e: RuntimeException => logError("Failed executing postfix cmd: ", e)
+        case default => logError("Failed executing postfix cmd: ")
+      }
+    }
+
     System.exit(0)
   }
 
