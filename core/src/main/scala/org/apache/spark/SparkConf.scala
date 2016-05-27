@@ -524,8 +524,8 @@ class SparkConf(loadDefaults: Boolean) extends Cloneable with Logging with Seria
     }
 
     // Validate spark.executor.extraJavaOptions
-    getOption(executorOptsKey).foreach { javaOpts =>
-      if (javaOpts.contains("-Dspark")) {
+    getOption(executorOptsKey).map { javaOpts =>
+      if (javaOpts.contains("-Dspark") && !javaOpts.contains("-Dspark.hadoop.")) {
         val msg = s"$executorOptsKey is not allowed to set Spark options (was '$javaOpts'). " +
           "Set them directly on a SparkConf or in a properties file when using ./bin/spark-submit."
         throw new Exception(msg)
