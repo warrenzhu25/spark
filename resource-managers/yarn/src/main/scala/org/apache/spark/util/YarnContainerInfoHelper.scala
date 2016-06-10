@@ -22,8 +22,8 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.yarn.api.ApplicationConstants.Environment
 import org.apache.hadoop.yarn.api.records.{Container, ContainerId}
 import org.apache.hadoop.yarn.conf.YarnConfiguration
+import org.apache.hadoop.yarn.server.webproxy.ProxyUriUtils
 import org.apache.hadoop.yarn.util.ConverterUtils
-
 import org.apache.spark.deploy.yarn.YarnSparkHadoopUtil
 import org.apache.spark.internal.Logging
 
@@ -32,14 +32,7 @@ private[spark] object YarnContainerInfoHelper extends Logging {
       conf: Configuration,
       container: Option[Container]): Option[Map[String, String]] = {
     try {
-      val yarnConf = new YarnConfiguration(conf)
-
-      val containerId = getContainerId(container)
-      val user = Utils.getCurrentUserName()
-      val httpScheme = getYarnHttpScheme(yarnConf)
-      val httpAddress = getNodeManagerHttpAddress(container)
-
-      val baseUrl = s"$httpScheme$httpAddress/node/containerlogs/$containerId/$user"
+      val baseUrl = getLogBaseUrl(conf, container)
       logDebug(s"Base URL for logs: $baseUrl")
 
       Some(Map(
@@ -49,6 +42,27 @@ private[spark] object YarnContainerInfoHelper extends Logging {
       case e: Exception =>
         logInfo("Error while building executor logs - executor logs will not be available", e)
         None
+    }
+  }
+
+  private def getLogBaseUrl(conf: Configuration,
+                            container: Option[Container]): String = {
+    val yarnConf = new YarnConfiguration(conf)
+    val containerId = getContainerId(container)
+    val user = Utils.getCurrentUserName()
+    val httpScheme = getYarnHttpScheme(yarnConf)
+    val httpAddress = getNodeManagerHttpAddress(container)
+
+    if (yarnConf.getBoolean(YarnConfiguration.NM_WEBAPP_PROXY_ENABLED, false)) {
+      val proxyAddress = yarnConf.get(YarnConfiguration.PROXY_ADDRESS,
+        YarnConfiguration.DEFAULT_PROXY_ADDRESS)
+      val proxyBase = ProxyUriUtils.NM_PROXY_BASE
+      val addressBase = System.getenv(Environment.NM_HOST.name())
+      val addressPort = System.getenv(Environment.NM_HTTP_PORT.name())
+      s"$httpScheme$proxyAddress$proxyBase$addressBase" +
+        s"/$addressPort/node/containerlogs/$containerId/$user"
+    } else {
+      s"$httpScheme$httpAddress/node/containerlogs/$containerId/$user"
     }
   }
 
