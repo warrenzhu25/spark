@@ -19,7 +19,7 @@ package org.apache.spark.scheduler.cluster
 
 import org.apache.hadoop.yarn.api.ApplicationConstants.Environment
 import org.apache.hadoop.yarn.conf.YarnConfiguration
-
+import org.apache.hadoop.yarn.server.webproxy.ProxyUriUtils
 import org.apache.spark.SparkContext
 import org.apache.spark.deploy.yarn.{ApplicationMaster, YarnSparkHadoopUtil}
 import org.apache.spark.scheduler.TaskSchedulerImpl
@@ -72,8 +72,20 @@ private[spark] class YarnClusterSchedulerBackend(
           }
         }
         driverLogs = Some(Map(
-          "stdout" -> s"$baseUrl/stdout?start=-4096&machineId=$httpAddress",
-          "stderr" -> s"$baseUrl/stderr?start=-4096&machineId=$httpAddress"))
+          "stderr" -> s"$baseUrl/stderr?start=-4096&machineId=$httpAddress",
+          "stdout" -> s"$baseUrl/stdout?start=-4096&machineId=$httpAddress"))
+      } else if (yarnConf.getBoolean(YarnConfiguration.NM_WEBAPP_PROXY_ENABLED, false)) {
+        val proxyAddress = yarnConf.get(YarnConfiguration.PROXY_ADDRESS,
+          YarnConfiguration.DEFAULT_PROXY_ADDRESS)
+        val proxyBase = ProxyUriUtils.NM_PROXY_BASE
+        val addressBase = System.getenv(Environment.NM_HOST.name())
+        val addressPort = System.getenv(Environment.NM_HTTP_PORT.name())
+        val baseUrl = s"$httpScheme$proxyAddress$proxyBase$addressBase" +
+          s"/$addressPort/node/containerlogs/$containerId/$user"
+        logDebug(s"Base URL for logs: $baseUrl")
+        driverLogs = Some(Map(
+          "stderr" -> s"$baseUrl/stderr?start=-4096",
+          "stdout" -> s"$baseUrl/stdout?start=-4096"))
       } else {
         val baseUrl = s"$httpScheme$httpAddress/node/containerlogs/$containerId/$user"
         logDebug(s"Base URL for logs: $baseUrl")

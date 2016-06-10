@@ -27,6 +27,7 @@ import scala.collection.mutable.{HashMap, ListBuffer}
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.io.DataOutputBuffer
 import org.apache.hadoop.security.UserGroupInformation
+import org.apache.hadoop.yarn.server.webproxy.ProxyUriUtils;
 import org.apache.hadoop.yarn.api._
 import org.apache.hadoop.yarn.api.ApplicationConstants.Environment
 import org.apache.hadoop.yarn.api.records._
@@ -281,6 +282,17 @@ private[yarn] class ExecutorRunnable(
           }
           env("SPARK_LOG_URL_STDERR") = s"$baseUrl/stderr?start=-4096^&machineId=$address"
           env("SPARK_LOG_URL_STDOUT") = s"$baseUrl/stdout?start=-4096^&machineId=$address"
+        } else if (conf.getBoolean(YarnConfiguration.NM_WEBAPP_PROXY_ENABLED, false)) {
+          val proxyAddress = conf.get(YarnConfiguration.PROXY_ADDRESS,
+            YarnConfiguration.DEFAULT_PROXY_ADDRESS)
+          val proxyBase = ProxyUriUtils.NM_PROXY_BASE
+          val colonIndex = address.indexOf(":")
+          val addressBase = if (colonIndex >= 0) address.substring(0, colonIndex) else address
+          val addressPort = if (colonIndex >= 0) address.substring(colonIndex + 1) else "80"
+          val baseUrl = s"$httpScheme$proxyAddress$proxyBase$addressBase" +
+            s"/$addressPort/node/containerlogs/$containerId/$user"
+          env("SPARK_LOG_URL_STDERR") = s"$baseUrl/stderr?start=-4096"
+          env("SPARK_LOG_URL_STDOUT") = s"$baseUrl/stdout?start=-4096"
         } else {
           val baseUrl = s"$httpScheme$address/node/containerlogs/$containerId/$user"
           env("SPARK_LOG_URL_STDERR") = s"$baseUrl/stderr?start=-4096"
