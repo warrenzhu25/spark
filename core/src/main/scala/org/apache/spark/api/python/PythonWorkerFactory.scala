@@ -140,7 +140,7 @@ private[spark] class PythonWorkerFactory(pythonExec: String, envVars: Map[String
    */
   private def createSimpleWorker(): Socket = {
     var serverSocket: ServerSocket = null
-    try {
+    try
       serverSocket = new ServerSocket(0, 1, InetAddress.getByAddress(Array(127, 0, 0, 1)))
 
       // Create and start the worker
@@ -160,6 +160,28 @@ private[spark] class PythonWorkerFactory(pythonExec: String, envVars: Map[String
       // Wait for it to connect to our socket, and validate the auth secret.
       serverSocket.setSoTimeout(10000)
 
+      // To fix a known problem that sometimes a 10-second timeout can fail
+      // on Windows platform. Some experiments show in our own cluster, the
+      // first launch of Python.exe can take up to 30 seconds to start. Note
+      // that this is not a stable hit on any Windows machines.
+      //
+      // The issue can affect interactive query (e.g., Zeppelin query via
+      // %pyspark directive), especially when we specify only limited
+      // executors. A big job with multiple executors are not affected because
+      // driver can schedule failed jobs to other machines.
+      //
+      // So far, it's unlikely to explain why Windows system in our cluster,
+      // can result in a bad performance by ourselves,
+      // since a full investigation requires kernel debugging in cluster machine,
+      // which is forbidden by cluster management team. So the only workaround
+      // solution is to extend the connection timeout.
+      //
+      // We use Spark property "spark.python.worker.connectionTimeoutMs" for this
+      // purpose. Note that the default behavior is not changed if the property
+      // is not set.
+      val timeoutMS = SparkEnv.get.conf.getInt("spark.python.worker.connectionTimeoutMs", 10000)
+      logInfo("Set: spark.python.worker.connectionTimeoutMs = " + timeoutMS.toString())
+      serverSocket.setSoTimeout(timeoutMS)
       try {
         val socket = serverSocket.accept()
         authHelper.authClient(socket)
@@ -169,7 +191,7 @@ private[spark] class PythonWorkerFactory(pythonExec: String, envVars: Map[String
         case e: Exception =>
           throw new SparkException("Python worker failed to connect back.", e)
       }
-    } finally {
+    finally {
       if (serverSocket != null) {
         serverSocket.close()
       }
