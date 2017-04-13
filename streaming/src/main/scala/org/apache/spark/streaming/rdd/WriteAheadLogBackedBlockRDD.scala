@@ -135,10 +135,20 @@ class WriteAheadLogBackedBlockRDD[T: ClassTag](
         // FileBasedWriteAheadLog will not create any file or directory at that path. Also,
         // this dummy directory should not already exist otherwise the WAL will try to recover
         // past events from the directory and throw errors.
-        val nonExistentDirectory = new File(
-          System.getProperty("java.io.tmpdir"), UUID.randomUUID().toString).toURI.toString
+
+        // the nonExistentDirectory will contain a colon in windows, this is invalid for hadoop.
+        // remove the drive letter and colon, e.g. "D:" out of this path by default
+        val nonExistentDirectory = if (conf.getBoolean("spark.nao.wal.windows", true)) {
+          new File(
+            System.getProperty("java.io.tmpdir").replaceFirst("[a-zA-Z]:", ""),
+            UUID.randomUUID().toString).getPath
+        } else {
+          new File(System.getProperty("java.io.tmpdir"), UUID.randomUUID().toString).getAbsolutePath
+        }
+
         writeAheadLog = WriteAheadLogUtils.createLogForReceiver(
           SparkEnv.get.conf, nonExistentDirectory, hadoopConf)
+
         dataRead = writeAheadLog.read(partition.walRecordHandle)
       } catch {
         case NonFatal(e) =>
