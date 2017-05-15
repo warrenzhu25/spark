@@ -43,7 +43,7 @@ private[spark] class YarnClusterSchedulerBackend(
       val yarnConf = new YarnConfiguration(sc.hadoopConfiguration)
       val containerId = YarnSparkHadoopUtil.getContainerId
 
-      val httpAddress = System.getenv(Environment.NM_HOST.name()) +
+      var httpAddress = System.getenv(Environment.NM_HOST.name()) +
         ":" + System.getenv(Environment.NM_HTTP_PORT.name())
       // lookup appropriate http scheme for container log urls
       val yarnHttpPolicy = yarnConf.get(
@@ -52,11 +52,35 @@ private[spark] class YarnClusterSchedulerBackend(
       )
       val user = Utils.getCurrentUserName()
       val httpScheme = if (yarnHttpPolicy == "HTTPS_ONLY") "https://" else "http://"
-      val baseUrl = s"$httpScheme$httpAddress/node/containerlogs/$containerId/$user"
-      logDebug(s"Base URL for logs: $baseUrl")
-      driverLogs = Some(Map(
-        "stdout" -> s"$baseUrl/stdout?start=-4096",
-        "stderr" -> s"$baseUrl/stderr?start=-4096"))
+      val proxyServer = sc.getConf.getOption("spark.event.proxy")
+      // enable log accessible outside AP through proxy
+      if (proxyServer.isDefined) {
+        val machineAddress = proxyServer.get
+        val baseUrl = s"$httpScheme$machineAddress/node/containerlogs/$containerId/$user"
+        logDebug(s"Base URL for logs: $baseUrl")
+        val ipRegex = "^([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\." +
+                "([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])(:\\d{1,5})?$"
+        if (!httpAddress.matches(ipRegex)) {
+          // since some mathined Id such as BN2SCH030340532:8042 can not be resolved through proxy,
+          // we need to enforce it ending with .phx.gbl:8042
+          val machineReg = sc.getConf.getOption("spark.machine.reg")
+          if (machineReg.isDefined) {
+            val machineRegex = machineReg.get.toString.r
+            if (machineRegex.findAllIn(httpAddress).isEmpty) {
+              httpAddress = httpAddress.split(':')(0) + machineRegex
+            }
+          }
+        }
+        driverLogs = Some(Map(
+          "stdout" -> s"$baseUrl/stdout?start=-4096&machineId=$httpAddress",
+          "stderr" -> s"$baseUrl/stderr?start=-4096&machineId=$httpAddress"))
+      } else {
+        val baseUrl = s"$httpScheme$httpAddress/node/containerlogs/$containerId/$user"
+        logDebug(s"Base URL for logs: $baseUrl")
+        driverLogs = Some(Map(
+          "stdout" -> s"$baseUrl/stdout?start=-4096",
+          "stderr" -> s"$baseUrl/stderr?start=-4096"))
+      }
     } catch {
       case e: Exception =>
         logInfo("Error while building AM log links, so AM" +

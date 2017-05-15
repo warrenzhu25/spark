@@ -241,15 +241,37 @@ private[yarn] class ExecutorRunnable(
       }
     }
 
+    // enable log accessible outside AP through proxy
+    val proxyServer = sparkConf.getOption("spark.event.proxy")
+
     // Add log urls
     container.foreach { c =>
       sys.env.get("SPARK_USER").foreach { user =>
         val containerId = ConverterUtils.toString(c.getId)
-        val address = c.getNodeHttpAddress
-        val baseUrl = s"$httpScheme$address/node/containerlogs/$containerId/$user"
-
-        env("SPARK_LOG_URL_STDERR") = s"$baseUrl/stderr?start=-4096"
-        env("SPARK_LOG_URL_STDOUT") = s"$baseUrl/stdout?start=-4096"
+        var address = c.getNodeHttpAddress
+        if (proxyServer.isDefined) {
+          val machineAddres = proxyServer.get
+          val baseUrl = s"$httpScheme$machineAddres/node/containerlogs/$containerId/$user"
+          val ipRegex = "^([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\." +
+                  "([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])(:\\d{1,5})?$"
+          if (!address.matches(ipRegex)) {
+            // since some machine Id such as BN2SCH030340532:8042, can not be resolved
+            // through proxy, we need to enforce it ending with .phx.gbl:8042
+            val machineReg = sparkConf.getOption("spark.machine.reg")
+            if (machineReg.isDefined) {
+              val machineRegex = machineReg.get.toString.r
+              if (machineRegex.findAllIn(address).isEmpty) {
+                address = address.split(':')(0) + machineRegex
+              }
+            }
+          }
+          env("SPARK_LOG_URL_STDERR") = s"$baseUrl/stderr?start=-4096^&machineId=$address"
+          env("SPARK_LOG_URL_STDOUT") = s"$baseUrl/stdout?start=-4096^&machineId=$address"
+        } else {
+          val baseUrl = s"$httpScheme$address/node/containerlogs/$containerId/$user"
+          env("SPARK_LOG_URL_STDERR") = s"$baseUrl/stderr?start=-4096"
+          env("SPARK_LOG_URL_STDOUT") = s"$baseUrl/stdout?start=-4096"
+        }
       }
     }
 
