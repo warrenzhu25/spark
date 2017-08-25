@@ -117,3 +117,9 @@ private[scheduler] abstract class Stage(
   /** Returns the sequence of partition ids that are missing (i.e. needs to be computed). */
   def findMissingPartitions(): Seq[Int]
 }
+
+private[scheduler] object Stage {
+  // The number of consecutive failures allowed before a stage is aborted
+  // [tazhan@20170824] change this to 1000 to unblock our Malta jobs. Will make it configurable soon.
+  val MAX_CONSECUTIVE_FETCH_FAILURES = 1000
+}
