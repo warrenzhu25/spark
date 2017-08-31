@@ -271,6 +271,10 @@ package object config {
 
   /* Executor configuration. */
 
+  private[spark] val EXECUTOR_CORES_OVERHEAD = ConfigBuilder("spark.executor.coresOverhead")
+    .intConf
+    .createWithDefault(0)
+
   private[spark] val EXECUTOR_NODE_LABEL_EXPRESSION =
     ConfigBuilder("spark.yarn.executor.nodeLabelExpression")
       .doc("Node label expression for executors.")
