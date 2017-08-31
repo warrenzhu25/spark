@@ -140,10 +140,12 @@ private[yarn] class YarnAllocator(
   }
   // Number of cores per executor.
   protected val executorCores = sparkConf.get(EXECUTOR_CORES)
+  // Additional cores overhead
+  protected val coresOverhead = sparkConf.get(EXECUTOR_CORES_OVERHEAD)
   // Resource capability requested for each executors
   private[yarn] val resource = Resource.newInstance(
     executorMemory + memoryOverhead + pysparkWorkerMemory,
-    executorCores)
+    executorCores + coresOverhead)
 
   private val launcherPool = ThreadUtils.newDaemonCachedThreadPool(
     "ContainerLauncher", sparkConf.get(CONTAINER_LAUNCH_MAX_THREADS))
@@ -307,7 +309,7 @@ private[yarn] class YarnAllocator(
 
     if (missing > 0) {
       logInfo(s"Will request $missing executor container(s), each with " +
-        s"${resource.getVirtualCores} core(s) and " +
+        s"${resource.getVirtualCores} core(s) (including $coresOverhead overhead) and " +
         s"${resource.getMemory} MB memory (including $memoryOverhead MB of overhead)")
 
       // cancel "stale" requests for locations that are no longer needed

@@ -46,6 +46,7 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
   var deployMode: String = null
   var executorMemory: String = null
   var executorCores: String = null
+  var executorCoresOverhead: String = null
   var totalExecutorCores: String = null
   var propertiesFile: String = null
   var driverMemory: String = null
@@ -177,6 +178,10 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
     executorCores = Option(executorCores)
       .orElse(sparkProperties.get("spark.executor.cores"))
       .orElse(env.get("SPARK_EXECUTOR_CORES"))
+      .orNull
+    executorCoresOverhead = Option(executorCoresOverhead)
+      .orElse(sparkProperties.get("spark.executor.coresOverhead"))
+      .orElse(env.get("SPARK_EXECUTOR_CORES_OVERHEAD"))
       .orNull
     totalExecutorCores = Option(totalExecutorCores)
       .orElse(sparkProperties.get("spark.cores.max"))
@@ -326,6 +331,7 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
     |  deployMode              $deployMode
     |  executorMemory          $executorMemory
     |  executorCores           $executorCores
+    |  executorCoresOverhead   $executorCoresOverhead
     |  totalExecutorCores      $totalExecutorCores
     |  propertiesFile          $propertiesFile
     |  driverMemory            $driverMemory
@@ -381,6 +387,9 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
 
       case EXECUTOR_CORES =>
         executorCores = value
+
+      case EXECUTOR_CORES_OVERHEAD =>
+        executorCoresOverhead = value
 
       case EXECUTOR_MEMORY =>
         executorMemory = value
@@ -576,6 +585,9 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
         | Spark standalone and YARN only:
         |  --executor-cores NUM        Number of cores per executor. (Default: 1 in YARN mode,
         |                              or all available cores on the worker in standalone mode)
+        |  --executor-coresOverhead NUM Number of overhead cores per executor. (Default: 0).
+        |                              This is used, as addition to executor-cores when
+        |                              requesting resources from YarnRM.
         |
         | YARN-only:
         |  --queue QUEUE_NAME          The YARN queue to submit to (Default: "default").
