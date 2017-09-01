@@ -181,7 +181,8 @@ public class TransportClientFactory implements Closeable {
           logger.trace("Returning cached connection to {}: {}", resolvedAddress, cachedClient);
           return cachedClient;
         } else {
-          logger.info("Found inactive connection to {}, creating a new one.", resolvedAddress);
+          logger.info("Found and close inactive connection to {}, creating a new one.", resolvedAddress);
+          cachedClient.close();
         }
       }
       clientPool.clients[clientIndex] = createClient(resolvedAddress);

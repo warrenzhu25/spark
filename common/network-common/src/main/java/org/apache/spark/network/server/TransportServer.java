@@ -139,7 +139,7 @@ public class TransportServer implements Closeable {
     channelFuture.syncUninterruptibly();
 
     port = ((InetSocketAddress) channelFuture.channel().localAddress()).getPort();
-    logger.debug("Shuffle server started on port: {}", port);
+    logger.debug("Shuffle server started on port: {}, threads: {}, prefix: {}", port, conf.serverThreads(), conf.getModuleName() + "-server");
   }
 
   public MetricSet getAllMetrics() {
