@@ -230,6 +230,16 @@
   </properties>
   <repositories>
     <repository>
+      <id>msasg-visualstudio-com-msasg-multitenancy-test3</id>
+      <url>https://msasg.pkgs.visualstudio.com/_packaging/MultiTenancy-Test3/maven/v1</url>
+      <releases>
+        <enabled>true</enabled>
+      </releases>
+      <snapshots>
+        <enabled>true</enabled>
+      </snapshots>
+    </repository>
+    <repository>
       <id>central</id>
       <!-- This should be at top, it makes maven try the central repo first and then others and hence faster dep resolution -->
       <name>Maven Repository</name>
