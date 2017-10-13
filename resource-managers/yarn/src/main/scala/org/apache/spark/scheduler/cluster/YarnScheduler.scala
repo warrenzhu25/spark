@@ -34,7 +34,7 @@ private[spark] class YarnScheduler(sc: SparkContext) extends TaskSchedulerImpl(s
   // By default, rack is unknown
   override def getRackForHost(hostPort: String): Option[String] = {
     val host = Utils.parseHostPort(hostPort)._1
-    if(sc.conf.getBoolean("spark.locality.useResolver", true)) {
+    if(sc.conf.getBoolean("spark.locality.useResolver", false)) {
         Option(RackResolver.resolve(sc.hadoopConfiguration, host).getNetworkLocation)
     } else {
         None
