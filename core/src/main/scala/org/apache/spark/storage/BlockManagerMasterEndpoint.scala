@@ -156,6 +156,7 @@ class BlockManagerMasterEndpoint(
       val bms: mutable.HashSet[BlockManagerId] = blockLocations.get(blockId)
       bms.foreach(bm => blockManagerInfo.get(bm).foreach(_.removeBlock(blockId)))
       blockLocations.remove(blockId)
+      logDebug(s"removed $blockId as a result of removing RDD $rddId")
     }
 
     // Ask the slaves to remove the RDD, and put the result in a sequence of Futures.
@@ -227,6 +228,8 @@ class BlockManagerMasterEndpoint(
       // etc.) as replication doesn't make much sense in that context.
       if (locations.size == 0) {
         blockLocations.remove(blockId)
+        logDebug(s"removed $blockId as a result of"
+          + " removing $blockManagerId that caused empty locations")
         logWarning(s"No more replicas available for $blockId !")
       } else if (proactivelyReplicate && (blockId.isRDD || blockId.isInstanceOf[TestBlockId])) {
         // As a heursitic, assume single executor failure to find out the number of replicas that
@@ -423,19 +426,30 @@ class BlockManagerMasterEndpoint(
 
     if (storageLevel.isValid) {
       locations.add(blockManagerId)
+      logDebug(s"added $blockManagerId of block $blockId")
     } else {
       locations.remove(blockManagerId)
+      logDebug(s"removed $blockManagerId of block $blockId"
+        + " since storage level is not valid")
     }
 
     // Remove the block from master tracking if it has been removed on all slaves.
     if (locations.size == 0) {
       blockLocations.remove(blockId)
+      logDebug(s"removed $blockId since it has no locations")
     }
     true
   }
 
   private def getLocations(blockId: BlockId): Seq[BlockManagerId] = {
-    if (blockLocations.containsKey(blockId)) blockLocations.get(blockId).toSeq else Seq.empty
+    if (blockLocations.containsKey(blockId)) {
+      val locations = blockLocations.get(blockId).toSeq
+      logDebug(blockId + " is found with " + locations.size + " locations")
+      locations
+    } else {
+      logDebug(s"$blockId is not found in block locations so return empty")
+      Seq.empty
+    }
   }
 
   private def getLocationsAndStatus(blockId: BlockId): Option[BlockLocationsAndStatus] = {

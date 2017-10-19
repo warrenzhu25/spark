@@ -81,6 +81,7 @@ class BlockManagerMaster(
 
   /** Get locations of the blockId from the driver */
   def getLocations(blockId: BlockId): Seq[BlockManagerId] = {
+    logDebug("get block locations from " + driverEndpoint.address)
     driverEndpoint.askSync[Seq[BlockManagerId]](GetLocations(blockId))
   }
 

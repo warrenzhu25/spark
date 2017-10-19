@@ -508,7 +508,8 @@ private[spark] class BlockManager(
       // Re-registering will report our new block for free.
       asyncReregister()
     }
-    logDebug(s"Told master about block $blockId")
+    logDebug(s"Told master about block $blockId: storage level valid? "
+      + status.storageLevel.isValid)
   }
 
   /**
@@ -748,6 +749,7 @@ private[spark] class BlockManager(
     }
 
     val locations = sortLocations(blockLocations)
+    logDebug("Got remote block " + blockId + " with " + locations.size + " locations")
     val maxFetchFailures = locations.size
     var locationIterator = locations.iterator
     while (locationIterator.hasNext) {
