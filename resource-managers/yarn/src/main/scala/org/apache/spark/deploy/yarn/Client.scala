@@ -938,6 +938,7 @@ private[spark] class Client(
     }
 
     // For log4j configuration to reference
+    javaOpts += ("-Dhadoop.log.dir=" + ApplicationConstants.LOG_DIR_EXPANSION_VAR)
     javaOpts += ("-Dspark.yarn.app.container.log.dir=" + ApplicationConstants.LOG_DIR_EXPANSION_VAR)
 
     val userClass =
