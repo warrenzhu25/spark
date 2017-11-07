@@ -274,6 +274,45 @@ private[yarn] class YarnAllocator(
       logDebug("Finished processing %d completed containers. Current running executor count: %d."
         .format(completedContainers.size, runningExecutors.size))
     }
+
+    val preemptionMessage = allocateResponse.getPreemptionMessage
+    if (preemptionMessage != null) {
+      val strBuilder = new StringBuilder("preemption Message:\n")
+      val strictContract = preemptionMessage.getStrictContract
+      if (strictContract != null) {
+        val containers = strictContract.getContainers
+        strBuilder.append("StrictPreemptionContract with "
+          + containers.size() + " containers: ")
+        for (preemptContainer <- containers.asScala) {
+          strBuilder.append(preemptContainer.getId + " ")
+        }
+        strBuilder.append("\n")
+      }
+
+      val contract = preemptionMessage.getContract
+      if (contract != null) {
+        strBuilder.append("PreemptionContract: \n")
+
+        val resources = contract.getResourceRequest
+        strBuilder.append(resources.size() + " resources: ")
+        for (preemptResourceReq <- resources.asScala) {
+          val resourceReq = preemptResourceReq.getResourceRequest
+          strBuilder.append("( " + resourceReq.getNumContainers + " containers with "
+            + resourceReq.getPriority + " resourceName=" + resourceReq.getResourceName
+            + " " + resourceReq.getCapability + " nodeLabel=" + resourceReq.getNodeLabelExpression
+            + ") ")
+        }
+        strBuilder.append("\n")
+
+        val containers = contract.getContainers
+        strBuilder.append(containers.size() + " containers: ")
+        for (preemptContainer <- containers.asScala) {
+          strBuilder.append(preemptContainer.getId + " ")
+        }
+        strBuilder.append("\n")
+      }
+      logInfo(strBuilder.toString)
+    }
   }
 
   /**
@@ -630,6 +669,9 @@ private[yarn] class YarnAllocator(
             // merely to do resource sharing, and tasks that fail due to preempted executors could
             // just as easily finish on any other executor. See SPARK-8167.
             (false, s"Container ${containerId}${onHostStr} was preempted.")
+          case ContainerExitStatus.KILLED_BY_RESOURCEMANAGER =>
+            // killed by resource manager due to (for now) node decommission
+            (false, s"Container ${containerId}${onHostStr} was killed by RM")
           // Should probably still count memory exceeded exit codes towards task failures
           case VMEM_EXCEEDED_EXIT_CODE =>
             (true, memLimitExceededLogMessage(
