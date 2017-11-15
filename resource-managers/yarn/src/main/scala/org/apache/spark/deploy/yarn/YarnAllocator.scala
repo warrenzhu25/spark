@@ -265,6 +265,8 @@ private[yarn] class YarnAllocator(
           allocateResponse.getAvailableResources))
 
       handleAllocatedContainers(allocatedContainers.asScala)
+    } else {
+      logDebug("no allocated containers")
     }
 
     val completedContainers = allocateResponse.getCompletedContainersStatuses()
@@ -273,6 +275,8 @@ private[yarn] class YarnAllocator(
       processCompletedContainers(completedContainers.asScala)
       logDebug("Finished processing %d completed containers. Current running executor count: %d."
         .format(completedContainers.size, runningExecutors.size))
+    } else {
+      logDebug("no completed containers")
     }
 
     val preemptionMessage = allocateResponse.getPreemptionMessage
@@ -312,6 +316,8 @@ private[yarn] class YarnAllocator(
         strBuilder.append("\n")
       }
       logInfo(strBuilder.toString)
+    } else {
+      logDebug("no preemption msg")
     }
   }
 
@@ -328,14 +334,14 @@ private[yarn] class YarnAllocator(
   def updateResourceRequests(maxCount : Int): Unit = {
     val pendingAllocate = getPendingAllocate
     val numPendingAllocate = pendingAllocate.size
-    val missing = targetNumExecutors - numPendingAllocate -
+    var missing = targetNumExecutors - numPendingAllocate -
       numExecutorsStarting.get - runningExecutors.size
     if (maxCount > 0) {
       missing = math.min(missing, maxCount)
     }
     logDebug(s"Updating resource requests, target: $targetNumExecutors, " +
       s"pending: $numPendingAllocate, running: ${runningExecutors.size}, " +
-      s"executorsStarting: ${numExecutorsStarting.get}")
+      s"executorsStarting: ${numExecutorsStarting.get}, missing=$missing")
 
     // Split the pending container request into three groups: locality matched list, locality
     // unmatched list and non-locality list. Take the locality matched container request into
@@ -347,9 +353,11 @@ private[yarn] class YarnAllocator(
       hostToLocalTaskCounts, pendingAllocate)
 
     if (missing > 0) {
-      logInfo(s"Will request $missing executor container(s), each with " +
-        s"${resource.getVirtualCores} core(s) (including $coresOverhead overhead) and " +
-        s"${resource.getMemory} MB memory (including $memoryOverhead MB of overhead)")
+
+      logInfo(s"For the total $targetNumExecutors with ${runningExecutors.size} running" +
+        s" and $numPendingAllocate pending executors, request $missing executor container(s)," +
+        s" each with ${resource.getVirtualCores} core(s) (including $coresOverhead overhead)" +
+        s" and ${resource.getMemory} MB memory (including $memoryOverhead MB of overhead)")
 
       // cancel "stale" requests for locations that are no longer needed
       staleRequests.foreach { stale =>
@@ -526,9 +534,6 @@ private[yarn] class YarnAllocator(
     if (filteredContainersToUse.length > 0) {
       runAllocatedContainers(filteredContainersToUse)
     }
-
-    logInfo("Received %d containers from YARN, launching executors on %d of them."
-      .format(allocatedContainers.size, filteredContainersToUse.size))
   }
 
   /**
@@ -568,7 +573,15 @@ private[yarn] class YarnAllocator(
   /**
    * Launches executors in the allocated containers.
    */
-  private def runAllocatedContainers(containersToUse: ArrayBuffer[Container]): Unit = {
+  private def runAllocatedContainers(containersReadyToUse: ArrayBuffer[Container]): Unit = {
+    val containersNumToDrop = Math.max(0,
+      runningExecutors.size() + containersReadyToUse.size - targetNumExecutors)
+    val containersToUse = containersReadyToUse.drop(containersNumToDrop)
+
+    logInfo(s"Asked to launch  ${containersReadyToUse.size} containers: Drop " +
+      s"${containersNumToDrop} and launching  ${containersToUse.size} " +
+      s" to reach ${runningExecutors.size()} running containers")
+
     for (container <- containersToUse) {
       executorIdCounter += 1
       val executorHostname = container.getNodeId.getHost
@@ -624,15 +637,21 @@ private[yarn] class YarnAllocator(
               }
             }
           })
-        } else {
-          // For test only
-          updateInternalState()
         }
       } else {
         logInfo(("Skip launching executorRunnable as running executors count: %d " +
           "reached target executors count: %d.").format(
           runningExecutors.size, targetNumExecutors))
+        // For test only
+        updateInternalState()
       }
+    }
+
+    val containersToDrop = containersReadyToUse -- containersToUse
+    for(container <- containersToDrop) {
+      logInfo("releasing assigned container " + container.getId
+        + " on host " + container.getNodeId.getHost)
+      internalReleaseContainer(container)
     }
   }
 
