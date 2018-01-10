@@ -127,6 +127,7 @@ private[spark] class YarnRMClient extends Logging {
 
   /** Returns the maximum number of attempts to register the AM. */
   def getMaxRegAttempts(sparkConf: SparkConf, yarnConf: YarnConfiguration): Int = {
+    /*
     val sparkMaxAttempts = sparkConf.get(MAX_APP_ATTEMPTS).map(_.toInt)
     val yarnMaxAttempts = yarnConf.getInt(
       YarnConfiguration.RM_AM_MAX_ATTEMPTS, YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS)
@@ -134,6 +135,29 @@ private[spark] class YarnRMClient extends Logging {
       case Some(x) => if (x <= yarnMaxAttempts) x else yarnMaxAttempts
       case None => yarnMaxAttempts
     }
+    */
+    val sparkMaxAttempts = sparkConf.get(MAX_APP_ATTEMPTS).map(_.toInt)
+    val sparkMaxAttemptsOverride = sparkConf.get(MAX_APP_ATTEMPTS_OVERRIDE).map(_.toInt)
+    val yarnMaxAttempts = yarnConf.getInt(
+      YarnConfiguration.RM_AM_MAX_ATTEMPTS, YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS)
+    val yarnMaxAllAttempts = yarnConf.getInt(
+      YarnConfiguration.RM_AM_MAX_ALL_ATTEMPTS, YarnConfiguration.DEFAULT_RM_AM_MAX_ALL_ATTEMPTS)
+
+    val retval: Int = sparkMaxAttempts match {
+      case Some(x) => if (x <= yarnMaxAttempts) x else yarnMaxAttempts
+      case None => yarnMaxAttempts
+    }
+
+    val retvalOverride: Int = sparkMaxAttemptsOverride match {
+      case Some(x) => if (x <= yarnMaxAllAttempts) x else yarnMaxAllAttempts
+      case None => 0
+    }
+
+    logInfo("sparkMaxAttempts=" + retval
+      + "(capped by " + YarnConfiguration.RM_AM_MAX_ATTEMPTS + "=" + yarnMaxAttempts +"); "
+      + " sparkMaxAttemptsOverride=" + retvalOverride
+      + "(capped by " + YarnConfiguration.RM_AM_MAX_ALL_ATTEMPTS + "=" + yarnMaxAllAttempts + ")")
+    Math.max(retval, retvalOverride)
   }
 
   private def getUrlByRmId(conf: Configuration, rmId: String): String = {
