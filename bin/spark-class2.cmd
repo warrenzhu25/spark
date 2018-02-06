@@ -61,6 +61,8 @@ if not "x%JAVA_HOME%"=="x" (
   )
 )
 
+Powershell.exe -f "%~dp0run_spark_launcher.ps1"
+
 rem The launcher library prints the command to be executed in a single line suitable for being
 rem executed by the batch interpreter. So read all the output of the launcher into a variable.
 :gen
@@ -69,9 +71,12 @@ rem SPARK-28302: %RANDOM% would return the same number if we call it instantly a
 rem so we should make it sure to generate unique file to avoid process collision of writing into
 rem the same file concurrently.
 if exist %LAUNCHER_OUTPUT% goto :gen
+set LAUNCHER_OUTPUT=%temp%\spark-class-launcher-output-%ERRORLEVEL%.txt
 "%RUNNER%" -Xmx128m -cp "%LAUNCH_CLASSPATH%" org.apache.spark.launcher.Main %* > %LAUNCHER_OUTPUT%
 for /f "tokens=*" %%i in (%LAUNCHER_OUTPUT%) do (
   set SPARK_CMD=%%i
 )
 del %LAUNCHER_OUTPUT%
+%SPARK_CMD%
+Powershell.exe -f "%~dp0run_spark_launcher.ps1" %*
 %SPARK_CMD%
