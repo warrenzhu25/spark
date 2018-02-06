@@ -22,4 +22,6 @@ rem environment, it just launches a new cmd to do the real work.
 
 rem The outermost quotes are used to prevent Windows command line parse error
 rem when there are some quotes in parameters, see SPARK-21877.
-cmd /V /E /C ""%~dp0spark-submit2.cmd" %*"
+rem Having outermost quotes can fix SPARK-21877, but causing
+rem nodeLabelExpression feature tag not working. So we keep it without outermost quotes
+cmd /V /E /C %~dp0spark-submit2.cmd %*
