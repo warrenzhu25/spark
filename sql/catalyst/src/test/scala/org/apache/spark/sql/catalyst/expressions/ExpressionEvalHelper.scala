@@ -245,6 +245,7 @@ trait ExpressionEvalHelper extends GeneratorDrivenPropertyChecks with PlanTestBa
         Alias(expression, s"Optimized($expression)1")() ::
           Alias(expression, s"Optimized($expression)2")() :: Nil),
       expression)
+    plan.initialize(0)
 
     plan.initialize(0)
     plan(inputRow)
