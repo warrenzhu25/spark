@@ -471,6 +471,11 @@ package object config {
   private[spark] val CPUS_PER_TASK =
     ConfigBuilder("spark.task.cpus").version("0.5.0").intConf.createWithDefault(1)
 
+  private[spark] val EXECUTOR_BIND_ADDRESS = ConfigBuilder("spark.executor.bindAddress")
+    .doc("Address where to bind network listen sockets on the executor.")
+    .stringConf
+    .createWithDefault(Utils.localHostName())
+
   private[spark] val DYN_ALLOCATION_ENABLED =
     ConfigBuilder("spark.dynamicAllocation.enabled")
       .version("1.2.0")

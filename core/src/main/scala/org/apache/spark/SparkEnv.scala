@@ -202,6 +202,7 @@ object SparkEnv extends Logging {
       numCores: Int,
       ioEncryptionKey: Option[Array[Byte]],
       isLocal: Boolean): SparkEnv = {
+    val bindAddress = conf.get(EXECUTOR_BIND_ADDRESS)
     val env = create(
       conf,
       executorId,
