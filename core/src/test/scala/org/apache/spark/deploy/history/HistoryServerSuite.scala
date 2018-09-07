@@ -82,6 +82,7 @@ class HistoryServerSuite extends SparkFunSuite with BeforeAndAfter with Matchers
       .set("spark.history.fs.update.interval", "0")
       .set("spark.testing", "true")
       .set(LOCAL_STORE_DIR, storeDir.getAbsolutePath())
+      .set("spark.eventLog.logStageExecutorMetrics.enabled", "true")
     conf.setAll(extraConf)
     provider = new FsHistoryProvider(conf)
     provider.checkForLogs()
@@ -157,6 +158,33 @@ class HistoryServerSuite extends SparkFunSuite with BeforeAndAfter with Matchers
 //    "one stage json" -> "applications/local-1422981780767/stages/1",
     // test fails on Windows
 //    "one stage attempt json" -> "applications/local-1422981780767/stages/1/0",
+    "minDate app list json" -> "applications?minDate=2015-02-10",
+    "maxDate app list json" -> "applications?maxDate=2015-02-10",
+    "maxDate2 app list json" -> "applications?maxDate=2015-02-03T16:42:40.000GMT",
+    "minEndDate app list json" -> "applications?minEndDate=2015-05-06T13:03:00.950GMT",
+    "maxEndDate app list json" -> "applications?maxEndDate=2015-05-06T13:03:00.950GMT",
+    "minEndDate and maxEndDate app list json" ->
+      "applications?minEndDate=2015-03-16&maxEndDate=2015-05-06T13:03:00.950GMT",
+    "minDate and maxEndDate app list json" ->
+      "applications?minDate=2015-03-16&maxEndDate=2015-05-06T13:03:00.950GMT",
+    "limit app list json" -> "applications?limit=3",
+    "one app json" -> "applications/local-1422981780767",
+    "one app multi-attempt json" -> "applications/local-1426533911241",
+    "job list json" -> "applications/local-1422981780767/jobs",
+    "job list from multi-attempt app json(1)" -> "applications/local-1426533911241/1/jobs",
+    "job list from multi-attempt app json(2)" -> "applications/local-1426533911241/2/jobs",
+    "one job json" -> "applications/local-1422981780767/jobs/0",
+    "succeeded job list json" -> "applications/local-1422981780767/jobs?status=succeeded",
+    "succeeded&failed job list json" ->
+      "applications/local-1422981780767/jobs?status=succeeded&status=failed",
+    "executor list json" -> "applications/local-1422981780767/executors",
+    "executor list with executor metrics json" ->
+      "applications/application_1506645932520_24630151/executors",
+    "stage list json" -> "applications/local-1422981780767/stages",
+    "complete stage list json" -> "applications/local-1422981780767/stages?status=complete",
+    "failed stage list json" -> "applications/local-1422981780767/stages?status=failed",
+    "one stage json" -> "applications/local-1422981780767/stages/1",
+    "one stage attempt json" -> "applications/local-1422981780767/stages/1/0",
 
     "stage task summary w shuffle write"
       -> "applications/local-1430917381534/stages/0/0/taskSummary",
