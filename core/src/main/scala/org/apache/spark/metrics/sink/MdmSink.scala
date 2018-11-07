@@ -33,7 +33,6 @@ class MdmSink(val property: Properties, val registry: MetricRegistry,
 
   val MDM_KEY_MONITORING_ACCOUNT = "monitoringAccount"
   val MDM_KEY_METRIC_NAMESPACE = "metricNamespace"
-  val MDM_KEY_EXTRA_SOURCE_NAME_REGEX = "extraSourceNameRegex"
   val MDM_KEY_PERIOD = "period"
   val MDM_KEY_UNIT = "unit"
 
@@ -43,11 +42,6 @@ class MdmSink(val property: Properties, val registry: MetricRegistry,
   }
 
   val metricNamespace = Option(property.getProperty(MDM_KEY_METRIC_NAMESPACE)) match {
-    case Some(s) => s
-    case None => ""
-  }
-
-  val extraSourceNameRegex = Option(property.getProperty(MDM_KEY_EXTRA_SOURCE_NAME_REGEX)) match {
     case Some(s) => s
     case None => ""
   }
@@ -67,7 +61,6 @@ class MdmSink(val property: Properties, val registry: MetricRegistry,
   val reporter: MdmReporter = MdmReporter.forRegistry(registry)
     .overrideMonitoringAccount(this.monitoringAccount)
     .overrideMetricNamespace(this.metricNamespace)
-    .addExtraSourceNameRegex(this.extraSourceNameRegex)
     .convertDurationsTo(TimeUnit.MILLISECONDS)
     .convertRatesTo(TimeUnit.SECONDS)
     .build()

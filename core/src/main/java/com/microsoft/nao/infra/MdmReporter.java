@@ -3,18 +3,18 @@ package com.microsoft.nao.infra;
 import com.codahale.metrics.*;
 import org.apache.spark.SparkEnv;
 
-import java.net.InetAddress;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.Arrays;
 import java.util.Map;
 import java.util.SortedMap;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public class MdmReporter extends ScheduledReporter {
 
-    private static final String headSourceNameRegex = "^(.*\\.StreamingMetrics";
-    private static final String metricNameGroupName = "MetricName";
-    private static final String tailSourceNameRegex = String.format("[^.]+)\\.(?<%s>.+)$", metricNameGroupName);
+    private static final Logger logger = LoggerFactory.getLogger(MdmReporter.class);
+
     private static final String metricNameSplitSeperator = "\\.";
 
     /**
@@ -37,7 +37,6 @@ public class MdmReporter extends ScheduledReporter {
         private MetricFilter filter;
         private String monitoringAccount;
         private String metricNamespace;
-        private String extraSourceNameRegex;
 
         private Builder(MetricRegistry registry) {
             this.registry = registry;
@@ -45,16 +44,8 @@ public class MdmReporter extends ScheduledReporter {
             this.durationUnit = TimeUnit.MILLISECONDS;
             this.filter = MetricFilter.ALL;
 
-            this.monitoringAccount = "socbj";
-            String environmentName = System.getenv("environment");
-            if (environmentName != null && !environmentName.equals("")) {
-                this.metricNamespace = "SparkMetrics/v2/" + environmentName;
-            }
-            else {
-                this.metricNamespace = "SparkMetrics/v2/_default";
-            }
-
-            this.extraSourceNameRegex = "";
+            this.monitoringAccount = "mtspark";
+            this.metricNamespace = "MTSparkMetrics";
         }
 
         public Builder overrideMonitoringAccount(String monitoringAccount) {
@@ -73,13 +64,6 @@ public class MdmReporter extends ScheduledReporter {
             return this;
         }
 
-        public Builder addExtraSourceNameRegex(String extraSourceNameRegex) {
-            if (extraSourceNameRegex != null && !extraSourceNameRegex.equals("")) {
-                this.extraSourceNameRegex = this.extraSourceNameRegex + "|" + extraSourceNameRegex;
-            }
-
-            return this;
-        }
 
         /**
          * Convert rates to the given time unit.
@@ -120,43 +104,30 @@ public class MdmReporter extends ScheduledReporter {
          * @return a {@link MdmReporter}
          */
         public MdmReporter build() {
-            if (this.extraSourceNameRegex != null && this.extraSourceNameRegex.equals("")) {
-                this.extraSourceNameRegex = headSourceNameRegex + "|" + this.extraSourceNameRegex + "|" + tailSourceNameRegex;
-            }
-            else {
-                this.extraSourceNameRegex = headSourceNameRegex + "|" + tailSourceNameRegex;
-            }
-
+            Mdm mdm = new Mdm(this.monitoringAccount, this.metricNamespace);
             return new MdmReporter(
                     this.registry,
-                    this.monitoringAccount,
-                    this.metricNamespace,
-                    this.extraSourceNameRegex,
+                    mdm,
                     rateUnit,
                     durationUnit,
                     filter);
         }
     }
 
-    private final String monitoringAccount;
-    private final String metricNamespace;
-    private final String sourceNameRegexString;
+    private Mdm mdm;
+    private String applicationName;
 
-    private final String ParseFailureMetricName = "ParseFailureSparkMetrics";
+    private final String[] dimensions = {"ApplicationId", "ApplicationName","ExecutorId"};
 
-    private MdmReporter(
+
+    public MdmReporter(
             MetricRegistry registry,
-            String monitoringAccount,
-            String metricNamespace,
-            String sourceNameRegexString,
+            Mdm mdm,
             TimeUnit rateUnit,
             TimeUnit durationUnit,
             MetricFilter filter) {
         super(registry, "mdm-reporter", filter, rateUnit, durationUnit);
-
-        this.monitoringAccount = monitoringAccount;
-        this.metricNamespace = metricNamespace;
-        this.sourceNameRegexString = sourceNameRegexString;
+        this.mdm = mdm;
     }
 
     @Override
@@ -165,102 +136,67 @@ public class MdmReporter extends ScheduledReporter {
                        SortedMap<String, Histogram> histograms,
                        SortedMap<String, Meter> meters,
                        SortedMap<String, Timer> timers) {
-        if (!gauges.isEmpty()) {
-            for (Map.Entry<String, Gauge> entry : gauges.entrySet()) {
-                printGauge(entry);
-            }
+        this.applicationName = SparkEnv.get().conf().get("spark.app.name", "UnKnown");
+
+        printGauges(gauges);
+        printCounters(counters);
+    }
+
+    private void printGauges(SortedMap<String, Gauge> metrics) {
+        for (Map.Entry<String, Gauge> entry : metrics.entrySet()) {
+            Gauge gauge = entry.getValue();
+            long value = formatToLong(gauge.getValue(), entry.getKey());
+            printMetric(entry.getKey(), value);
         }
     }
 
-    private void printGauge(Map.Entry<String, Gauge> entry) {
-        String entryName = entry.getKey();
-        String[] sections = entryName.split(metricNameSplitSeperator);
+    private void printCounters(SortedMap<String, Counter> metrics){
+        for (Map.Entry<String, Counter> entry : metrics.entrySet()) {
+            Counter counter = entry.getValue();
+            printMetric(entry.getKey(), counter.getCount());
+        }
+    }
 
-        MeasureMetric5D failureMetric = MeasureMetric5D.create(
-                this.monitoringAccount,
-                this.metricNamespace,
-                ParseFailureMetricName,
-                "Name",
-                "SourceNameRegex",
-                "RemainingString",
-                "ApplicationId",
-                "RootCause");
-
+    private void printMetric(String key, long value){
+        String[] sections = key.split(metricNameSplitSeperator);
         if (sections.length < 3) {
-            if (failureMetric != null) {
-                failureMetric.LogValue(1, entryName, "", "", "", "InsufficientSectionLength");
-            }
-
+            logger.warn(key + "is an invalid metric.");
             return;
-        }
-
-        String machineName;
-        try {
-            machineName = InetAddress.getLocalHost().getHostName();
-        }
-        catch (Exception e) {
-            machineName = "";
         }
 
         String applicationId = sections[0];
         String executorId = sections[1];
-        String sourceName = "";
-        String metricName = "";
+        String metricName = MetricRegistry.name("", Arrays.copyOfRange(sections, 2, sections.length));
 
-        StringBuilder remainingStringBuilder = new StringBuilder();
-        String joiner = "";
-        for (int i = 2; i < sections.length; ++i) {
-            remainingStringBuilder.append(joiner + sections[i]);
-            joiner = ".";
+        String[] dimensionsValue = {applicationId, applicationName, executorId};
+        this.mdm.ReportMetric3D(metricName, dimensions, dimensionsValue, value);
+    }
+
+    // MDM only accepts long, multiple 100 for percentage value.
+    private long formatToLong(Object o, String metricName){
+        if(metricName.endsWith(".usage") && o instanceof Double){
+            Double usage = ((Double) o ) * 100;
+            return usage.longValue();
         }
 
-        String remainingString = remainingStringBuilder.toString();
-        try {
-            Pattern sourceNameRegex = Pattern.compile(this.sourceNameRegexString);
-            Matcher m = sourceNameRegex.matcher(remainingString);
-            if (m.find()) {
-                sourceName = m.group(1);
-                metricName = m.group(metricNameGroupName);
-            } else {
-                if (failureMetric != null) {
-                    failureMetric.LogValue(1, entryName, this.sourceNameRegexString, remainingString, applicationId, "MatchFailure");
-                }
+        return formatToLong(o);
+    }
 
-                return;
-            }
-        }
-        catch (Exception e) {
-            if (failureMetric != null) {
-                failureMetric.LogValue(1, entryName, this.sourceNameRegexString, remainingString, applicationId, "MatchException");
-            }
-
-            return;
+    private long formatToLong(Object o) {
+        if (o instanceof Float) {
+            return ((Float) o).longValue();
+        } else if (o instanceof Double) {
+            return ((Double) o).longValue();
+        } else if (o instanceof Byte) {
+            return ((Byte) o).longValue();
+        } else if (o instanceof Short) {
+            return ((Short) o).longValue();
+        } else if (o instanceof Integer) {
+            return ((Integer) o).longValue();
+        } else if (o instanceof Long) {
+            return ((Long) o).longValue();
         }
 
-        MeasureMetric6D gaugeMetric = MeasureMetric6D.create(
-                this.monitoringAccount,
-                this.metricNamespace,
-                metricName,
-                "MachineName",
-                "Type",
-                "ApplicationId",
-                "ExecutorId",
-                "SourceName",
-                "ApplicationName");
-        long value;
-        String applicationName = "";
-        try {
-            applicationName = SparkEnv.get().conf().get("spark.app.name", "");
-            value = Long.parseLong(entry.getValue().getValue().toString());
-        }
-        catch (Exception e) {
-            if (failureMetric != null) {
-                failureMetric.LogValue(1, entryName, this.sourceNameRegexString, remainingString, applicationId, e.toString());
-            }
-
-            return;
-        }
-
-        gaugeMetric.LogValue(value, machineName, "Gauge", applicationId, executorId, sourceName, applicationName);
+        return -1;
     }
 }
