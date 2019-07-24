@@ -79,6 +79,10 @@ package object config {
     .stringConf
     .createWithDefault("default")
 
+  private[spark] val PRIORITY = ConfigBuilder("spark.yarn.priority")
+    .stringConf
+    .createWithDefault(null)
+
   private[spark] val HISTORY_SERVER_ADDRESS = ConfigBuilder("spark.yarn.historyServer.address")
     .stringConf
     .createOptional

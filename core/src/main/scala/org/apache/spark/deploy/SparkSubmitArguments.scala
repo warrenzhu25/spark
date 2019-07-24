@@ -54,6 +54,7 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
   var driverExtraLibraryPath: String = null
   var driverExtraJavaOptions: String = null
   var queue: String = null
+  var priority: String = null
   var numExecutors: String = null
   var files: String = null
   var archives: String = null
@@ -204,6 +205,7 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
     numExecutors = Option(numExecutors)
       .getOrElse(sparkProperties.get("spark.executor.instances").orNull)
     queue = Option(queue).orElse(sparkProperties.get("spark.yarn.queue")).orNull
+    priority = Option(priority).orElse(sparkProperties.get("spark.yarn.priority")).orNull
     keytab = Option(keytab).orElse(sparkProperties.get("spark.yarn.keytab")).orNull
     principal = Option(principal).orElse(sparkProperties.get("spark.yarn.principal")).orNull
     dynamicAllocationEnabled =
@@ -341,6 +343,7 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
     |  driverExtraJavaOptions  $driverExtraJavaOptions
     |  supervise               $supervise
     |  queue                   $queue
+    |  priority                $priority
     |  numExecutors            $numExecutors
     |  files                   $files
     |  pyFiles                 $pyFiles
@@ -431,6 +434,9 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
 
       case QUEUE =>
         queue = value
+
+      case PRIORITY =>
+        priority = value
 
       case FILES =>
         files = Utils.resolveURIs(value)
@@ -591,6 +597,7 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
         |
         | YARN-only:
         |  --queue QUEUE_NAME          The YARN queue to submit to (Default: "default").
+        |  --priority PRIORITY         The priority of your YARN application (Default: Cluster/Queue priority).
         |  --num-executors NUM         Number of executors to launch (Default: 2).
         |                              If dynamic allocation is enabled, the initial number of
         |                              executors will be at least NUM.

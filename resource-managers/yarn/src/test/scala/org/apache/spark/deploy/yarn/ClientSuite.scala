@@ -176,6 +176,7 @@ class ClientSuite extends SparkFunSuite with Matchers {
       .set(MAX_APP_ATTEMPTS, 42)
       .set("spark.app.name", "foo-test-app")
       .set(QUEUE_NAME, "staging-queue")
+      .set(PRIORITY, "1129")
     val args = new ClientArguments(Array())
 
     val appContext = Records.newRecord(classOf[ApplicationSubmissionContext])
@@ -189,6 +190,7 @@ class ClientSuite extends SparkFunSuite with Matchers {
 
     appContext.getApplicationName should be ("foo-test-app")
     appContext.getQueue should be ("staging-queue")
+    appContext.getPriority.getPriority should be (1129)
     appContext.getAMContainerSpec should be (containerLaunchContext)
     appContext.getApplicationType should be ("SPARK")
     appContext.getClass.getMethods.filter(_.getName == "getApplicationTags").foreach { method =>

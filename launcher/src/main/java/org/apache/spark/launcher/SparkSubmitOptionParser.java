@@ -76,6 +76,7 @@ class SparkSubmitOptionParser {
   protected final String NUM_EXECUTORS = "--num-executors";
   protected final String PRINCIPAL = "--principal";
   protected final String QUEUE = "--queue";
+  protected final String PRIORITY = "--priority";
 
   /**
    * This is the canonical list of spark-submit options. Each entry in the array contains the
@@ -114,6 +115,7 @@ class SparkSubmitOptionParser {
     { PROXY_USER },
     { PY_FILES },
     { QUEUE },
+    { PRIORITY },
     { REPOSITORIES },
     { STATUS },
     { TOTAL_EXECUTOR_CORES },

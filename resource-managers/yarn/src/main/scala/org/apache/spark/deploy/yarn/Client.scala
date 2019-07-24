@@ -240,6 +240,9 @@ private[spark] class Client(
     appContext.setQueue(sparkConf.get(QUEUE_NAME))
     appContext.setAMContainerSpec(containerContext)
     appContext.setApplicationType("SPARK")
+    if(sparkConf.get(PRIORITY) != null) {
+      appContext.setPriority(Priority.newInstance(sparkConf.get(PRIORITY).toInt))
+    }
 
     sparkConf.get(APPLICATION_TAGS).foreach { tags =>
       appContext.setApplicationTags(new java.util.HashSet[String](tags.asJava))
