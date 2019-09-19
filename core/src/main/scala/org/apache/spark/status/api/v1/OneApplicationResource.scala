@@ -19,7 +19,7 @@ package org.apache.spark.status.api.v1
 import java.io.OutputStream
 import java.util.{List => JList}
 import java.util.zip.ZipOutputStream
-import javax.ws.rs._
+import javax.ws.rs.{DefaultValue, GET, Path, PathParam, Produces, QueryParam}
 import javax.ws.rs.core.{MediaType, Response, StreamingOutput}
 
 import scala.util.control.NonFatal
@@ -80,6 +80,28 @@ private[v1] class AbstractApplicationResource extends BaseAppResource {
 
   @Path("stages")
   def stages(): Class[StagesResource] = classOf[StagesResource]
+
+  @GET
+  @Path("allTasks")
+  def allTasks(@QueryParam("status") statuses: JList[StageStatus],
+               @QueryParam("details") @DefaultValue("true") details: Boolean): Seq[StageData] = {
+    // get all stageIDs
+    val stageIds = withUI(_.store.stageList(statuses))
+    // get all stages with tasks
+    var ret = Seq[StageData]()
+    if (stageIds.nonEmpty) {
+      stageIds.foreach( stageData => withUI {
+        ui =>
+          var oneStageRet = ui.store.stageData(stageData.stageId, details = details)
+          if (oneStageRet.nonEmpty) {
+            ret ++= oneStageRet
+          }
+      } )
+      ret
+    } else {
+      throw new NotFoundException(s"unknown app stages")
+    }
+  }
 
   @GET
   @Path("storage/rdd")
