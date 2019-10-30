@@ -258,6 +258,18 @@
     <!-- Needed for consistent times -->
     <maven.build.timestamp.format>yyyy-MM-dd HH:mm:ss z</maven.build.timestamp.format>
   </properties>
+
+  <distributionManagement>
+    <snapshotRepository>
+      <id>msasg-visualstudio-com-msasg-multitenancy-test3</id>
+      <url>https://msasg.pkgs.visualstudio.com/_packaging/MultiTenancy-Test3/maven/v1</url>
+    </snapshotRepository>
+    <repository>
+      <id>msasg-visualstudio-com-msasg-multitenancy-test3</id>
+      <url>https://msasg.pkgs.visualstudio.com/_packaging/MultiTenancy-Test3/maven/v1</url>
+    </repository>
+  </distributionManagement>
+
   <repositories>
     <repository>
       <id>msasg-visualstudio-com-msasg-multitenancy-test3</id>
