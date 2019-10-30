@@ -5,5 +5,5 @@ rem This script repeats part some of code from YarnForAP\Hadoop\genHadoopVersion
 
 set cmd="git log -n 1 --pretty=format:"%%H""
 for /f %%i in (' %cmd% ') do set SPARK_VERSION=%%i
-set SPARK_VERSION=2.1-%SPARK_VERSION:~0,8%
+set SPARK_VERSION=2.4.4-%SPARK_VERSION:~0,8%
 echo "Spark Version for this build: %SPARK_VERSION%"
