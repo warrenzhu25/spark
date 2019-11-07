@@ -2729,6 +2729,15 @@
     </profile>
 
     <profile>
+      <id>hadoop-2.9.2-MT</id>
+      <properties>
+        <hadoop.version>2.9.2-MT-SNAPSHOT</hadoop.version>
+        <curator.version>2.6.0</curator.version>
+        <zookeeper.version>3.4.8-AUTOPILOT</zookeeper.version>
+      </properties>
+    </profile>
+
+    <profile>
       <id>hadoop-3.1</id>
       <properties>
         <hadoop.version>3.1.0</hadoop.version>
