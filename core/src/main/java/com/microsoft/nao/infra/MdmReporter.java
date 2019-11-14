@@ -12,10 +12,13 @@ import java.util.SortedMap;
 import java.util.concurrent.TimeUnit;
 
 public class MdmReporter extends ScheduledReporter {
-
     private static final Logger logger = LoggerFactory.getLogger(MdmReporter.class);
-
     private static final String metricNameSplitSeperator = "\\.";
+    private static final String[] dimensions = {"ApplicationId", "ApplicationName", "ExecutorId"};
+    private static final String APP_NAME_UNKNOWN = "UnKnown";
+
+    private final Mdm mdm;
+    private final String applicationName;
 
     /**
      * Returns a new {@link Builder} for {@link MdmReporter}.
@@ -63,7 +66,6 @@ public class MdmReporter extends ScheduledReporter {
 
             return this;
         }
-
 
         /**
          * Convert rates to the given time unit.
@@ -114,13 +116,7 @@ public class MdmReporter extends ScheduledReporter {
         }
     }
 
-    private Mdm mdm;
-    private String applicationName;
-
-    private final String[] dimensions = {"ApplicationId", "ApplicationName","ExecutorId"};
-
-
-    public MdmReporter(
+    private MdmReporter(
             MetricRegistry registry,
             Mdm mdm,
             TimeUnit rateUnit,
@@ -128,6 +124,7 @@ public class MdmReporter extends ScheduledReporter {
             MetricFilter filter) {
         super(registry, "mdm-reporter", filter, rateUnit, durationUnit);
         this.mdm = mdm;
+        this.applicationName = getApplicationName();
     }
 
     @Override
@@ -136,10 +133,19 @@ public class MdmReporter extends ScheduledReporter {
                        SortedMap<String, Histogram> histograms,
                        SortedMap<String, Meter> meters,
                        SortedMap<String, Timer> timers) {
-        this.applicationName = SparkEnv.get().conf().get("spark.app.name", "UnKnown");
-
         printGauges(gauges);
         printCounters(counters);
+    }
+
+    private String getApplicationName() {
+        SparkEnv sparkEnv = SparkEnv.get();
+
+        if (sparkEnv == null) {
+            logger.warn("SparkEnv is null when get app name");
+            return APP_NAME_UNKNOWN;
+        }
+
+        return sparkEnv.conf().get("spark.app.name", APP_NAME_UNKNOWN);
     }
 
     private void printGauges(SortedMap<String, Gauge> metrics) {
