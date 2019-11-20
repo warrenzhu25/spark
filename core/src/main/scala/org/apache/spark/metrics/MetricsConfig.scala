@@ -42,13 +42,6 @@ private[spark] class MetricsConfig(conf: SparkConf) extends Logging {
     prop.setProperty("*.sink.servlet.path", "/metrics/json")
     prop.setProperty("master.sink.servlet.path", "/metrics/master/json")
     prop.setProperty("applications.sink.servlet.path", "/metrics/applications/json")
-
-    // Let's keep this enabled by default.
-    if (this.conf.getBoolean("spark.nao.mdmSink.enabled", true)) {
-      prop.setProperty("*.sink.mdm.class", "org.apache.spark.metrics.sink.MdmSink")
-      prop.setProperty("*.sink.mdm.period", "1")
-      prop.setProperty("*.sink.mdm.unit", "minutes")
-    }
   }
 
   /**

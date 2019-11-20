@@ -19,12 +19,13 @@ package org.apache.spark.metrics.sink
 
 import java.util.Properties
 import java.util.concurrent.TimeUnit
+import java.util.regex.Pattern
 
-import com.codahale.metrics.MetricRegistry
+import com.codahale.metrics.{Metric, MetricFilter, MetricRegistry}
 import com.microsoft.nao.infra.MdmReporter
 
-import org.apache.spark.metrics.MetricsSystem
 import org.apache.spark.SecurityManager
+import org.apache.spark.metrics.MetricsSystem
 
 class MdmSink(val property: Properties, val registry: MetricRegistry,
               securityMgr: SecurityManager) extends Sink {
@@ -35,6 +36,7 @@ class MdmSink(val property: Properties, val registry: MetricRegistry,
   val MDM_KEY_METRIC_NAMESPACE = "metricNamespace"
   val MDM_KEY_PERIOD = "period"
   val MDM_KEY_UNIT = "unit"
+  val MDM_KEY_METRIC_PATTERN = "metricPattern"
 
   val monitoringAccount = Option(property.getProperty(MDM_KEY_MONITORING_ACCOUNT)) match {
     case Some(s) => s
@@ -56,6 +58,11 @@ class MdmSink(val property: Properties, val registry: MetricRegistry,
     case None => TimeUnit.valueOf(MDM_DEFAULT_UNIT)
   }
 
+  val metricRegex: Option[Pattern] = Option(property.getProperty(MDM_KEY_METRIC_PATTERN)) match {
+    case Some(s) => Some(Pattern.compile(s))
+    case None => None
+  }
+
   MetricsSystem.checkMinimalPollingPeriod(pollUnit, pollPeriod)
 
   val reporter: MdmReporter = MdmReporter.forRegistry(registry)
@@ -63,6 +70,10 @@ class MdmSink(val property: Properties, val registry: MetricRegistry,
     .overrideMetricNamespace(this.metricNamespace)
     .convertDurationsTo(TimeUnit.MILLISECONDS)
     .convertRatesTo(TimeUnit.SECONDS)
+    .filter(new MetricFilter {
+      def matches(name: String, metric: Metric): Boolean =
+        metricRegex.forall(_.matcher(name).matches())
+    })
     .build()
 
   override def start() {

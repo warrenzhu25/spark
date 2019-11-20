@@ -19,7 +19,7 @@ package org.apache.spark.metrics.sink
 
 import java.util.Properties
 
-import com.codahale.metrics.{Counter, Gauge, MetricRegistry}
+import com.codahale.metrics.{Counter, Gauge, Metric, MetricRegistry}
 import com.microsoft.nao.infra.{Mdm, MdmReporter}
 import org.mockito.Matchers.{any, anyLong, anyString}
 import org.mockito.Mockito._
@@ -53,7 +53,11 @@ class MdmSinkSuite extends SparkFunSuite with  BeforeAndAfter{
     SparkEnv.set(mockSparkEnv)
     doReturn(sparkConf).when(mockSparkEnv).conf
 
-    sink = new MdmSink(new Properties, new MetricRegistry, new SecurityManager(sparkConf))
+    val properties = new Properties
+    properties.setProperty("metricPattern",
+      s"^(?!$inputAppId\\.$inputExeId\\.excludedMetricPart1\\.).*$$")
+
+    sink = new MdmSink(properties, new MetricRegistry, new SecurityManager(sparkConf))
 
     // Mock Mdm
     mockMdm = mock(classOf[Mdm])
@@ -122,6 +126,15 @@ class MdmSinkSuite extends SparkFunSuite with  BeforeAndAfter{
     // Metrics end with ".usage" represents a percentage.
     // Mdm only accepts Long, do a trick by multiplying 100
     assert(mdmMetric.value == (gauge.getValue * 100 ).toLong)
+  }
+
+  test("metric Mdm Sink with filter") {
+    val inputMetricName = "excludedMetricPart1.excludedMetricPart2"
+    val fullMetricName = MetricRegistry.name(inputAppId, inputExeId, inputMetricName)
+    sink.registry.register(fullMetricName, new Metric() {})
+    sink.report()
+
+    assert(mdmMetric == null)
   }
 
   private def assert(mdmDimensionsValue: Array[String]): Unit = {
