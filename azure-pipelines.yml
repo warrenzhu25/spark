@@ -1,0 +1,79 @@
+jobs:
+  - job: BuildSpark
+    displayName: Build Spark
+    timeoutInMinutes: 0
+
+    pool:
+      name: MultitenancyAzureTest
+      demands: Maven
+
+    variables:
+      Hadoop.Definition: 9306
+      Hadoop.Home: $(Pipeline.Workspace)\Hadoop
+      Hadoop.Version: 2.9.2-MT-SNAPSHOT
+
+    steps:
+      - script: git config --global core.autocrlf input
+        displayName: Configure Git
+
+      - checkout: self
+
+      - task: DownloadBuildArtifacts@0
+        displayName: Download Maven settings
+        inputs:
+          buildType: specific
+          project: b9b38275-a912-4222-a7b7-0b8b968719c0
+          pipeline: 7421
+          buildVersionToDownload: latestFromBranch
+          artifactName: settings
+
+      - powershell: |
+          $url = "$(System.TeamFoundationCollectionUri)$(System.TeamProjectId)/_apis/build/builds?definitions=$(Hadoop.Definition)&resultFilter=succeeded&api-version=5.0"
+          $builds = Invoke-RestMethod -Uri $url -Headers @{ Authorization = "Bearer $(System.AccessToken)" }
+          $tag = $builds.value[0].sourceVersion
+          Write-Host "##vso[task.setvariable variable=Hadoop.Tag]$tag"
+        displayName: Retrieve Hadoop tag
+
+      - task: DownloadPipelineArtifact@2
+        displayName: Download Hadoop
+        inputs:
+          buildType: specific
+          project: b9b38275-a912-4222-a7b7-0b8b968719c0
+          definition: $(Hadoop.Definition)
+          tags: $(Hadoop.Tag)
+          artifactName: Hadoop
+          targetPath: $(Hadoop.Home)
+
+      - powershell: |
+          $files = Get-ChildItem -Path "$(Hadoop.Home)\share" -Filter "*$(Hadoop.Version).jar" -Recurse
+          $system = Get-WmiObject -Class Win32_ComputerSystem
+          $block = {
+              Param([string] $file)
+              mvn install:install-file "-Dfile=$file"
+          }
+          foreach ($file in $files) {
+              while ($(Get-Job -State Running).Count -ge $system.NumberOfLogicalProcessors) {
+                  Start-Sleep -Milliseconds 3
+              }
+              Start-Job -ScriptBlock $block -ArgumentList $file.FullName
+          }
+          while ($(Get-Job -State Running).Count -gt 0) {
+              Start-Sleep 1
+          }
+          Get-Job | Remove-Job
+        displayName: Install Hadoop artifacts
+
+      - powershell: Write-Host "##vso[task.prependpath]$(Hadoop.Home)\bin"
+        displayName: Set Hadoop path
+
+      - task: Maven@3
+        displayName: Build
+        inputs:
+          goals: install
+          options: >-
+            -Dcheckstyle.skip=true
+            -Dhadoop.home.dir=$(Hadoop.Home)
+            -s $(System.ArtifactsDirectory)\settings\settings.xml
+            -T 1C
+            -P hadoop-$(Hadoop.Version),hive-thriftserver,hive,yarn
+          mavenOptions: -Xms512m -Xmx2g -XX:ReservedCodeCacheSize=512m
