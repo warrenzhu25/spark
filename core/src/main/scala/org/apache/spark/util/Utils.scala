@@ -26,7 +26,7 @@ import java.net._
 import java.nio.ByteBuffer
 import java.nio.channels.{Channels, FileChannel}
 import java.nio.charset.StandardCharsets
-import java.nio.file.Files
+import java.nio.file.{Files, Paths}
 import java.security.SecureRandom
 import java.util.{Locale, Properties, Random, UUID}
 import java.util.concurrent._
@@ -1062,6 +1062,27 @@ private[spark] object Utils extends Logging {
       JavaUtils.deleteRecursively(file)
       ShutdownHookManager.removeShutdownDeleteDir(file)
     }
+  }
+
+  /**
+   * Delete a file or directory and its contents recursively.
+   * Don't follow directories if they are symlinks.
+   * Ignores an exception if deletion is unsuccessful.
+   */
+  def deleteRecursivelyQuietly(file: File): Unit = {
+    try {
+      deleteRecursively(file)
+    } catch {
+      case e: IOException =>
+        logError(s"Exception while deleting file: $file", e)
+    }
+  }
+
+  /**
+   * Check to see if file is a symbolic link.
+   */
+  def isSymlink(file: File): Boolean = {
+    return Files.isSymbolicLink(Paths.get(file.toURI))
   }
 
   /**

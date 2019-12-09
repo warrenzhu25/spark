@@ -249,7 +249,7 @@ class GBTClassifierSuite extends MLTest with DefaultReadWriteTest {
     MLTestingUtils.checkCopyAndUids(gbt, model)
 
     sc.checkpointDir = None
-    Utils.deleteRecursively(tempDir)
+    Utils.deleteRecursivelyQuietly(tempDir)
   }
 
   test("should support all NumericType labels and not support other types") {

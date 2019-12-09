@@ -71,8 +71,8 @@ class ExecutorClassLoaderSuite
 
   override def afterAll() {
     try {
-      Utils.deleteRecursively(tempDir1)
-      Utils.deleteRecursively(tempDir2)
+      Utils.deleteRecursivelyQuietly(tempDir1)
+      Utils.deleteRecursivelyQuietly(tempDir2)
       SparkEnv.set(null)
     } finally {
       super.afterAll()

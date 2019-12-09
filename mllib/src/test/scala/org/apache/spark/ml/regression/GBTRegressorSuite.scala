@@ -124,7 +124,7 @@ class GBTRegressorSuite extends MLTest with DefaultReadWriteTest {
     val model = gbt.fit(df)
 
     sc.checkpointDir = None
-    Utils.deleteRecursively(tempDir)
+    Utils.deleteRecursivelyQuietly(tempDir)
   }
 
   test("should support all NumericType labels and not support other types") {

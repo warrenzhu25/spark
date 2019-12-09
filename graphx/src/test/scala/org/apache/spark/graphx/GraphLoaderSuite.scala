@@ -41,7 +41,7 @@ class GraphLoaderSuite extends SparkFunSuite with LocalSparkContext {
           _ + _)
         assert(neighborAttrSums.collect.toSet === Set((0: VertexId, 100)))
       } finally {
-        Utils.deleteRecursively(tmpDir)
+        Utils.deleteRecursivelyQuietly(tmpDir)
       }
     }
   }

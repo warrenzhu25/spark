@@ -152,7 +152,7 @@ class RandomForestSuite extends SparkFunSuite with MLlibTestSparkContext {
           DecisionTreeSuite.checkEqual(treeA, treeB)
         }
       } finally {
-        Utils.deleteRecursively(tempDir)
+        Utils.deleteRecursivelyQuietly(tempDir)
       }
     }
   }

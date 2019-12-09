@@ -176,7 +176,7 @@ private[sql] trait SQLTestUtilsBase
   protected def withTempPath(f: File => Unit): Unit = {
     val path = Utils.createTempDir()
     path.delete()
-    try f(path) finally Utils.deleteRecursively(path)
+    try f(path) finally Utils.deleteRecursivelyQuietly(path)
   }
 
   /**
@@ -215,7 +215,7 @@ private[sql] trait SQLTestUtilsBase
     try f(dir) finally {
       // wait for all tasks to finish before deleting files
       waitForTasksToFinish()
-      Utils.deleteRecursively(dir)
+      Utils.deleteRecursivelyQuietly(dir)
     }
   }
 
@@ -228,7 +228,7 @@ private[sql] trait SQLTestUtilsBase
     try f(files) finally {
       // wait for all tasks to finish before deleting files
       waitForTasksToFinish()
-      files.foreach(Utils.deleteRecursively)
+      files.foreach(Utils.deleteRecursivelyQuietly)
     }
   }
 

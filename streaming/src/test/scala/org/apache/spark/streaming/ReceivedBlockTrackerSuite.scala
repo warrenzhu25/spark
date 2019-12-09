@@ -57,7 +57,7 @@ class ReceivedBlockTrackerSuite
 
   after {
     allReceivedBlockTrackers.foreach { _.stop() }
-    Utils.deleteRecursively(checkpointDirectory)
+    Utils.deleteRecursivelyQuietly(checkpointDirectory)
   }
 
   test("block addition, and block to batch allocation") {

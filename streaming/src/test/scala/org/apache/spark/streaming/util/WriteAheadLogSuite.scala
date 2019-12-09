@@ -69,7 +69,7 @@ abstract class CommonWriteAheadLogTests(
   }
 
   after {
-    Utils.deleteRecursively(tempDir)
+    Utils.deleteRecursivelyQuietly(tempDir)
   }
 
   test(testPrefix + "read all logs") {

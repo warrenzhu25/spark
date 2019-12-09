@@ -212,7 +212,7 @@ class SVMSuite extends SparkFunSuite with MLlibTestSparkContext {
       assert(model.intercept == sameModel.intercept)
       assert(sameModel.getThreshold.isEmpty)
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
 
     // Save model with threshold.
@@ -222,7 +222,7 @@ class SVMSuite extends SparkFunSuite with MLlibTestSparkContext {
       val sameModel2 = SVMModel.load(sc, path)
       assert(model.getThreshold.get == sameModel2.getThreshold.get)
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
   }
 }

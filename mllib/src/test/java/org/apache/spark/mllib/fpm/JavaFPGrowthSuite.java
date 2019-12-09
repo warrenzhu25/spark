@@ -94,7 +94,7 @@ public class JavaFPGrowthSuite extends SharedSparkSession {
         long freq = itemset.freq();
       }
     } finally {
-      Utils.deleteRecursively(tempDir);
+      Utils.deleteRecursivelyQuietly(tempDir);
     }
   }
 }

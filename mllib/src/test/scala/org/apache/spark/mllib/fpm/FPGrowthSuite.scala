@@ -307,7 +307,7 @@ class FPGrowthSuite extends SparkFunSuite with MLlibTestSparkContext {
       }
       assert(freqItemsets3.toSet === newFreqItemsets.toSet)
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
   }
 
@@ -341,7 +341,7 @@ class FPGrowthSuite extends SparkFunSuite with MLlibTestSparkContext {
       }
       assert(freqItemsets3.toSet === newFreqItemsets.toSet)
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
   }
 }

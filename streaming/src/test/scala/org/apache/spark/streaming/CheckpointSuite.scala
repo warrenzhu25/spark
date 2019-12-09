@@ -215,13 +215,13 @@ class CheckpointSuite extends TestSuiteBase with DStreamCheckpointTester
 
   override def beforeFunction() {
     super.beforeFunction()
-    Utils.deleteRecursively(new File(checkpointDir))
+    Utils.deleteRecursivelyQuietly(new File(checkpointDir))
   }
 
   override def afterFunction() {
     try {
       if (ssc != null) { ssc.stop() }
-      Utils.deleteRecursively(new File(checkpointDir))
+      Utils.deleteRecursivelyQuietly(new File(checkpointDir))
     } finally {
       super.afterFunction()
     }
@@ -472,7 +472,7 @@ class CheckpointSuite extends TestSuiteBase with DStreamCheckpointTester
         3
       )
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
   }
 
@@ -501,7 +501,7 @@ class CheckpointSuite extends TestSuiteBase with DStreamCheckpointTester
         3
       )
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
   }
 
@@ -546,7 +546,7 @@ class CheckpointSuite extends TestSuiteBase with DStreamCheckpointTester
         3
       )
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
   }
 
@@ -757,7 +757,7 @@ class CheckpointSuite extends TestSuiteBase with DStreamCheckpointTester
         // As the driver shuts down in the middle of processing and the thread above sleeps
         // for a while, `testDir` can be not closed correctly at this point which causes the
         // test failure on Windows.
-        Utils.deleteRecursively(testDir)
+        Utils.deleteRecursivelyQuietly(testDir)
       } catch {
         case e: IOException if Utils.isWindows =>
           logWarning(e.getMessage)

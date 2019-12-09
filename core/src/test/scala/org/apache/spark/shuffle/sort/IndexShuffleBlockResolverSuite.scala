@@ -57,7 +57,7 @@ class IndexShuffleBlockResolverSuite extends SparkFunSuite with BeforeAndAfterEa
 
   override def afterEach(): Unit = {
     try {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     } finally {
       super.afterEach()
     }

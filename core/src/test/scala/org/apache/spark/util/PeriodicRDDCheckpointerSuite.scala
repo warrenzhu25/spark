@@ -76,7 +76,7 @@ class PeriodicRDDCheckpointerSuite extends SparkFunSuite with SharedSparkContext
       confirmCheckpointRemoved(rdd.rdd)
     }
 
-    Utils.deleteRecursively(tempDir)
+    Utils.deleteRecursivelyQuietly(tempDir)
   }
 }
 

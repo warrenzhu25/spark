@@ -57,7 +57,7 @@ class EventLoggingListenerSuite extends SparkFunSuite with LocalSparkContext wit
   }
 
   after {
-    Utils.deleteRecursively(testDir)
+    Utils.deleteRecursivelyQuietly(testDir)
   }
 
   test("Verify log file exist") {

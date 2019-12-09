@@ -155,7 +155,7 @@ private[kafka010] class KafkaTestUtils extends Logging {
     // throws an exception.
     brokerConf.logDirs.foreach { f =>
       try {
-        Utils.deleteRecursively(new File(f))
+        Utils.deleteRecursivelyQuietly(new File(f))
       } catch {
         case e: IOException if Utils.isWindows =>
           logWarning(e.getMessage)
@@ -321,13 +321,13 @@ private[kafka010] class KafkaTestUtils extends Logging {
       // Please see ZOOKEEPER-1844, which is fixed in 3.4.6+. It leads to test failures
       // on Windows if the directory deletion failure throws an exception.
       try {
-        Utils.deleteRecursively(snapshotDir)
+        Utils.deleteRecursivelyQuietly(snapshotDir)
       } catch {
         case e: IOException if Utils.isWindows =>
           logWarning(e.getMessage)
       }
       try {
-        Utils.deleteRecursively(logDir)
+        Utils.deleteRecursivelyQuietly(logDir)
       } catch {
         case e: IOException if Utils.isWindows =>
           logWarning(e.getMessage)

@@ -91,7 +91,7 @@ class IsotonicRegressionSuite extends SparkFunSuite with MLlibTestSparkContext w
       assert(model.predictions === sameModel.predictions)
       assert(model.isotonic === model.isotonic)
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
   }
 

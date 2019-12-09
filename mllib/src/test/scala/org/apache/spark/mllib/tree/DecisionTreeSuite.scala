@@ -426,7 +426,7 @@ class DecisionTreeSuite extends SparkFunSuite with MLlibTestSparkContext {
         val sameModel = DecisionTreeModel.load(sc, path)
         DecisionTreeSuite.checkEqual(model, sameModel)
       } finally {
-        Utils.deleteRecursively(tempDir)
+        Utils.deleteRecursivelyQuietly(tempDir)
       }
     }
   }

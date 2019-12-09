@@ -259,7 +259,7 @@ class CheckpointSuite extends SparkFunSuite with RDDCheckpointTester with LocalS
 
   override def afterEach(): Unit = {
     try {
-      Utils.deleteRecursively(checkpointDir)
+      Utils.deleteRecursivelyQuietly(checkpointDir)
     } finally {
       super.afterEach()
     }
@@ -617,7 +617,7 @@ class CheckpointCompressionSuite extends SparkFunSuite with LocalSparkContext {
       // Verify that the compressed content can be read back
       assert(rdd.collect().toSeq === (1 to 20))
     } finally {
-      Utils.deleteRecursively(checkpointDir)
+      Utils.deleteRecursivelyQuietly(checkpointDir)
     }
   }
 }

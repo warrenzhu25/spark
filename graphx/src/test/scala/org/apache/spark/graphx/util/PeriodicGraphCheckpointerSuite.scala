@@ -83,7 +83,7 @@ class PeriodicGraphCheckpointerSuite extends SparkFunSuite with LocalSparkContex
         confirmCheckpointRemoved(graph.graph)
       }
 
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
   }
 }

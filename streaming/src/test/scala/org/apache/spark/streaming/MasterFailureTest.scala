@@ -403,7 +403,7 @@ class FileGeneratingThread(input: Seq[String], testDir: Path, interval: Long)
       case e: Exception => logWarning("File generating in killing thread", e)
     } finally {
       fs.close()
-      Utils.deleteRecursively(localTestDir)
+      Utils.deleteRecursivelyQuietly(localTestDir)
     }
   }
 }

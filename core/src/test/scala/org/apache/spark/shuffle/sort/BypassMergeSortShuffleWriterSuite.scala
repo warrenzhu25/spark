@@ -122,7 +122,7 @@ class BypassMergeSortShuffleWriterSuite extends SparkFunSuite with BeforeAndAfte
 
   override def afterEach(): Unit = {
     try {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
       blockIdToFileMap.clear()
       temporaryFilesCreated.clear()
     } finally {

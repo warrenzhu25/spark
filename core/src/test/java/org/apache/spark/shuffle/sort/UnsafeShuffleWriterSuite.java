@@ -84,7 +84,7 @@ public class UnsafeShuffleWriterSuite {
 
   @After
   public void tearDown() {
-    Utils.deleteRecursively(tempDir);
+    Utils.deleteRecursivelyQuietly(tempDir);
     final long leakedMemory = taskMemoryManager.cleanUpAllAllocatedMemory();
     if (leakedMemory != 0) {
       fail("Test leaked " + leakedMemory + " bytes of managed memory");

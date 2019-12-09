@@ -140,7 +140,7 @@ class DataFrameReaderWriterSuite extends QueryTest with SharedSQLContext with Be
   private val dir = Utils.createTempDir(namePrefix = "input").getCanonicalPath
 
   before {
-    Utils.deleteRecursively(new File(dir))
+    Utils.deleteRecursivelyQuietly(new File(dir))
   }
 
   test("writeStream cannot be called on non-streaming datasets") {

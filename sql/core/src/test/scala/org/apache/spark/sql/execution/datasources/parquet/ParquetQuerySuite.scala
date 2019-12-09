@@ -264,8 +264,8 @@ class ParquetQuerySuite extends QueryTest with ParquetTest with SharedSQLContext
         spark.range(0, 10).toDF("a").write.parquet(new Path(basePath, "foo=1").toString)
         spark.range(0, 10).toDF("b").write.parquet(new Path(basePath, "foo=2").toString)
         // delete summary files, so if we don't merge part-files, one column will not be included.
-        Utils.deleteRecursively(new File(basePath + "/foo=1/_metadata"))
-        Utils.deleteRecursively(new File(basePath + "/foo=1/_common_metadata"))
+        Utils.deleteRecursivelyQuietly(new File(basePath + "/foo=1/_metadata"))
+        Utils.deleteRecursivelyQuietly(new File(basePath + "/foo=1/_common_metadata"))
         assert(spark.read.parquet(basePath).columns.length === expectedColumnNumber)
       }
     }

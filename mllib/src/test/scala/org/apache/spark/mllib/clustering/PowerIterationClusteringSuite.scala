@@ -172,7 +172,7 @@ class PowerIterationClusteringSuite extends SparkFunSuite with MLlibTestSparkCon
       val sameModel = PowerIterationClusteringModel.load(sc, path)
       PowerIterationClusteringSuite.checkEqual(model, sameModel)
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
   }
 }

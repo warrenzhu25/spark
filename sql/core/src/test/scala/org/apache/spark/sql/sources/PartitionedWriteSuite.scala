@@ -57,7 +57,7 @@ class PartitionedWriteSuite extends QueryTest with SharedSQLContext {
       spark.read.load(path.getCanonicalPath),
       (0 to 99).map(Row(1, _)).toSeq)
 
-    Utils.deleteRecursively(path)
+    Utils.deleteRecursivelyQuietly(path)
   }
 
   test("write many partitions with repeats") {
@@ -72,7 +72,7 @@ class PartitionedWriteSuite extends QueryTest with SharedSQLContext {
       spark.read.load(path.getCanonicalPath),
       (0 to 99).map(Row(1, _)).toSeq ++ (0 to 99).map(Row(1, _)).toSeq)
 
-    Utils.deleteRecursively(path)
+    Utils.deleteRecursivelyQuietly(path)
   }
 
   test("partitioned columns should appear at the end of schema") {

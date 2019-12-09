@@ -38,7 +38,7 @@ class PersistenceEngineSuite extends SparkFunSuite {
         new FileSystemPersistenceEngine(dir.getAbsolutePath, serializer)
       )
     } finally {
-      Utils.deleteRecursively(dir)
+      Utils.deleteRecursivelyQuietly(dir)
     }
   }
 

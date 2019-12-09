@@ -183,8 +183,8 @@ abstract class FileStreamSourceTest
     try {
       body(src, tmp)
     } finally {
-      Utils.deleteRecursively(src)
-      Utils.deleteRecursively(tmp)
+      Utils.deleteRecursivelyQuietly(src)
+      Utils.deleteRecursivelyQuietly(tmp)
     }
   }
 
@@ -1573,8 +1573,8 @@ class FileStreamSourceStressTestSuite extends FileStreamSourceTest {
       AddTextFileData(data.mkString("\n"), src, tmp)
     })
 
-    Utils.deleteRecursively(src)
-    Utils.deleteRecursively(tmp)
+    Utils.deleteRecursivelyQuietly(src)
+    Utils.deleteRecursivelyQuietly(tmp)
   }
 }
 

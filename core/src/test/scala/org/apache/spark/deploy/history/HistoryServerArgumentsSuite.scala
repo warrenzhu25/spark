@@ -63,7 +63,7 @@ class HistoryServerArgumentsSuite extends SparkFunSuite {
       assert(conf.get("spark.test.CustomPropertyA") === "blah")
       assert(conf.get("spark.test.CustomPropertyB") === "notblah")
     } finally {
-      Utils.deleteRecursively(tmpDir)
+      Utils.deleteRecursivelyQuietly(tmpDir)
     }
   }
 

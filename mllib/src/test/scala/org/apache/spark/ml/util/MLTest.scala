@@ -57,7 +57,7 @@ trait MLTest extends StreamTest with TempDirectory { self: Suite =>
 
   override def afterAll() {
     try {
-      Utils.deleteRecursively(new File(checkpointDir))
+      Utils.deleteRecursivelyQuietly(new File(checkpointDir))
     } finally {
       super.afterAll()
     }

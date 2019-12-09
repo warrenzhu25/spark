@@ -145,7 +145,7 @@ class ClientSuite extends SparkFunSuite with Matchers {
 
       sparkConf.get(SECONDARY_JARS) should be (Some(expected.split(",").toSeq))
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
   }
 

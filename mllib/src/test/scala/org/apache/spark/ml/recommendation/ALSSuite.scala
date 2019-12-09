@@ -977,8 +977,8 @@ class ALSCleanerSuite extends SparkFunSuite with BeforeAndAfterEach {
         sc.stop()
       }
     } finally {
-      Utils.deleteRecursively(localDir)
-      Utils.deleteRecursively(checkpointDir)
+      Utils.deleteRecursivelyQuietly(localDir)
+      Utils.deleteRecursivelyQuietly(checkpointDir)
     }
   }
 
@@ -1018,8 +1018,8 @@ class ALSCleanerSuite extends SparkFunSuite with BeforeAndAfterEach {
         sc.stop()
       }
     } finally {
-      Utils.deleteRecursively(localDir)
-      Utils.deleteRecursively(checkpointDir)
+      Utils.deleteRecursivelyQuietly(localDir)
+      Utils.deleteRecursivelyQuietly(checkpointDir)
     }
   }
 }

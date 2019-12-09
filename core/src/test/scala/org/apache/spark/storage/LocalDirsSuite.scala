@@ -41,7 +41,7 @@ class LocalDirsSuite extends SparkFunSuite with BeforeAndAfter {
     try {
       assume(!f.exists() && !f.mkdirs())
     } finally {
-      Utils.deleteRecursively(f)
+      Utils.deleteRecursivelyQuietly(f)
     }
   }
 

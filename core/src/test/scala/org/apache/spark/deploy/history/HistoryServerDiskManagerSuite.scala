@@ -46,7 +46,7 @@ class HistoryServerDiskManagerSuite extends SparkFunSuite with BeforeAndAfter {
   after {
     store.close()
     if (testDir != null) {
-      Utils.deleteRecursively(testDir)
+      Utils.deleteRecursivelyQuietly(testDir)
     }
   }
 

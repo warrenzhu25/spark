@@ -75,7 +75,7 @@ class InsertSuite extends DataSourceTest with SharedSQLContext {
     try {
       spark.catalog.dropTempView("jsonTable")
       spark.catalog.dropTempView("jt")
-      Utils.deleteRecursively(path)
+      Utils.deleteRecursivelyQuietly(path)
     } finally {
       super.afterAll()
     }

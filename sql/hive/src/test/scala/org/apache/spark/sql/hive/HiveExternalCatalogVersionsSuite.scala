@@ -50,9 +50,9 @@ class HiveExternalCatalogVersionsSuite extends SparkSubmitTestUtils {
   private val unusedJar = TestUtils.createJarWithClasses(Seq.empty)
 
   override def afterAll(): Unit = {
-    Utils.deleteRecursively(wareHousePath)
-    Utils.deleteRecursively(tmpDataDir)
-    Utils.deleteRecursively(sparkTestingDir)
+    Utils.deleteRecursivelyQuietly(wareHousePath)
+    Utils.deleteRecursivelyQuietly(tmpDataDir)
+    Utils.deleteRecursivelyQuietly(sparkTestingDir)
     super.afterAll()
   }
 

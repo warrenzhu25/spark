@@ -45,7 +45,7 @@ class MapWithStateSuite extends SparkFunSuite
   after {
     StreamingContext.getActive().foreach { _.stop(stopSparkContext = false) }
     if (checkpointDir != null) {
-      Utils.deleteRecursively(checkpointDir)
+      Utils.deleteRecursivelyQuietly(checkpointDir)
     }
   }
 

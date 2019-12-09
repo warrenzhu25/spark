@@ -429,7 +429,7 @@ class PrefixSpanSuite extends SparkFunSuite with MLlibTestSparkContext {
       }.toSet
       assert(originalSet === newSet)
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
   }
 

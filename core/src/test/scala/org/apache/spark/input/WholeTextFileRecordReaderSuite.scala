@@ -109,7 +109,7 @@ class WholeTextFileRecordReaderSuite extends SparkFunSuite with BeforeAndAfterAl
         s"file $filename contents can not match.")
     }
 
-    Utils.deleteRecursively(dir)
+    Utils.deleteRecursivelyQuietly(dir)
   }
 
   test("Correctness of WholeTextFileRecordReader with GzipCodec.") {
@@ -134,7 +134,7 @@ class WholeTextFileRecordReaderSuite extends SparkFunSuite with BeforeAndAfterAl
         s"file $filename contents can not match.")
     }
 
-    Utils.deleteRecursively(dir)
+    Utils.deleteRecursivelyQuietly(dir)
   }
 }
 

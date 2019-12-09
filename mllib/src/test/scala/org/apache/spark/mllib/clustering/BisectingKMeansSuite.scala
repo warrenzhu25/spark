@@ -195,7 +195,7 @@ class BisectingKMeansSuite extends SparkFunSuite with MLlibTestSparkContext {
       assert(model.distanceMeasure === sameModel.distanceMeasure)
       model.clusterCenters.zip(sameModel.clusterCenters).foreach(c => c._1 === c._2)
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
   }
 }

@@ -65,7 +65,7 @@ class ReliableKafkaStreamSuite extends SparkFunSuite
   }
 
   override def afterAll(): Unit = {
-    Utils.deleteRecursively(tempDirectory)
+    Utils.deleteRecursivelyQuietly(tempDirectory)
 
     if (kafkaTestUtils != null) {
       kafkaTestUtils.teardown()

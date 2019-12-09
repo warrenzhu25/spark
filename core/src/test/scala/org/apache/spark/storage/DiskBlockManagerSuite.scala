@@ -42,8 +42,8 @@ class DiskBlockManagerSuite extends SparkFunSuite with BeforeAndAfterEach with B
 
   override def afterAll() {
     try {
-      Utils.deleteRecursively(rootDir0)
-      Utils.deleteRecursively(rootDir1)
+      Utils.deleteRecursivelyQuietly(rootDir0)
+      Utils.deleteRecursivelyQuietly(rootDir1)
     } finally {
       super.afterAll()
     }

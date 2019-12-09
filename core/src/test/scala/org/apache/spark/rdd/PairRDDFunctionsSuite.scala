@@ -478,7 +478,7 @@ class PairRDDFunctionsSuite extends SparkFunSuite with SharedSparkContext {
       // Test that a shuffle on the file works, because this used to be a bug
       assert(file.map(line => (line, 1)).reduceByKey(_ + _).collect().toList === Nil)
     } finally {
-      Utils.deleteRecursively(emptyDir)
+      Utils.deleteRecursivelyQuietly(emptyDir)
     }
   }
 

@@ -64,7 +64,7 @@ class InputOutputMetricsSuite extends SparkFunSuite with SharedSparkContext
   }
 
   after {
-    Utils.deleteRecursively(tmpDir)
+    Utils.deleteRecursivelyQuietly(tmpDir)
   }
 
   test("input metrics for old hadoop with coalesce") {

@@ -153,7 +153,7 @@ class GradientBoostedTreesSuite extends SparkFunSuite with MLlibTestSparkContext
         }
         assert(model.treeWeights === sameModel.treeWeights)
       } finally {
-        Utils.deleteRecursively(tempDir)
+        Utils.deleteRecursivelyQuietly(tempDir)
       }
     }
   }
@@ -172,7 +172,7 @@ class GradientBoostedTreesSuite extends SparkFunSuite with MLlibTestSparkContext
     val gbt = GradientBoostedTrees.train(rdd, boostingStrategy)
 
     sc.checkpointDir = None
-    Utils.deleteRecursively(tempDir)
+    Utils.deleteRecursivelyQuietly(tempDir)
   }
 
 }

@@ -102,7 +102,7 @@ class Word2VecSuite extends SparkFunSuite with MLlibTestSparkContext {
       val sameModel = Word2VecModel.load(sc, path)
       assert(sameModel.getVectors.mapValues(_.toSeq) === model.getVectors.mapValues(_.toSeq))
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
 
   }
@@ -136,7 +136,7 @@ class Word2VecSuite extends SparkFunSuite with MLlibTestSparkContext {
       case t: Throwable => fail("exception thrown persisting a model " +
         "that spans over multiple partitions", t)
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
       spark.conf.set("spark.kryoserializer.buffer", oldBufferConfValue)
       spark.conf.set("spark.kryoserializer.buffer.max", oldBufferMaxConfValue)
     }

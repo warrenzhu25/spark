@@ -131,7 +131,7 @@ public class UnsafeExternalSorterSuite {
     try {
       assertEquals(0L, taskMemoryManager.cleanUpAllAllocatedMemory());
     } finally {
-      Utils.deleteRecursively(tempDir);
+      Utils.deleteRecursivelyQuietly(tempDir);
       tempDir = null;
     }
   }

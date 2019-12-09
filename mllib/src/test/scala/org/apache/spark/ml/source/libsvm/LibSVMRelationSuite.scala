@@ -59,7 +59,7 @@ class LibSVMRelationSuite extends SparkFunSuite with MLlibTestSparkContext {
 
   override def afterAll(): Unit = {
     try {
-      Utils.deleteRecursively(new File(path))
+      Utils.deleteRecursivelyQuietly(new File(path))
     } finally {
       super.afterAll()
     }

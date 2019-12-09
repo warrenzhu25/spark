@@ -50,7 +50,7 @@ class TextSuite extends QueryTest with SharedSQLContext {
     df.write.text(tempFile.getCanonicalPath)
     verifyFrame(spark.read.text(tempFile.getCanonicalPath))
 
-    Utils.deleteRecursively(tempFile)
+    Utils.deleteRecursivelyQuietly(tempFile)
   }
 
   test("error handling for invalid schema") {

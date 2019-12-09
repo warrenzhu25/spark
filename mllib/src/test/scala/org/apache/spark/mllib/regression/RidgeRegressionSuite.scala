@@ -94,7 +94,7 @@ class RidgeRegressionSuite extends SparkFunSuite with MLlibTestSparkContext {
       assert(model.weights == sameModel.weights)
       assert(model.intercept == sameModel.intercept)
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
   }
 }

@@ -57,7 +57,7 @@ class FsHistoryProviderSuite extends SparkFunSuite with BeforeAndAfter with Matc
   }
 
   after {
-    Utils.deleteRecursively(testDir)
+    Utils.deleteRecursivelyQuietly(testDir)
   }
 
   /** Create a fake log file using the new log format used in Spark 1.3+ */

@@ -318,7 +318,7 @@ class NaiveBayesSuite extends SparkFunSuite with MLlibTestSparkContext {
           assert(model.theta === sameModel.theta)
           assert(model.modelType === sameModel.modelType)
         } finally {
-          Utils.deleteRecursively(tempDir)
+          Utils.deleteRecursivelyQuietly(tempDir)
         }
     }
   }
@@ -339,7 +339,7 @@ class NaiveBayesSuite extends SparkFunSuite with MLlibTestSparkContext {
       assert(model.theta === sameModel.theta)
       assert(model.modelType === Multinomial)
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
   }
 }

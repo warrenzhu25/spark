@@ -84,7 +84,7 @@ public class JavaPrefixSpanSuite extends SharedSparkSession {
         long freq = freqSeq.freq();
       }
     } finally {
-      Utils.deleteRecursively(tempDir);
+      Utils.deleteRecursivelyQuietly(tempDir);
     }
 
 

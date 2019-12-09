@@ -115,7 +115,7 @@ public abstract class AbstractBytesToBytesMapSuite {
 
   @After
   public void tearDown() {
-    Utils.deleteRecursively(tempDir);
+    Utils.deleteRecursivelyQuietly(tempDir);
     tempDir = null;
 
     if (taskMemoryManager != null) {

@@ -68,7 +68,7 @@ class MatrixFactorizationModelSuite extends SparkFunSuite with MLlibTestSparkCon
       assert(collect(newModel.userFeatures) === collect(userFeatures))
       assert(collect(newModel.productFeatures) === collect(prodFeatures))
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
   }
 

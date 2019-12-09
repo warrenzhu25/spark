@@ -110,7 +110,7 @@ class MLUtilsSuite extends SparkFunSuite with MLlibTestSparkContext {
     assert(multiclassPoints(1).label === 0.0)
     assert(multiclassPoints(2).label === 0.0)
 
-    Utils.deleteRecursively(tempDir)
+    Utils.deleteRecursivelyQuietly(tempDir)
   }
 
   test("loadLibSVMFile throws IllegalArgumentException when indices is zero-based") {
@@ -127,7 +127,7 @@ class MLUtilsSuite extends SparkFunSuite with MLlibTestSparkContext {
     intercept[SparkException] {
       loadLibSVMFile(sc, path).collect()
     }
-    Utils.deleteRecursively(tempDir)
+    Utils.deleteRecursivelyQuietly(tempDir)
   }
 
   test("loadLibSVMFile throws IllegalArgumentException when indices is not in ascending order") {
@@ -144,7 +144,7 @@ class MLUtilsSuite extends SparkFunSuite with MLlibTestSparkContext {
     intercept[SparkException] {
       loadLibSVMFile(sc, path).collect()
     }
-    Utils.deleteRecursively(tempDir)
+    Utils.deleteRecursivelyQuietly(tempDir)
   }
 
   test("saveAsLibSVMFile") {
@@ -164,7 +164,7 @@ class MLUtilsSuite extends SparkFunSuite with MLlibTestSparkContext {
       assert(lines === expected)
     } {
       sources.foreach(_.close())
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
   }
 
@@ -228,7 +228,7 @@ class MLUtilsSuite extends SparkFunSuite with MLlibTestSparkContext {
     vectors.saveAsTextFile(path)
     val loaded = loadVectors(sc, path)
     assert(vectors.collect().toSet === loaded.collect().toSet)
-    Utils.deleteRecursively(tempDir)
+    Utils.deleteRecursivelyQuietly(tempDir)
   }
 
   test("loadLabeledPoints") {
@@ -243,7 +243,7 @@ class MLUtilsSuite extends SparkFunSuite with MLlibTestSparkContext {
     points.saveAsTextFile(path)
     val loaded = loadLabeledPoints(sc, path)
     assert(points.collect().toSet === loaded.collect().toSet)
-    Utils.deleteRecursively(tempDir)
+    Utils.deleteRecursivelyQuietly(tempDir)
   }
 
   test("log1pExp") {

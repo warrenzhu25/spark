@@ -48,7 +48,7 @@ class MapWithStateRDDSuite extends SparkFunSuite with RDDCheckpointTester with B
       if (sc != null) {
         sc.stop()
       }
-      Utils.deleteRecursively(checkpointDir)
+      Utils.deleteRecursivelyQuietly(checkpointDir)
     } finally {
       super.afterAll()
     }

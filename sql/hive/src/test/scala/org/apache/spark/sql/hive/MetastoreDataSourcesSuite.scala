@@ -181,7 +181,7 @@ class MetastoreDataSourcesSuite extends QueryTest with SQLTestUtils with TestHiv
           sql("SELECT * FROM jsonTable"),
           Row("a", "b"))
 
-        Utils.deleteRecursively(tempDir)
+        Utils.deleteRecursivelyQuietly(tempDir)
         (("a1", "b1", "c1") :: Nil).toDF().toJSON.rdd.saveAsTextFile(tempDir.getCanonicalPath)
 
         // Schema is cached so the new column does not show. The updated values in existing columns
@@ -217,7 +217,7 @@ class MetastoreDataSourcesSuite extends QueryTest with SQLTestUtils with TestHiv
           sql("SELECT * FROM jsonTable"),
           Row("a", "b"))
 
-        Utils.deleteRecursively(tempDir)
+        Utils.deleteRecursivelyQuietly(tempDir)
         (("a", "b", "c") :: Nil).toDF().toJSON.rdd.saveAsTextFile(tempDir.getCanonicalPath)
 
         sql("DROP TABLE jsonTable")

@@ -288,7 +288,7 @@ class KMeansSuite extends SparkFunSuite with MLlibTestSparkContext {
         val sameModel = KMeansModel.load(sc, path)
         KMeansSuite.checkEqual(model, sameModel)
       } finally {
-        Utils.deleteRecursively(tempDir)
+        Utils.deleteRecursivelyQuietly(tempDir)
       }
     }
   }

@@ -43,7 +43,7 @@ class ReplayListenerSuite extends SparkFunSuite with BeforeAndAfter with LocalSp
   }
 
   after {
-    Utils.deleteRecursively(testDir)
+    Utils.deleteRecursivelyQuietly(testDir)
   }
 
   test("Simple replay") {

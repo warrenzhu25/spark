@@ -57,7 +57,7 @@ class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
 
   after {
     store.close()
-    Utils.deleteRecursively(testDir)
+    Utils.deleteRecursivelyQuietly(testDir)
   }
 
   test("environment info") {

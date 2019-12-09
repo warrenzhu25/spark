@@ -712,7 +712,7 @@ abstract class BucketedReadSuite extends QueryTest with SQLTestUtils {
       df1.write.format("parquet").bucketBy(8, "i").saveAsTable("bucketed_table")
       val warehouseFilePath = new URI(spark.sessionState.conf.warehousePath).getPath
       val tableDir = new File(warehouseFilePath, "bucketed_table")
-      Utils.deleteRecursively(tableDir)
+      Utils.deleteRecursivelyQuietly(tableDir)
       df1.write.parquet(tableDir.getAbsolutePath)
 
       val agged = spark.table("bucketed_table").groupBy("i").count()

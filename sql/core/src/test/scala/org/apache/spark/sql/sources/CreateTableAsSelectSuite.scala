@@ -47,7 +47,7 @@ class CreateTableAsSelectSuite
   override def afterAll(): Unit = {
     try {
       spark.catalog.dropTempView("jt")
-      Utils.deleteRecursively(path)
+      Utils.deleteRecursivelyQuietly(path)
     } finally {
       super.afterAll()
     }
@@ -60,7 +60,7 @@ class CreateTableAsSelectSuite
   }
 
   override def afterEach(): Unit = {
-    Utils.deleteRecursively(path)
+    Utils.deleteRecursivelyQuietly(path)
     super.afterEach()
   }
 
@@ -138,7 +138,7 @@ class CreateTableAsSelectSuite
 
       // Explicitly drops the table and deletes the underlying data.
       sql("DROP TABLE jsonTable")
-      if (path.exists()) Utils.deleteRecursively(path)
+      if (path.exists()) Utils.deleteRecursivelyQuietly(path)
 
       // Creates a table of the same name again, this time we succeed.
       sql(

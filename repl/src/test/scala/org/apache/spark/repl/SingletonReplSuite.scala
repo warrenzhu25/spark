@@ -224,7 +224,7 @@ class SingletonReplSuite extends SparkFunSuite {
     assertContains("res1: Long = 3", output)
     assertContains("res2: Long = 3", output)
     assertContains("res3: Long = 3", output)
-    Utils.deleteRecursively(tempDir)
+    Utils.deleteRecursivelyQuietly(tempDir)
   }
 
   test("local-cluster mode") {

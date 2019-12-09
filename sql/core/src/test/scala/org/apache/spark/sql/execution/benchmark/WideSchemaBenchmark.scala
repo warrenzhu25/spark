@@ -61,7 +61,7 @@ class WideSchemaBenchmark extends SparkFunSuite with BeforeAndAfterEach {
   override def afterEach() {
     super.afterEach()
     for (tmpFile <- tmpFiles) {
-      Utils.deleteRecursively(tmpFile)
+      Utils.deleteRecursivelyQuietly(tmpFile)
     }
   }
 

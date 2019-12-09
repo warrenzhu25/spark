@@ -634,7 +634,7 @@ class CachedTableSuite extends QueryTest with SQLTestUtils with SharedSQLContext
         checkAnswer(spark.table("t").select($"i"), Row(1))
         assertCached(spark.table("t").select($"i"))
 
-        Utils.deleteRecursively(path)
+        Utils.deleteRecursivelyQuietly(path)
         spark.sessionState.catalog.refreshTable(TableIdentifier("t"))
         spark.catalog.uncacheTable("t")
         assert(spark.table("t").select($"i").count() == 0)

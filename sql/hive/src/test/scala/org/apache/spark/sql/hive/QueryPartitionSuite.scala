@@ -60,7 +60,7 @@ class QueryPartitionSuite extends QueryTest with SQLTestUtils with TestHiveSingl
           // delete the path of one partition
           tmpDir.listFiles
               .find { f => f.isDirectory && f.getName().startsWith("ds=") }
-              .foreach { f => Utils.deleteRecursively(f) }
+              .foreach { f => Utils.deleteRecursivelyQuietly(f) }
 
           // test for after delete the path
           checkAnswer(sql("select key,value from table_with_partition"),

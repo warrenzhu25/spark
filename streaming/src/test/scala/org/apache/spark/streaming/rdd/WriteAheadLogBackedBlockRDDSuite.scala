@@ -52,7 +52,7 @@ class WriteAheadLogBackedBlockRDDSuite
 
   override def afterEach(): Unit = {
     try {
-      Utils.deleteRecursively(dir)
+      Utils.deleteRecursivelyQuietly(dir)
     } finally {
       super.afterEach()
     }

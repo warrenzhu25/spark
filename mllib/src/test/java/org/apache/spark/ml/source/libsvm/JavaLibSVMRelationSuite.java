@@ -55,7 +55,7 @@ public class JavaLibSVMRelationSuite extends SharedSparkSession {
   @Override
   public void tearDown() {
     super.tearDown();
-    Utils.deleteRecursively(tempDir);
+    Utils.deleteRecursivelyQuietly(tempDir);
   }
 
   @Test

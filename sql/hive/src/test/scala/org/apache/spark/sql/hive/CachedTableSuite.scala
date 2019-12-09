@@ -228,7 +228,7 @@ class CachedTableSuite extends QueryTest with SQLTestUtils with TestHiveSingleto
     assert(!isCached("refreshTable"), "refreshTable should not be cached.")
 
     sql("DROP TABLE refreshTable")
-    Utils.deleteRecursively(tempPath)
+    Utils.deleteRecursivelyQuietly(tempPath)
   }
 
   test("SPARK-15678: REFRESH PATH") {
@@ -268,7 +268,7 @@ class CachedTableSuite extends QueryTest with SQLTestUtils with TestHiveSingleto
     assert(!isCached("refreshTable"), "refreshTable should not be cached.")
 
     sql("DROP TABLE refreshTable")
-    Utils.deleteRecursively(tempPath)
+    Utils.deleteRecursivelyQuietly(tempPath)
   }
 
   test("Cache/Uncache Qualified Tables") {

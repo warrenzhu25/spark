@@ -115,7 +115,7 @@ abstract class BaseReceivedBlockHandlerSuite(enableEncryption: Boolean)
     rpcEnv.awaitTermination()
     rpcEnv = null
 
-    Utils.deleteRecursively(tempDirectory)
+    Utils.deleteRecursivelyQuietly(tempDirectory)
   }
 
   test("BlockManagerBasedBlockHandler - store blocks") {

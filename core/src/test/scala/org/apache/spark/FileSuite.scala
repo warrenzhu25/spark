@@ -49,7 +49,7 @@ class FileSuite extends SparkFunSuite with LocalSparkContext {
 
   override def afterEach() {
     try {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     } finally {
       super.afterEach()
     }
@@ -554,7 +554,7 @@ class FileSuite extends SparkFunSuite with LocalSparkContext {
       }
       val hadoopRDD = sc.textFile(new File(output, "part-*").getPath)
       assert(hadoopRDD.partitions.length === expectedPartitionNum)
-      Utils.deleteRecursively(output)
+      Utils.deleteRecursivelyQuietly(output)
     }
 
     // Ensure that if all of the splits are empty, we remove the splits correctly
@@ -597,7 +597,7 @@ class FileSuite extends SparkFunSuite with LocalSparkContext {
         classOf[NewTextInputFormat], classOf[LongWritable], classOf[Text])
         .asInstanceOf[NewHadoopRDD[_, _]]
       assert(hadoopRDD.partitions.length === expectedPartitionNum)
-      Utils.deleteRecursively(output)
+      Utils.deleteRecursivelyQuietly(output)
     }
 
     // Ensure that if all of the splits are empty, we remove the splits correctly

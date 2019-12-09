@@ -54,7 +54,7 @@ class PythonBroadcastSuite extends SparkFunSuite with Matchers with SharedSparkC
         Utils.clone[PythonBroadcast](broadcast, new KryoSerializer(conf).newInstance())
       assertBroadcastIsValid(deserializedBroadcast)
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
   }
 }

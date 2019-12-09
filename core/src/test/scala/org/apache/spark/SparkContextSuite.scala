@@ -266,7 +266,7 @@ class SparkContextSuite extends SparkFunSuite with LocalSparkContext with Eventu
       }
       assert(getAddedFileContents() === "old")
     } finally {
-      Utils.deleteRecursively(dir)
+      Utils.deleteRecursivelyQuietly(dir)
     }
   }
 

@@ -42,7 +42,7 @@ class RDDSuite extends SparkFunSuite with SharedSparkContext {
 
   override def afterAll(): Unit = {
     try {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     } finally {
       super.afterAll()
     }

@@ -556,7 +556,7 @@ class LogisticRegressionSuite extends SparkFunSuite with MLlibTestSparkContext w
       val sameModel = LogisticRegressionModel.load(sc, path)
       LogisticRegressionSuite.checkModelsEqual(model, sameModel)
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
 
     // Save model with threshold.
@@ -566,7 +566,7 @@ class LogisticRegressionSuite extends SparkFunSuite with MLlibTestSparkContext w
       val sameModel = LogisticRegressionModel.load(sc, path)
       LogisticRegressionSuite.checkModelsEqual(model, sameModel)
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
   }
 
@@ -583,7 +583,7 @@ class LogisticRegressionSuite extends SparkFunSuite with MLlibTestSparkContext w
       val sameModel = LogisticRegressionModel.load(sc, path)
       LogisticRegressionSuite.checkModelsEqual(model, sameModel)
     } finally {
-      Utils.deleteRecursively(tempDir)
+      Utils.deleteRecursivelyQuietly(tempDir)
     }
   }
 

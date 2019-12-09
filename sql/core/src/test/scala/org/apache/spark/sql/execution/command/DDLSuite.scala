@@ -44,7 +44,7 @@ class InMemoryCatalogedDDLSuite extends DDLSuite with SharedSQLContext with Befo
       // drop all databases, tables and functions after each test
       spark.sessionState.catalog.reset()
     } finally {
-      Utils.deleteRecursively(new File(spark.sessionState.conf.warehousePath))
+      Utils.deleteRecursivelyQuietly(new File(spark.sessionState.conf.warehousePath))
       super.afterEach()
     }
   }
@@ -2108,7 +2108,7 @@ abstract class DDLSuite extends QueryTest with SQLTestUtils {
           // the new table path will be removed after DROP TABLE.
           assert(!dir.exists())
         } finally {
-          Utils.deleteRecursively(new File(defaultTablePath))
+          Utils.deleteRecursivelyQuietly(new File(defaultTablePath))
         }
       }
     }
@@ -2132,7 +2132,7 @@ abstract class DDLSuite extends QueryTest with SQLTestUtils {
         assert(dir.exists)
         checkAnswer(spark.table("t"), Row("c", 1) :: Nil)
 
-        Utils.deleteRecursively(dir)
+        Utils.deleteRecursivelyQuietly(dir)
         assert(!dir.exists)
         spark.sql("INSERT OVERWRITE TABLE t SELECT 'c', 1")
         assert(dir.exists)
@@ -2171,7 +2171,7 @@ abstract class DDLSuite extends QueryTest with SQLTestUtils {
         checkAnswer(spark.table("t"), Row(3, 4, 1, 2) :: Nil)
 
         val partLoc = new File(s"${dir.getAbsolutePath}/a=1")
-        Utils.deleteRecursively(partLoc)
+        Utils.deleteRecursivelyQuietly(partLoc)
         assert(!partLoc.exists())
         // insert overwrite into a partition which location has been deleted.
         spark.sql("INSERT OVERWRITE TABLE t PARTITION(a=1, b=2) SELECT 7, 8")
@@ -2223,7 +2223,7 @@ abstract class DDLSuite extends QueryTest with SQLTestUtils {
         checkAnswer(spark.table("t"), Row(3, 4, 1, 2) :: Nil)
 
         // select from a partition which location has been deleted.
-        Utils.deleteRecursively(dir)
+        Utils.deleteRecursivelyQuietly(dir)
         assert(!dir.exists())
         spark.sql("REFRESH TABLE t")
         checkAnswer(spark.sql("select * from t where a=1 and b=2"), Nil)

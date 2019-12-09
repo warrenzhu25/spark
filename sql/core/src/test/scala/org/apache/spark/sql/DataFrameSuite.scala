@@ -2181,7 +2181,7 @@ class DataFrameSuite extends QueryTest with SharedSQLContext {
       }
       assert(e1.getMessage.startsWith("Path does not exist"))
     } finally {
-      Utils.deleteRecursively(baseDir)
+      Utils.deleteRecursivelyQuietly(baseDir)
     }
   }
 

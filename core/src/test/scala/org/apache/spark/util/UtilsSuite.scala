@@ -327,7 +327,7 @@ class UtilsSuite extends SparkFunSuite with ResetSystemProperties with Logging {
     // Read some nonexistent bytes on both ends
     assert(Utils.offsetBytes(f1Path, f1Length, -3, 25) === "1\n2\n3\n4\n5\n6\n7\n8\n9\n")
 
-    Utils.deleteRecursively(tmpDir2)
+    Utils.deleteRecursivelyQuietly(tmpDir2)
   }
 
   test("reading offset bytes of a file") {
@@ -373,7 +373,7 @@ class UtilsSuite extends SparkFunSuite with ResetSystemProperties with Logging {
     assert(Utils.offsetBytes(files, fileLengths, -5, 45) ===
       "0123456789abcdefghijABCDEFGHIJ9876543210")
 
-    Utils.deleteRecursively(tmpDir)
+    Utils.deleteRecursivelyQuietly(tmpDir)
   }
 
   test("reading offset bytes across multiple files") {
@@ -594,14 +594,14 @@ class UtilsSuite extends SparkFunSuite with ResetSystemProperties with Logging {
   test("deleteRecursively") {
     val tempDir1 = Utils.createTempDir()
     assert(tempDir1.exists())
-    Utils.deleteRecursively(tempDir1)
+    Utils.deleteRecursivelyQuietly(tempDir1)
     assert(!tempDir1.exists())
 
     val tempDir2 = Utils.createTempDir()
     val sourceFile1 = new File(tempDir2, "foo.txt")
     Files.touch(sourceFile1)
     assert(sourceFile1.exists())
-    Utils.deleteRecursively(sourceFile1)
+    Utils.deleteRecursivelyQuietly(sourceFile1)
     assert(!sourceFile1.exists())
 
     val tempDir3 = new File(tempDir2, "subdir")
@@ -609,7 +609,7 @@ class UtilsSuite extends SparkFunSuite with ResetSystemProperties with Logging {
     val sourceFile2 = new File(tempDir3, "bar.txt")
     Files.touch(sourceFile2)
     assert(sourceFile2.exists())
-    Utils.deleteRecursively(tempDir2)
+    Utils.deleteRecursivelyQuietly(tempDir2)
     assert(!tempDir2.exists())
     assert(!tempDir3.exists())
     assert(!sourceFile2.exists())
@@ -630,7 +630,7 @@ class UtilsSuite extends SparkFunSuite with ResetSystemProperties with Logging {
       assert(sparkConf.getBoolean("spark.test.fileNameLoadA", false) === true)
       assert(sparkConf.getInt("spark.test.fileNameLoadB", 1) === 2)
     } finally {
-      Utils.deleteRecursively(tmpDir)
+      Utils.deleteRecursivelyQuietly(tmpDir)
     }
   }
 

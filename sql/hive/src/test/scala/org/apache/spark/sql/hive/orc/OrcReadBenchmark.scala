@@ -50,7 +50,7 @@ object OrcReadBenchmark {
   def withTempPath(f: File => Unit): Unit = {
     val path = Utils.createTempDir()
     path.delete()
-    try f(path) finally Utils.deleteRecursively(path)
+    try f(path) finally Utils.deleteRecursivelyQuietly(path)
   }
 
   def withTempTable(tableNames: String*)(f: => Unit): Unit = {

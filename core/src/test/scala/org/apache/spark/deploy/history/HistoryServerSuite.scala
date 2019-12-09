@@ -75,7 +75,7 @@ class HistoryServerSuite extends SparkFunSuite with BeforeAndAfter with Matchers
   private var port: Int = -1
 
   def init(extraConf: (String, String)*): Unit = {
-    Utils.deleteRecursively(storeDir)
+    Utils.deleteRecursivelyQuietly(storeDir)
     assert(storeDir.mkdir())
     val conf = new SparkConf()
       .set("spark.history.fs.logDirectory", logDir)

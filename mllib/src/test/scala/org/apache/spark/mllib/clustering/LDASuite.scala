@@ -519,8 +519,8 @@ class LDASuite extends SparkFunSuite with MLlibTestSparkContext {
       }.sortBy(x => (x._1, x._2)).collect()
       assert(edge === sameEdge)
     } finally {
-      Utils.deleteRecursively(tempDir1)
-      Utils.deleteRecursively(tempDir2)
+      Utils.deleteRecursivelyQuietly(tempDir1)
+      Utils.deleteRecursivelyQuietly(tempDir2)
     }
   }
 

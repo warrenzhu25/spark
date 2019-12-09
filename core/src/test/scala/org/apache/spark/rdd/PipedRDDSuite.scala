@@ -195,7 +195,7 @@ class PipedRDDSuite extends SparkFunSuite with SharedSparkContext {
     // make sure symlinks were created
     assert(pipedLs.length > 0)
     // clean up top level tasks directory
-    Utils.deleteRecursively(new File("tasks"))
+    Utils.deleteRecursivelyQuietly(new File("tasks"))
   }
 
   test("test pipe exports map_input_file") {

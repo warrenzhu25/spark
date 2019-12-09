@@ -76,7 +76,7 @@ class DirectKafkaStreamSuite
       ssc.stop(stopSparkContext = true)
     }
     if (testDir != null) {
-      Utils.deleteRecursively(testDir)
+      Utils.deleteRecursivelyQuietly(testDir)
     }
   }
 

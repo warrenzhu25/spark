@@ -541,7 +541,7 @@ class SparkSubmitSuite
         assert(!line.contains("secret_password"))
       }
     } finally {
-      Utils.deleteRecursively(testDir)
+      Utils.deleteRecursivelyQuietly(testDir)
     }
   }
 
@@ -1127,7 +1127,7 @@ class SparkSubmitSuite
     try {
       f(tmpDir.getAbsolutePath)
     } finally {
-      Utils.deleteRecursively(tmpDir)
+      Utils.deleteRecursivelyQuietly(tmpDir)
     }
   }
 

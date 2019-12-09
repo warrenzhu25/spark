@@ -104,7 +104,7 @@ class HiveOrcSourceSuite extends OrcSuite with TestHiveSingleton {
     } finally {
       hiveClient.runSqlHive("DROP TABLE IF EXISTS hive_orc")
       hiveClient.runSqlHive("DROP TABLE IF EXISTS spark_orc")
-      Utils.deleteRecursively(location)
+      Utils.deleteRecursivelyQuietly(location)
     }
   }
 
