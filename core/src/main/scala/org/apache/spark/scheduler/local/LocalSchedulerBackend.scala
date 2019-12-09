@@ -21,6 +21,10 @@ import java.io.File
 import java.net.URL
 import java.nio.ByteBuffer
 
+import scala.concurrent.duration.Duration
+import scala.concurrent.duration.MILLISECONDS
+import scala.util.{Failure, Success}
+
 import org.apache.spark.{SparkConf, SparkContext, SparkEnv, TaskState}
 import org.apache.spark.TaskState.TaskState
 import org.apache.spark.executor.{Executor, ExecutorBackend}
@@ -29,6 +33,7 @@ import org.apache.spark.launcher.{LauncherBackend, SparkAppHandle}
 import org.apache.spark.rpc.{RpcCallContext, RpcEndpointRef, RpcEnv, ThreadSafeRpcEndpoint}
 import org.apache.spark.scheduler._
 import org.apache.spark.scheduler.cluster.ExecutorInfo
+import org.apache.spark.util.ThreadUtils.awaitReady
 
 private case class ReviveOffers()
 
@@ -109,6 +114,8 @@ private[spark] class LocalSchedulerBackend(
     override def conf: SparkConf = LocalSchedulerBackend.this.conf
     override def onStopRequest(): Unit = stop(SparkAppHandle.State.KILLED)
   }
+  private val stopTimeout = Duration(conf.getTimeAsMs("spark.local.executor.stopTimeout", "10s"),
+    MILLISECONDS)
 
   /**
    * Returns a list of URLs representing the user classpath.
@@ -159,11 +166,19 @@ private[spark] class LocalSchedulerBackend(
   override def maxNumConcurrentTasks(): Int = totalCores / scheduler.CPUS_PER_TASK
 
   private def stop(finalState: SparkAppHandle.State): Unit = {
-    localEndpoint.ask(StopExecutor)
+    val future = localEndpoint.ask[Any](StopExecutor)
     try {
       launcherBackend.setState(finalState)
     } finally {
       launcherBackend.close()
+    }
+
+    // Wait for the executor to stop. Stopping the executor asynchronously may cause NPE in the
+    // executor and prevent it from stopping when SparkEnv is being stopped simultaneously.
+    awaitReady(future, stopTimeout).value.get match {
+      case Success(true) =>
+      case Success(v) => log.warn(s"Failed to stop executor: $v")
+      case Failure(e) => log.warn(s"Failed to stop executor: ${e.toString}")
     }
   }
 
