@@ -61,6 +61,9 @@ public class ChildProcAppHandleSuite extends BaseSuite {
 
   @BeforeClass
   public static void setupClass() throws Exception {
+    if (isWindows()) {
+      return;
+    }
     TEST_SCRIPT_PATH = File.createTempFile("output-redir-test", ".sh");
     Files.setPosixFilePermissions(TEST_SCRIPT_PATH.toPath(),
       EnumSet.of(OWNER_READ, OWNER_EXECUTE, OWNER_WRITE));
