@@ -247,6 +247,7 @@ class SparkContext(config: SparkConf) extends Logging {
   def master: String = _conf.get("spark.master")
   def deployMode: String = _conf.get(SUBMIT_DEPLOY_MODE)
   def appName: String = _conf.get("spark.app.name")
+  def subCluster: String = _conf.getOption("spark.hadoop.default-subcluster").getOrElse("")
 
   private[spark] def isEventLogEnabled: Boolean = _conf.get(EVENT_LOG_ENABLED)
   private[spark] def eventLogDir: Option[URI] = _eventLogDir
@@ -464,8 +465,9 @@ class SparkContext(config: SparkConf) extends Logging {
 
     _ui =
       if (conf.get(UI_ENABLED)) {
-        Some(SparkUI.create(Some(this), _statusStore, _conf, _env.securityManager, appName, "",
-          startTime))
+        Some(SparkUI.create(Some(this), _statusStore, _conf,
+          _env.securityManager, appName, "", startTime,
+          subCluster = Some(subCluster)))
       } else {
         // For tests, do not enable the UI
         None
@@ -2445,7 +2447,7 @@ class SparkContext(config: SparkConf) extends Logging {
     // the cluster manager to get an application ID (in case the cluster manager provides one).
     listenerBus.post(SparkListenerApplicationStart(appName, Some(applicationId),
       startTime, sparkUser, applicationAttemptId, schedulerBackend.getDriverLogUrls,
-      schedulerBackend.getDriverAttributes))
+      schedulerBackend.getDriverAttributes, Some(subCluster)))
     _driverLogger.foreach(_.startSync(_hadoopConfiguration))
   }
 
