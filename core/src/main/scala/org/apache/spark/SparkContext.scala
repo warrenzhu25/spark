@@ -232,6 +232,7 @@ class SparkContext(config: SparkConf) extends Logging {
   def master: String = _conf.get("spark.master")
   def deployMode: String = _conf.getOption("spark.submit.deployMode").getOrElse("client")
   def appName: String = _conf.get("spark.app.name")
+  def subCluster: String = _conf.getOption("spark.hadoop.default-subcluster").getOrElse("")
 
   private[spark] def isEventLogEnabled: Boolean = _conf.getBoolean("spark.eventLog.enabled", false)
   private[spark] def eventLogDir: Option[URI] = _eventLogDir
@@ -441,8 +442,9 @@ class SparkContext(config: SparkConf) extends Logging {
 
     _ui =
       if (conf.getBoolean("spark.ui.enabled", true)) {
-        Some(SparkUI.create(Some(this), _statusStore, _conf, _env.securityManager, appName, "",
-          startTime))
+        Some(SparkUI.create(Some(this), _statusStore, _conf,
+          _env.securityManager, appName, "", startTime,
+          subCluster = Some(subCluster)))
       } else {
         // For tests, do not enable the UI
         None
@@ -2408,7 +2410,8 @@ class SparkContext(config: SparkConf) extends Logging {
     // Note: this code assumes that the task scheduler has been initialized and has contacted
     // the cluster manager to get an application ID (in case the cluster manager provides one).
     listenerBus.post(SparkListenerApplicationStart(appName, Some(applicationId),
-      startTime, sparkUser, applicationAttemptId, schedulerBackend.getDriverLogUrls))
+      startTime, sparkUser, applicationAttemptId,
+      schedulerBackend.getDriverLogUrls, Some(subCluster)))
   }
 
   /** Post the application end event */
