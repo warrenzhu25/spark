@@ -4,8 +4,7 @@ jobs:
     timeoutInMinutes: 0
 
     pool:
-      name: MultitenancyAzureTest
-      demands: Maven
+      vmImage: 'windows-latest'
 
     variables:
       Hadoop.Definition: 9306
