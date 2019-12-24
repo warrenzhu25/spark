@@ -20,9 +20,7 @@ package org.apache.spark.broadcast
 import java.util.Locale
 
 import scala.util.Random
-
-import org.scalatest.Assertions
-
+import org.scalatest.{Assertions, Ignore}
 import org.apache.spark._
 import org.apache.spark.io.SnappyCompressionCodec
 import org.apache.spark.rdd.RDD
@@ -47,6 +45,7 @@ class DummyBroadcastClass(rdd: RDD[Int]) extends Serializable {
   }
 }
 
+@Ignore
 class BroadcastSuite extends SparkFunSuite with LocalSparkContext with EncryptionFunSuite {
 
   test("Using TorrentBroadcast locally") {

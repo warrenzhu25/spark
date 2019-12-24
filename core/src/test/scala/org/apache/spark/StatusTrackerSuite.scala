@@ -20,12 +20,11 @@ package org.apache.spark
 import scala.concurrent.duration._
 import scala.language.implicitConversions
 import scala.language.postfixOps
-
-import org.scalatest.Matchers
+import org.scalatest.{Ignore, Matchers}
 import org.scalatest.concurrent.Eventually._
-
 import org.apache.spark.JobExecutionStatus._
 
+@Ignore
 class StatusTrackerSuite extends SparkFunSuite with Matchers with LocalSparkContext {
 
   test("basic status API usage") {

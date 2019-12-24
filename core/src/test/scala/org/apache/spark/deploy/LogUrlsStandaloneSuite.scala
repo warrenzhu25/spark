@@ -21,12 +21,13 @@ import java.net.URL
 
 import scala.collection.mutable
 import scala.io.Source
-
 import org.apache.spark.{LocalSparkContext, SparkContext, SparkFunSuite}
 import org.apache.spark.scheduler.{SparkListener, SparkListenerExecutorAdded}
 import org.apache.spark.scheduler.cluster.ExecutorInfo
 import org.apache.spark.util.SparkConfWithEnv
+import org.scalatest.Ignore
 
+@Ignore
 class LogUrlsStandaloneSuite extends SparkFunSuite with LocalSparkContext {
 
   /** Length of time to wait while draining listener events. */

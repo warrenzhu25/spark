@@ -179,7 +179,7 @@ class PipedRDDSuite extends SparkFunSuite with SharedSparkContext {
     assert(exception.getMessage.contains(command.mkString(" ")))
   }
 
-  test("basic pipe with separate working directory") {
+  ignore("basic pipe with separate working directory") {
     assume(TestUtils.testCommandAvailable("cat"))
     val nums = sc.makeRDD(Array(1, 2, 3, 4), 2)
     val piped = nums.pipe(Seq("cat"), separateWorkingDir = true)
