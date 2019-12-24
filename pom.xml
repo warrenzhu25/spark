@@ -2729,7 +2729,7 @@
     </profile>
 
     <profile>
-      <id>hadoop-2.9.2-MT</id>
+      <id>hadoop-2.9.2-MT-SNAPSHOT</id>
       <properties>
         <hadoop.version>2.9.2-MT-SNAPSHOT</hadoop.version>
         <curator.version>2.6.0</curator.version>
