@@ -1,0 +1,178 @@
+/*
+ * Copyright 2016 LinkedIn Corp.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+
+package org.apache.spark.status.insight.heuristics
+
+import org.apache.spark.status.api.v1.{ExecutorSummary, StageData, StageStatus}
+import org.apache.spark.status.insight.SparkAppData
+import org.apache.spark.status.insight.analysis.{Severity, SeverityThresholds}
+import org.apache.spark.status.insight.heuristics.StagesHeuristic.StagesEvaluator
+import org.apache.spark.status.insight.math.Statistics
+
+import scala.concurrent.duration
+import scala.concurrent.duration.Duration
+
+/**
+  * A heuristic based on metrics for a Spark app's stages.
+  *
+  * This heuristic reports stage failures, high task failure rates for each stage, and long average executor runtimes for
+  * each stage.
+  */
+object StagesHeuristic extends Heuristic {
+
+  /** The default severity thresholds for the rate of an application's stages failing. */
+  val DEFAULT_STAGE_FAILURE_RATE_SEVERITY_THRESHOLDS =
+    SeverityThresholds(low = 0.1D, moderate = 0.3D, severe = 0.5D, critical = 0.5D, ascending = true)
+
+  /** The default severity thresholds for the rate of a stage's tasks failing. */
+  val DEFAULT_TASK_FAILURE_RATE_SEVERITY_THRESHOLDS =
+    SeverityThresholds(low = 0.1D, moderate = 0.3D, severe = 0.5D, critical = 0.5D, ascending = true)
+
+  /** The default severity thresholds for a stage's runtime. */
+  val DEFAULT_STAGE_RUNTIME_MILLIS_SEVERITY_THRESHOLDS = SeverityThresholds(
+    low = Duration("15min").toMillis,
+    moderate = Duration("30min").toMillis,
+    severe = Duration("45min").toMillis,
+    critical = Duration("60min").toMillis,
+    ascending = true
+  )
+
+  val STAGE_FAILURE_RATE_SEVERITY_THRESHOLDS_KEY = "stage_failure_rate_severity_thresholds"
+  val TASK_FAILURE_RATE_SEVERITY_THRESHOLDS_KEY = "stage_task_failure_rate_severity_thresholds"
+  val STAGE_RUNTIME_MINUTES_SEVERITY_THRESHOLDS_KEY = "stage_runtime_minutes_severity_thresholds"
+
+  val SPARK_EXECUTOR_INSTANCES_KEY = "spark.executor.instances"
+
+  val evaluators = Seq(StagesEvaluator)
+
+  object StagesEvaluator extends Evaluator {
+
+    lazy val stageFailureRateSeverityThresholds = DEFAULT_STAGE_FAILURE_RATE_SEVERITY_THRESHOLDS
+
+    lazy val taskFailureRateSeverityThresholds = DEFAULT_TASK_FAILURE_RATE_SEVERITY_THRESHOLDS
+
+    lazy val stageRuntimeMillisSeverityThresholds = DEFAULT_STAGE_RUNTIME_MILLIS_SEVERITY_THRESHOLDS
+
+    override def evaluate(sparkAppData: SparkAppData): Seq[HeuristicRecord] = {
+
+      lazy val stageDatas: Seq[StageData] = sparkAppData.stageData
+
+      lazy val executorSummaries: Seq[ExecutorSummary] = sparkAppData.executorSummaries
+
+      lazy val numCompletedStages: Int = stageDatas.count {
+        _.status == StageStatus.COMPLETE
+      }
+
+      lazy val numFailedStages: Int = stageDatas.count {
+        _.status == StageStatus.FAILED
+      }
+
+      lazy val stageFailureRate: Option[Double] = {
+        val numStages = numCompletedStages + numFailedStages
+        if (numStages == 0) None else Some(numFailedStages.toDouble / numStages.toDouble)
+      }
+
+      lazy val stagesWithHighTaskFailureRates: Seq[(StageData, Double)] =
+        stagesWithHighTaskFailureRateSeverities.map { case (stageData, taskFailureRate, _) => (stageData, taskFailureRate) }
+
+      lazy val stagesWithLongAverageExecutorRuntimes: Seq[(StageData, Long)] =
+        stagesAndAverageExecutorRuntimeSeverities
+          .collect { case (stageData, runtime, severity) if severity.getValue > Severity.MODERATE.getValue => (stageData, runtime) }
+
+      lazy val severity: Severity = Severity.max((stageFailureRateSeverity +: (taskFailureRateSeverities ++ runtimeSeverities)): _*)
+
+      lazy val stageFailureRateSeverity: Severity =
+        stageFailureRateSeverityThresholds.severityOf(stageFailureRate.getOrElse[Double](0.0D))
+
+      lazy val stagesWithHighTaskFailureRateSeverities: Seq[(StageData, Double, Severity)] =
+        stagesAndTaskFailureRateSeverities.filter { case (_, _, severity) => severity.getValue > Severity.MODERATE.getValue }
+
+      lazy val stagesAndTaskFailureRateSeverities: Seq[(StageData, Double, Severity)] = for {
+        stageData <- stageDatas
+        (taskFailureRate, severity) = taskFailureRateAndSeverityOf(stageData)
+      } yield (stageData, taskFailureRate, severity)
+
+      lazy val taskFailureRateSeverities: Seq[Severity] =
+        stagesAndTaskFailureRateSeverities.map { case (_, _, severity) => severity }
+
+      lazy val executorInstances = executorSummaries.size
+      lazy val stagesAndAverageExecutorRuntimeSeverities: Seq[(StageData, Long, Severity)] = for {
+        stageData <- stageDatas
+        (runtime, severity) = averageExecutorRuntimeAndSeverityOf(stageData, executorInstances)
+      } yield (stageData, runtime, severity)
+
+      lazy val runtimeSeverities: Seq[Severity] = stagesAndAverageExecutorRuntimeSeverities.map { case (_, _, severity) => severity }
+
+      Seq(
+        HeuristicRecord("Spark completed stages count", numCompletedStages.toString),
+        HeuristicRecord("Spark failed stages count", numFailedStages.toString),
+        HeuristicRecord("Spark stage failure rate", f"${stageFailureRate.getOrElse(0.0D)}%.3f"),
+        HeuristicRecord(
+          "Spark stages with high task failure rates",
+          formatStagesWithHighTaskFailureRates(stagesWithHighTaskFailureRates)
+        ),
+        HeuristicRecord(
+          "Spark stages with long average executor runtimes",
+          formatStagesWithLongAverageExecutorRuntimes(stagesWithLongAverageExecutorRuntimes)
+        )
+      )
+    }
+
+    def taskFailureRateAndSeverityOf(stageData: StageData): (Double, Severity) = {
+      val taskFailureRate = taskFailureRateOf(stageData).getOrElse(0.0D)
+      (taskFailureRate, taskFailureRateSeverityThresholds.severityOf(taskFailureRate))
+    }
+
+    def taskFailureRateOf(stageData: StageData): Option[Double] = {
+      // Currently, the calculation doesn't include skipped or active tasks.
+      val numCompleteTasks = stageData.numCompleteTasks
+      val numFailedTasks = stageData.numFailedTasks
+      val numTasks = numCompleteTasks + numFailedTasks
+      if (numTasks == 0) None else Some(numFailedTasks.toDouble / numTasks.toDouble)
+    }
+
+    def averageExecutorRuntimeAndSeverityOf(stageData: StageData, executorInstances: Int): (Long, Severity) = {
+      val averageExecutorRuntime = stageData.executorRunTime / executorInstances
+      (averageExecutorRuntime, stageRuntimeMillisSeverityThresholds.severityOf(averageExecutorRuntime))
+    }
+
+    def formatStagesWithHighTaskFailureRates(stagesWithHighTaskFailureRates: Seq[(StageData, Double)]): String =
+      stagesWithHighTaskFailureRates
+        .map { case (stageData, taskFailureRate) => formatStageWithHighTaskFailureRate(stageData, taskFailureRate) }
+        .mkString("\n")
+
+    def formatStageWithHighTaskFailureRate(stageData: StageData, taskFailureRate: Double): String =
+      f"stage ${stageData.stageId}, attempt ${stageData.attemptId} (task failure rate: ${taskFailureRate}%1.3f)"
+
+    def formatStagesWithLongAverageExecutorRuntimes(stagesWithLongAverageExecutorRuntimes: Seq[(StageData, Long)]): String =
+      stagesWithLongAverageExecutorRuntimes
+        .map { case (stageData, runtime) => formatStageWithLongRuntime(stageData, runtime) }
+        .mkString("\n")
+
+    def formatStageWithLongRuntime(stageData: StageData, runtime: Long): String =
+      f"stage ${stageData.stageId}, attempt ${stageData.attemptId} (runtime: ${Statistics.readableTimespan(runtime)})"
+
+    def minutesSeverityThresholdsToMillisSeverityThresholds(
+                                                             minutesSeverityThresholds: SeverityThresholds
+                                                           ): SeverityThresholds = SeverityThresholds(
+      Duration(minutesSeverityThresholds.low.longValue, duration.MINUTES).toMillis,
+      Duration(minutesSeverityThresholds.moderate.longValue, duration.MINUTES).toMillis,
+      Duration(minutesSeverityThresholds.severe.longValue, duration.MINUTES).toMillis,
+      Duration(minutesSeverityThresholds.critical.longValue, duration.MINUTES).toMillis,
+      minutesSeverityThresholds.ascending
+    )
+  }
+}

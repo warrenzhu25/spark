@@ -19,13 +19,17 @@ package org.apache.spark.status.api.v1
 import java.io.OutputStream
 import java.util.{List => JList}
 import java.util.zip.ZipOutputStream
+
 import javax.ws.rs.{DefaultValue, GET, Path, PathParam, Produces, QueryParam}
 import javax.ws.rs.core.{MediaType, Response, StreamingOutput}
+import org.apache.spark.status.insight.SparkAppData
+import org.apache.spark.status.insight.heuristics.{ConfigurationHeuristic, ExecutorGcHeuristic, ExecutorsHeuristic, HeuristicRecord, HeuristicResult, JobsHeuristic, StagesHeuristic}
 
 import scala.util.control.NonFatal
-
 import org.apache.spark.{JobExecutionStatus, SparkContext}
 import org.apache.spark.ui.UIUtils
+
+import scala.collection.JavaConverters._
 
 @Produces(Array(MediaType.APPLICATION_JSON))
 private[v1] class AbstractApplicationResource extends BaseAppResource {
@@ -177,6 +181,30 @@ private[v1] class AbstractApplicationResource extends BaseAppResource {
       throw new NotFoundException(httpRequest.getRequestURI())
     }
     classOf[OneApplicationAttemptResource]
+  }
+
+  private val heuristic = Seq(
+    ConfigurationHeuristic,
+    ExecutorGcHeuristic,
+    ExecutorsHeuristic,
+    JobsHeuristic,
+    StagesHeuristic
+  )
+
+  @GET
+  @Path("suggestions")
+  def Suggestion(): Seq[HeuristicResult] = {
+    heuristic.map(_.apply(appData()))
+  }
+
+  private def appData(): SparkAppData = {
+    val applicationInfo = uiRoot.getApplicationInfo(appId).get
+    val appConfig = withUI(_.store.environmentInfo()).sparkProperties.map(a => a._1 -> a._2).toMap
+    val jobData = withUI(_.store.jobsList(List.empty[JobExecutionStatus].asJava))
+    val stageData = withUI(_.store.stageList(List.empty[StageStatus].asJava))
+    val executorSummary = withUI(_.store.executorList(false))
+
+    SparkAppData(appId, appConfig, applicationInfo, jobData, stageData, executorSummary)
   }
 
 }
