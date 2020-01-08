@@ -18,12 +18,13 @@ package org.apache.spark.status.insight
 
 import org.apache.spark.status.api.v1.{ApplicationInfo, ExecutorSummary, JobData, StageData}
 
-case class SparkAppData(
+case class SparkApplicationData(
                          appId: String,
                          appConf: Map[String, String],
                          appInfo: ApplicationInfo,
                          jobData: Seq[JobData],
                          stageData: Seq[StageData],
-                         executorSummaries: Seq[ExecutorSummary]
+                         executorSummaries: Seq[ExecutorSummary],
+                         stagesWithFailedTasks: Seq[StageData] = Seq.empty
 ) {
 }

@@ -17,7 +17,7 @@
 package org.apache.spark.status.insight.heuristics
 
 import org.apache.spark.status.api.v1.{ExecutorSummary, StageData, StageStatus}
-import org.apache.spark.status.insight.SparkAppData
+import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.{Severity, SeverityThresholds}
 import org.apache.spark.status.insight.heuristics.StagesHeuristic.StagesEvaluator
 import org.apache.spark.status.insight.math.Statistics
@@ -56,9 +56,9 @@ object StagesHeuristic extends Heuristic {
 
   val SPARK_EXECUTOR_INSTANCES_KEY = "spark.executor.instances"
 
-  val evaluators = Seq(StagesEvaluator)
+  override val evaluators = Seq(StagesEvaluator)
 
-  object StagesEvaluator extends Evaluator {
+  object StagesEvaluator extends SparkEvaluator {
 
     lazy val stageFailureRateSeverityThresholds = DEFAULT_STAGE_FAILURE_RATE_SEVERITY_THRESHOLDS
 
@@ -66,7 +66,7 @@ object StagesHeuristic extends Heuristic {
 
     lazy val stageRuntimeMillisSeverityThresholds = DEFAULT_STAGE_RUNTIME_MILLIS_SEVERITY_THRESHOLDS
 
-    override def evaluate(sparkAppData: SparkAppData): Seq[HeuristicRecord] = {
+    override def evaluate(sparkAppData: SparkApplicationData): Seq[HeuristicResultDetails] = {
 
       lazy val stageDatas: Seq[StageData] = sparkAppData.stageData
 
@@ -117,14 +117,14 @@ object StagesHeuristic extends Heuristic {
       lazy val runtimeSeverities: Seq[Severity] = stagesAndAverageExecutorRuntimeSeverities.map { case (_, _, severity) => severity }
 
       Seq(
-        HeuristicRecord("Spark completed stages count", numCompletedStages.toString),
-        HeuristicRecord("Spark failed stages count", numFailedStages.toString),
-        HeuristicRecord("Spark stage failure rate", f"${stageFailureRate.getOrElse(0.0D)}%.3f"),
-        HeuristicRecord(
+        HeuristicResultDetails("Spark completed stages count", numCompletedStages.toString),
+        HeuristicResultDetails("Spark failed stages count", numFailedStages.toString),
+        HeuristicResultDetails("Spark stage failure rate", f"${stageFailureRate.getOrElse(0.0D)}%.3f"),
+        HeuristicResultDetails(
           "Spark stages with high task failure rates",
           formatStagesWithHighTaskFailureRates(stagesWithHighTaskFailureRates)
         ),
-        HeuristicRecord(
+        HeuristicResultDetails(
           "Spark stages with long average executor runtimes",
           formatStagesWithLongAverageExecutorRuntimes(stagesWithLongAverageExecutorRuntimes)
         )

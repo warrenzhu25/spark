@@ -17,9 +17,8 @@
 package org.apache.spark.status.insight.heuristics
 
 import org.apache.spark.status.api.v1.ExecutorSummary
-import org.apache.spark.status.insight.SparkAppData
-import org.apache.spark.status.insight.analysis.{HeuristicConfigurationData, MemoryFormatUtils, Severity, SeverityThresholds}
-import org.apache.spark.status.insight.heuristics.ExecutorsHeuristic.ExecutorsEvaluator
+import org.apache.spark.status.insight.SparkApplicationData
+import org.apache.spark.status.insight.analysis.{MemoryFormatUtils, Severity, SeverityThresholds}
 import org.apache.spark.status.insight.math.Statistics
 
 import scala.collection.JavaConverters
@@ -60,11 +59,11 @@ object ExecutorsHeuristic extends Heuristic {
 
   val ignoreMaxMillisLessThanThreshold = DEFAULT_IGNORE_MAX_MILLIS_LESS_THAN_THRESHOLD
 
-  val evaluators = Seq(ExecutorsEvaluator)
+  override val evaluators = Seq(ExecutorsEvaluator)
 
-  object ExecutorsEvaluator extends Evaluator {
+  object ExecutorsEvaluator extends SparkEvaluator {
 
-    override def evaluate(sparkAppData: SparkAppData): Seq[HeuristicRecord] = {
+    override def evaluate(sparkAppData: SparkApplicationData): Seq[HeuristicResultDetails] = {
 
       lazy val executorSummaries: Seq[ExecutorSummary] = sparkAppData.executorSummaries
 
@@ -129,39 +128,39 @@ object ExecutorsHeuristic extends Heuristic {
       )
 
       Seq(
-        HeuristicRecord(
+        HeuristicResultDetails(
           "Total executor storage memory allocated",
           MemoryFormatUtils.bytesToString(totalStorageMemoryAllocated)
         ),
-        HeuristicRecord(
+        HeuristicResultDetails(
           "Total executor storage memory used",
           MemoryFormatUtils.bytesToString(totalStorageMemoryUsed)
         ),
-        HeuristicRecord(
+        HeuristicResultDetails(
           "Executor storage memory utilization rate",
           f"${storageMemoryUtilizationRate}%1.3f"
         ),
-        HeuristicRecord(
+        HeuristicResultDetails(
           "Executor storage memory used distribution",
           Distribution.formatDistributionBytes(storageMemoryUsedDistribution)
         ),
-        HeuristicRecord(
+        HeuristicResultDetails(
           "Executor task time distribution",
           Distribution.formatDistributionDuration(taskTimeDistribution)
         ),
-        HeuristicRecord(
+        HeuristicResultDetails(
           "Executor task time sum",
           (totalTaskTime / Statistics.SECOND_IN_MS).toString
         ),
-        HeuristicRecord(
+        HeuristicResultDetails(
           "Executor input bytes distribution",
           Distribution.formatDistributionBytes(inputBytesDistribution)
         ),
-        HeuristicRecord(
+        HeuristicResultDetails(
           "Executor shuffle read bytes distribution",
           Distribution.formatDistributionBytes(shuffleReadBytesDistribution)
         ),
-        HeuristicRecord(
+        HeuristicResultDetails(
           "Executor shuffle write bytes distribution",
           Distribution.formatDistributionBytes(shuffleWriteBytesDistribution)
         )

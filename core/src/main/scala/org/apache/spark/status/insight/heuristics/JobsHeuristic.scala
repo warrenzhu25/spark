@@ -18,7 +18,7 @@ package org.apache.spark.status.insight.heuristics
 
 import org.apache.spark.JobExecutionStatus
 import org.apache.spark.status.api.v1.JobData
-import org.apache.spark.status.insight.SparkAppData
+import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.{Severity, SeverityThresholds}
 
 /**
@@ -44,11 +44,11 @@ object JobsHeuristic extends Heuristic {
 
   val taskFailureRateSeverityThresholds = DEFAULT_TASK_FAILURE_RATE_SEVERITY_THRESHOLDS
 
-  val evaluators = Seq(JobEvaluator)
+  override val evaluators = Seq(JobEvaluator)
 
-  object JobEvaluator extends Evaluator {
+  object JobEvaluator extends SparkEvaluator {
 
-    def evaluate(sparkAppData: SparkAppData): Seq[HeuristicRecord] = {
+    def evaluate(sparkAppData: SparkApplicationData): Seq[HeuristicResultDetails] = {
 
       lazy val jobDatas: Seq[JobData] = sparkAppData.jobData
 
@@ -115,11 +115,11 @@ object JobsHeuristic extends Heuristic {
       }
 
       Seq(
-        HeuristicRecord("Spark completed jobs count", numCompletedJobs.toString),
-        HeuristicRecord("Spark failed jobs count", numFailedJobs.toString),
-        HeuristicRecord("Spark failed jobs list", formatFailedJobs(failedJobs)),
-        HeuristicRecord("Spark job failure rate", f"${jobFailureRate.getOrElse(0.0D)}%.3f"),
-        HeuristicRecord(
+        HeuristicResultDetails("Spark completed jobs count", numCompletedJobs.toString),
+        HeuristicResultDetails("Spark failed jobs count", numFailedJobs.toString),
+        HeuristicResultDetails("Spark failed jobs list", formatFailedJobs(failedJobs)),
+        HeuristicResultDetails("Spark job failure rate", f"${jobFailureRate.getOrElse(0.0D)}%.3f"),
+        HeuristicResultDetails(
           "Spark jobs with high task failure rates",
           formatJobsWithHighTaskFailureRates(jobsWithHighTaskFailureRates)
         ))

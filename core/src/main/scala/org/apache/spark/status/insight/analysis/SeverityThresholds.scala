@@ -16,6 +16,8 @@
 
 package org.apache.spark.status.insight.analysis
 
+import org.apache.spark.status.insight.util.Utils
+
 /**
   * A convenience case class for containing severity thresholds and calculating severity.
   */
@@ -34,5 +36,17 @@ case class SeverityThresholds(low: Number, moderate: Number, severe: Number, cri
     Severity.getSeverityAscending(value, low, moderate, severe, critical)
   } else {
     Severity.getSeverityDescending(value, low, moderate, severe, critical)
+  }
+}
+
+object SeverityThresholds {
+  val NUM_THRESHOLDS = 4
+
+  /** Returns a SeverityThresholds object from a Dr. Elephant configuration string parseable by Utils.getParam(String, int). */
+  def parse(
+             rawString: String,
+             ascending: Boolean
+           ): Option[SeverityThresholds] = Option(Utils.getParam(rawString, NUM_THRESHOLDS)).map { thresholds =>
+    SeverityThresholds(low = thresholds(0), moderate = thresholds(1), severe = thresholds(2), critical = thresholds(3), ascending)
   }
 }

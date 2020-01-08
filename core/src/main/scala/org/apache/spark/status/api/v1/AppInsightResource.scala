@@ -19,8 +19,8 @@ package org.apache.spark.status.api.v1
 import javax.ws.rs.core.MediaType
 import javax.ws.rs.{GET, Path, Produces}
 import org.apache.spark.JobExecutionStatus
-import org.apache.spark.status.insight.SparkAppData
-import org.apache.spark.status.insight.heuristics.{ConfigurationHeuristic, ExecutorGcHeuristic, ExecutorsHeuristic, HeuristicRecord, HeuristicResult, JobsHeuristic, StagesHeuristic}
+import org.apache.spark.status.insight.SparkApplicationData
+import org.apache.spark.status.insight.heuristics.{ConfigurationHeuristic, ExecutorGcHeuristic, ExecutorsHeuristic, HeuristicResultDetails, HeuristicResult, JobsHeuristic, StagesHeuristic}
 
 import scala.collection.JavaConverters._
 
@@ -41,13 +41,13 @@ private[v1] class AppInsightResource extends BaseAppResource {
     heuristic.map(_.apply(appData()))
   }
 
-  private def appData(): SparkAppData = {
+  private def appData(): SparkApplicationData = {
     val applicationInfo = uiRoot.getApplicationInfo(appId).get
     val appConfig = withUI(_.store.environmentInfo()).sparkProperties.map(a => a._1 -> a._2).toMap
     val jobData = withUI(_.store.jobsList(List.empty[JobExecutionStatus].asJava))
     val stageData = withUI(_.store.stageList(List.empty[StageStatus].asJava))
     val executorSummary = withUI(_.store.executorList(false))
 
-    SparkAppData(appId, appConfig, applicationInfo, jobData, stageData, executorSummary)
+    SparkApplicationData(appId, appConfig, applicationInfo, jobData, stageData, executorSummary)
   }
 }

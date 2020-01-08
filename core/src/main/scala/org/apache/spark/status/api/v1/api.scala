@@ -99,7 +99,10 @@ class ExecutorSummary private[spark](
     val removeReason: Option[String],
     val executorLogs: Map[String, String],
     val memoryMetrics: Option[MemoryMetrics],
-    val blacklistedInStages: Set[Int])
+    val blacklistedInStages: Set[Int],
+    val totalMemoryBytesSpilled: Long = 0L,
+    val peakJvmUsedMemory: Map[String, Long] = Map.empty,
+    val peakUnifiedMemory: Map[String, Long] = Map.empty)
 
 class MemoryMetrics private[spark](
     val usedOnHeapStorageMemory: Long,
@@ -199,7 +202,13 @@ class StageData private[spark](
     val accumulatorUpdates: Seq[AccumulableInfo],
     val tasks: Option[Map[Long, TaskData]],
     val executorSummary: Option[Map[String, ExecutorStageSummary]],
-    val killedTasksSummary: Map[String, Int])
+    val killedTasksSummary: Map[String, Int],
+
+    val peakJvmUsedMemory: Option[Long] = Option.empty,
+    val peakExecutionMemory: Option[Long] = Option.empty,
+    val peakStorageMemory: Option[Long] = Option.empty,
+    val peakUnifiedMemory: Option[Long] = Option.empty,
+    val taskSummary : Option[TaskMetricDistributions] = Option.empty)
 
 class TaskData private[spark](
     val taskId: Long,

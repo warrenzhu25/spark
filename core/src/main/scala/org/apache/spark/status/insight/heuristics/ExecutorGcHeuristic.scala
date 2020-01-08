@@ -17,7 +17,7 @@
 package org.apache.spark.status.insight.heuristics
 
 import org.apache.spark.status.api.v1.ExecutorSummary
-import org.apache.spark.status.insight.SparkAppData
+import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.SeverityThresholds
 
 /**
@@ -39,8 +39,8 @@ object ExecutorGcHeuristic extends Heuristic{
 
   override val evaluators = Seq(ExecutorsGcEvaluator)
 
-  object ExecutorsGcEvaluator extends Evaluator {
-    override def evaluate(sparkAppData: SparkAppData): Seq[HeuristicRecord] = {
+  object ExecutorsGcEvaluator extends SparkEvaluator {
+    override def evaluate(sparkAppData: SparkApplicationData): Seq[HeuristicResultDetails] = {
       lazy val executorAndDriverSummaries: Seq[ExecutorSummary] = sparkAppData.executorSummaries
       lazy val executorSummaries: Seq[ExecutorSummary] = executorAndDriverSummaries.filterNot(_.id.equals("driver"))
       val (jvmTime, executorRunTimeTotal) = getTimeValues(executorSummaries)
@@ -48,9 +48,9 @@ object ExecutorGcHeuristic extends Heuristic{
       val ratio: Double = jvmTime.toDouble / executorRunTimeTotal.toDouble
 
       Seq(
-        HeuristicRecord("GC time to Executor Run time ratio", ratio.toString),
-        HeuristicRecord("Total GC time", jvmTime.toString),
-        HeuristicRecord("Total Executor Runtime", executorRunTimeTotal.toString)
+        HeuristicResultDetails("GC time to Executor Run time ratio", ratio.toString),
+        HeuristicResultDetails("Total GC time", jvmTime.toString),
+        HeuristicResultDetails("Total Executor Runtime", executorRunTimeTotal.toString)
       )
     }
     /**

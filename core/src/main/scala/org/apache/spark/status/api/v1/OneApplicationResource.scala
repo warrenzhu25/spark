@@ -20,10 +20,11 @@ import java.io.OutputStream
 import java.util.{List => JList}
 import java.util.zip.ZipOutputStream
 
+import com.linkedin.drelephant.spark.heuristics.{StagesWithFailedTasksHeuristic, UnifiedMemoryHeuristic}
 import javax.ws.rs.{DefaultValue, GET, Path, PathParam, Produces, QueryParam}
 import javax.ws.rs.core.{MediaType, Response, StreamingOutput}
-import org.apache.spark.status.insight.SparkAppData
-import org.apache.spark.status.insight.heuristics.{ConfigurationHeuristic, ExecutorGcHeuristic, ExecutorsHeuristic, HeuristicRecord, HeuristicResult, JobsHeuristic, StagesHeuristic}
+import org.apache.spark.status.insight.SparkApplicationData
+import org.apache.spark.status.insight.heuristics.{ConfigurationHeuristic, ConfigurationParametersHeuristic, DriverHeuristic, ExecutorGcHeuristic, ExecutorStorageSpillHeuristic, ExecutorsHeuristic, HeuristicResult, HeuristicResultDetails, JobsHeuristic, JvmUsedMemoryHeuristic, StagesHeuristic}
 
 import scala.util.control.NonFatal
 import org.apache.spark.{JobExecutionStatus, SparkContext}
@@ -188,7 +189,11 @@ private[v1] class AbstractApplicationResource extends BaseAppResource {
     ExecutorGcHeuristic,
     ExecutorsHeuristic,
     JobsHeuristic,
-    StagesHeuristic
+    StagesHeuristic,
+    new ConfigurationParametersHeuristic,
+    new DriverHeuristic,
+    new ExecutorStorageSpillHeuristic,
+    new StagesWithFailedTasksHeuristic
   )
 
   @GET
@@ -197,14 +202,14 @@ private[v1] class AbstractApplicationResource extends BaseAppResource {
     heuristic.map(_.apply(appData()))
   }
 
-  private def appData(): SparkAppData = {
+  private def appData(): SparkApplicationData = {
     val applicationInfo = uiRoot.getApplicationInfo(appId).get
     val appConfig = withUI(_.store.environmentInfo()).sparkProperties.map(a => a._1 -> a._2).toMap
     val jobData = withUI(_.store.jobsList(List.empty[JobExecutionStatus].asJava))
     val stageData = withUI(_.store.stageList(List.empty[StageStatus].asJava))
     val executorSummary = withUI(_.store.executorList(false))
 
-    SparkAppData(appId, appConfig, applicationInfo, jobData, stageData, executorSummary)
+    SparkApplicationData(appId, appConfig, applicationInfo, jobData, stageData, executorSummary)
   }
 
 }
