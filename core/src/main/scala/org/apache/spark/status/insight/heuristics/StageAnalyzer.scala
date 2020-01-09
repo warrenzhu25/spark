@@ -173,31 +173,31 @@ private[heuristics] class StagesAnalyzer(private val data: SparkApplicationData)
     }
     if (hasSignificantSeverity(rawSpillSeverity)) {
       val memoryBytesSpilled = MemoryFormatUtils.bytesToString(stageData.memoryBytesSpilled)
-      details += s"Stage $stageId has $memoryBytesSpilled execution memory spill."
-      if (maxData > maxDataProcessedThreshold) {
-        // if a lot of data is being processed, the severity is supressed, but give information
-        // about the spill to the user, so that they know that spill is happening, and can check
-        // if the application can be modified to process less data.
-        details += s"Stage $stageId has ${stageData.numTasks} tasks, " +
-          s"${MemoryFormatUtils.bytesToString(stageData.inputBytes)} input read, " +
-          s"${MemoryFormatUtils.bytesToString(stageData.shuffleReadBytes)} shuffle read, " +
-          s"${MemoryFormatUtils.bytesToString(stageData.shuffleWriteBytes)} shuffle write, " +
-          s"${MemoryFormatUtils.bytesToString(stageData.outputBytes)} output."
+      val diskBytesSpilled = MemoryFormatUtils.bytesToString(stageData.diskBytesSpilled)
+      val ratio = stageData.memoryBytesSpilled.toDouble / stageData.diskBytesSpilled
+      details += f"${format(stageData)} has $memoryBytesSpilled/${diskBytesSpilled} (memory/disk) spill. (Ratio $ratio%.3f)"
+      // if a lot of data is being processed, the severity is supressed, but give information
+      // about the spill to the user, so that they know that spill is happening, and can check
+      // if the application can be modified to process less data.
+      details += s"${format(stageData)} has ${stageData.numTasks} tasks, " +
+        s"${MemoryFormatUtils.bytesToString(stageData.inputBytes)} input read, " +
+        s"${MemoryFormatUtils.bytesToString(stageData.shuffleReadBytes)} shuffle read, " +
+        s"${MemoryFormatUtils.bytesToString(stageData.shuffleWriteBytes)} shuffle write, " +
+        s"${MemoryFormatUtils.bytesToString(stageData.outputBytes)} output."
 
-        if (stageData.taskSummary.isDefined) {
-          val summary = stageData.taskSummary.get
-          val memorySpill = summary.memoryBytesSpilled(DISTRIBUTION_MEDIAN_IDX).toLong
-          val inputBytes = summary.inputMetrics.bytesRead(DISTRIBUTION_MEDIAN_IDX).toLong
-          val outputBytes = summary.outputMetrics.bytesWritten(DISTRIBUTION_MEDIAN_IDX).toLong
-          val shuffleReadBytes = summary.shuffleReadMetrics.readBytes(DISTRIBUTION_MEDIAN_IDX).toLong
-          val shuffleWriteBytes = summary.shuffleWriteMetrics.writeBytes(DISTRIBUTION_MEDIAN_IDX).toLong
-          details += s"Stage $stageId has median task values: " +
-            s"${MemoryFormatUtils.bytesToString(memorySpill)} memory spill, " +
-            s"${MemoryFormatUtils.bytesToString(inputBytes)} input, " +
-            s"${MemoryFormatUtils.bytesToString(shuffleReadBytes)} shuffle read, " +
-            s"${MemoryFormatUtils.bytesToString(shuffleWriteBytes)} shuffle write, " +
-            s"${MemoryFormatUtils.bytesToString(outputBytes)} output."
-        }
+      if (stageData.taskSummary.isDefined) {
+        val summary = stageData.taskSummary.get
+        val memorySpill = summary.memoryBytesSpilled(DISTRIBUTION_MEDIAN_IDX).toLong
+        val inputBytes = summary.inputMetrics.bytesRead(DISTRIBUTION_MEDIAN_IDX).toLong
+        val outputBytes = summary.outputMetrics.bytesWritten(DISTRIBUTION_MEDIAN_IDX).toLong
+        val shuffleReadBytes = summary.shuffleReadMetrics.readBytes(DISTRIBUTION_MEDIAN_IDX).toLong
+        val shuffleWriteBytes = summary.shuffleWriteMetrics.writeBytes(DISTRIBUTION_MEDIAN_IDX).toLong
+        details += s"${format(stageData)} has median task values: " +
+          s"${MemoryFormatUtils.bytesToString(memorySpill)} memory spill, " +
+          s"${MemoryFormatUtils.bytesToString(inputBytes)} input, " +
+          s"${MemoryFormatUtils.bytesToString(shuffleReadBytes)} shuffle read, " +
+          s"${MemoryFormatUtils.bytesToString(shuffleWriteBytes)} shuffle write, " +
+          s"${MemoryFormatUtils.bytesToString(outputBytes)} output."
       }
     }
 
@@ -257,7 +257,7 @@ private[heuristics] class StagesAnalyzer(private val data: SparkApplicationData)
       var inputSkewSeverity = Severity.NONE
       if (hasSignificantSeverity(taskSkewSeverity)) {
         details +=
-          s"Stage $stageId has skew in task run time (median is $medianStr, max is $maximumStr)."
+          s"${format(stageData)} has skew in task run time (median is $medianStr, max is $maximumStr)."
       }
       stageData.taskSummary.foreach { summary =>
         checkSkewedData(stageId, summary.memoryBytesSpilled(DISTRIBUTION_MEDIAN_IDX),
@@ -268,7 +268,7 @@ private[heuristics] class StagesAnalyzer(private val data: SparkApplicationData)
           input.bytesRead(DISTRIBUTION_MAX_IDX), "task input bytes", details)
         if (hasSignificantSeverity(inputSkewSeverity)) {
           // The stage is reading input data, try to adjust the amount of data to even the partitions
-          details += s"Stage $stageId: ${taskSkewInputDataRecommendation}."
+          details += s"${format(stageData)}: ${taskSkewInputDataRecommendation}."
         }
 
         val output = summary.outputMetrics
@@ -284,7 +284,7 @@ private[heuristics] class StagesAnalyzer(private val data: SparkApplicationData)
           shuffleWrite.writeBytes(DISTRIBUTION_MAX_IDX), "task shuffle write bytes", details)
       }
       if (hasSignificantSeverity(rawSkewSeverity) && !hasSignificantSeverity(inputSkewSeverity)) {
-        details += s"Stage $stageId: ${taskSkewGenericRecommendation}."
+        details += s"${format(stageData)}: ${taskSkewGenericRecommendation}."
       }
     }
     val score = Utils.getHeuristicScore(taskSkewSeverity, stageData.numTasks)
@@ -382,7 +382,7 @@ private[heuristics] class StagesAnalyzer(private val data: SparkApplicationData)
       Severity.NONE
     }
     val score = Utils.getHeuristicScore(severity, stageData.numTasks)
-    val details = stageData.failureReason.map(reason => s"Stage $stageId failed: $reason")
+    val details = stageData.failureReason.map(reason => s"${format(stageData)} failed: $reason")
     SimpleStageAnalysisResult(severity, score, details.toSeq)
   }
 
@@ -405,10 +405,10 @@ private[heuristics] class StagesAnalyzer(private val data: SparkApplicationData)
 
     val details = new ArrayBuffer[String]()
 
-    val taskFailureSeverity = taskFailureRateSeverityThresholds.severityOf(
-      stageData.numFailedTasks.toDouble / stageData.numTasks)
+    val taskFailureRate = stageData.numFailedTasks.toDouble / stageData.numTasks
+    val taskFailureSeverity = taskFailureRateSeverityThresholds.severityOf(taskFailureRate)
     if (hasSignificantSeverity(taskFailureSeverity)) {
-      details += s"Stage $stageId has ${stageData.numFailedTasks} failed tasks."
+      details += f"${format(stageData)} has ${stageData.numFailedTasks} failed tasks of ${stageData.numTasks} (Failure rate ${taskFailureRate}%.3f)."
     }
 
     val score = Utils.getHeuristicScore(taskFailureSeverity, stageData.numFailedTasks)
@@ -421,7 +421,7 @@ private[heuristics] class StagesAnalyzer(private val data: SparkApplicationData)
     val (numTasksWithContainerKilled, containerKilledSeverity) =
       checkForSpecificTaskError(stageId, stageData, failedTasks,
         StagesWithFailedTasksHeuristic.OVERHEAD_MEMORY_ERROR,
-        "the container was killed by YARN for exeeding memory limits.", details)
+        "the container was killed by YARN for exceeding memory limits.", details)
 
     TaskFailureResult(taskFailureSeverity, score, details, oomSeverity, containerKilledSeverity,
       stageData.numFailedTasks, numTasksWithOOM, numTasksWithContainerKilled)
@@ -499,4 +499,7 @@ private[heuristics] class StagesAnalyzer(private val data: SparkApplicationData)
 
     SimpleStageAnalysisResult(severity, score, details)
   }
+
+  private def format(stageData: StageData): String =
+    s"Stage ${stageData.stageId} (Attempt ${stageData.attemptId}) : ${stageData.description.getOrElse("")}"
 }

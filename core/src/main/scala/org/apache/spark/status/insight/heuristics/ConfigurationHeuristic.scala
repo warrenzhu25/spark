@@ -50,13 +50,14 @@ object ConfigurationHeuristic extends Heuristic {
   )
 
   object KyroSerializerEvaluator extends SparkEvaluator {
-    override def evaluate(sparkAppData: SparkApplicationData): Seq[HeuristicResultDetails] = {
+    override def evaluate(sparkAppData: SparkApplicationData): Seq[AnalysisResult] = {
       val sparkSerializer = getProperty(sparkAppData, SPARK_SERIALIZER_KEY)
       if(sparkSerializer.isEmpty) {
-        Seq(HeuristicResultDetails(
+        Seq(SingleValueResult(
           SPARK_SERIALIZER_KEY,
-          "org.apache.spark.serializer.KryoSerializer",
-          "KyroSerializer is Not Enabled."))
+          "",
+          "KyroSerializer is Not Enabled.",
+          "org.apache.spark.serializer.KryoSerializer"))
       } else {
         Seq.empty
       }
@@ -64,14 +65,15 @@ object ConfigurationHeuristic extends Heuristic {
   }
 
   object ShuffleServiceEvaluator extends SparkEvaluator {
-    override def evaluate(sparkAppData: SparkApplicationData): Seq[HeuristicResultDetails] = {
+    override def evaluate(sparkAppData: SparkApplicationData): Seq[AnalysisResult] = {
       val dynamicAllocationEnabled = getProperty(sparkAppData, SPARK_DYNAMIC_ALLOCATION_ENABLED).getOrElse("false").toBoolean
       val shuffleServiceEnabled = getProperty(sparkAppData, SPARK_SHUFFLE_SERVICE_ENABLED).getOrElse("false").toBoolean
       if(dynamicAllocationEnabled && !shuffleServiceEnabled) {
-        Seq(HeuristicResultDetails(
+        Seq(SingleValueResult(
           SPARK_DYNAMIC_ALLOCATION_ENABLED,
-          "true",
-          "Spark shuffle service is not enabled when dynamic allocation is enabled."))
+          "false",
+          "Spark shuffle service is not enabled when dynamic allocation is enabled.",
+          "true"))
       } else {
         Seq.empty
       }
@@ -81,13 +83,14 @@ object ConfigurationHeuristic extends Heuristic {
   object ExecutorCoreEvaluator extends SparkEvaluator {
     private val MIN_EXECUTOR_CORES = 2
     private val MAX_EXECUTOR_CORES = 5
-    override def evaluate(sparkAppData: SparkApplicationData): Seq[HeuristicResultDetails] = {
+    override def evaluate(sparkAppData: SparkApplicationData): Seq[AnalysisResult] = {
       val executorCores = getProperty(sparkAppData, SPARK_EXECUTOR_CORES_KEY).getOrElse("1").toInt
       if(executorCores < MIN_EXECUTOR_CORES || executorCores >= MAX_EXECUTOR_CORES) {
-        Seq(HeuristicResultDetails(
+        Seq(SingleValueResult(
           SPARK_EXECUTOR_CORES_KEY,
-          "4",
-          "Spark executor cores should be between 2 and 4. Too small cores will have higher overhead, and too many cores lead to poor performance due to HDFS concurrent read issues."))
+          executorCores.toString,
+          "Spark executor cores should be between 2 and 4. Too small cores will have higher overhead, and too many cores lead to poor performance due to HDFS concurrent read issues.",
+          "4"))
       } else {
         Seq.empty
       }
@@ -96,13 +99,14 @@ object ConfigurationHeuristic extends Heuristic {
 
   object CompressedOopsEvaluator extends SparkEvaluator {
     private val COMPRESSED_OOPS_THRESHOLD = 32
-    override def evaluate(sparkAppData: SparkApplicationData): Seq[HeuristicResultDetails] = {
+    override def evaluate(sparkAppData: SparkApplicationData): Seq[AnalysisResult] = {
       val executorMemory = getProperty(sparkAppData, SPARK_EXECUTOR_MEMORY_KEY).getOrElse("1g")
       if(Utils.byteStringAsGb(executorMemory) < COMPRESSED_OOPS_THRESHOLD) {
-        Seq(HeuristicResultDetails(
-          SPARK_EXECUTOR_CORES_KEY,
-          "-XX:+UseCompressedOops",
-          "When executor memory is smaller than 32g, use this option to make pointers be four bytes instead of eight."))
+        Seq(SingleValueResult(
+          "spark.executor.extraJavaOptions",
+          "",
+          "When executor memory is smaller than 32g, use this option to make pointers be four bytes instead of eight.",
+          "-XX:+UseCompressedOops"))
       } else {
         Seq.empty
       }
@@ -110,17 +114,18 @@ object ConfigurationHeuristic extends Heuristic {
   }
 
   object ExecutorMemoryOverheadEvaluator extends SparkEvaluator {
-    override def evaluate(sparkAppData: SparkApplicationData): Seq[HeuristicResultDetails] = {
+    override def evaluate(sparkAppData: SparkApplicationData): Seq[AnalysisResult] = {
       val offheapEnabled = getProperty(sparkAppData, "spark.memory.offHeap.enabled").getOrElse("false").toBoolean
       val offHeapSize = getProperty(sparkAppData, "spark.memory.offHeap.size").getOrElse("0").toInt
       val memoryOverhead = getProperty(sparkAppData, SPARK_EXECUTOR_MEMORY_OVERHEAD).getOrElse("384")
       val memory = getProperty(sparkAppData, SPARK_EXECUTOR_MEMORY_KEY).getOrElse("1g")
       val targetOverhead = offHeapSize + Math.min(384, Utils.byteStringAsMb(memory) /10)
       if(offheapEnabled && (targetOverhead > Utils.byteStringAsMb(memoryOverhead))) {
-        Seq(HeuristicResultDetails(
+        Seq(SingleValueResult(
           SPARK_EXECUTOR_MEMORY_OVERHEAD,
-          targetOverhead + "m",
-          "When executor memory off heap is enabled, memory overhead value should add off heap size up."))
+          memory,
+          "When executor memory off heap is enabled, memory overhead value should add off heap size up.",
+          targetOverhead + "m"))
       } else {
         Seq.empty
       }

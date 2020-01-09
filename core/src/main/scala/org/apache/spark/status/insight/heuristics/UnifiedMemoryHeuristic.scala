@@ -19,7 +19,7 @@ package com.linkedin.drelephant.spark.heuristics
 import org.apache.spark.status.api.v1.ExecutorSummary
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.{MemoryFormatUtils, Severity, SeverityThresholds}
-import org.apache.spark.status.insight.heuristics.{Heuristic, HeuristicResult, HeuristicResultDetails}
+import org.apache.spark.status.insight.heuristics.{AnalysisResult, Heuristic, HeuristicResult, SimpleResult}
 import org.apache.spark.status.insight.util.Utils
 
 import scala.collection.JavaConverters
@@ -42,11 +42,11 @@ class UnifiedMemoryHeuristic extends Heuristic {
     val evaluator = new Evaluator(this, data)
 
     val resultDetails = Seq(
-      HeuristicResultDetails("Unified Memory Space Allocated", MemoryFormatUtils.bytesToString(evaluator.maxMemory)),
-      HeuristicResultDetails("Mean peak unified memory", MemoryFormatUtils.bytesToString(evaluator.meanUnifiedMemory)),
-      HeuristicResultDetails(MAX_PEAK_UNIFIED_MEMORY_HEURISTIC_NAME, MemoryFormatUtils.bytesToString(evaluator.maxUnifiedMemory)),
-      HeuristicResultDetails("spark.executor.memory", MemoryFormatUtils.bytesToString(evaluator.sparkExecutorMemory)),
-      HeuristicResultDetails("spark.memory.fraction", evaluator.sparkMemoryFraction.toString)
+      SimpleResult("Unified Memory Space Allocated", MemoryFormatUtils.bytesToString(evaluator.maxMemory)),
+      SimpleResult("Mean peak unified memory", MemoryFormatUtils.bytesToString(evaluator.meanUnifiedMemory)),
+      SimpleResult(MAX_PEAK_UNIFIED_MEMORY_HEURISTIC_NAME, MemoryFormatUtils.bytesToString(evaluator.maxUnifiedMemory)),
+      SimpleResult("spark.executor.memory", MemoryFormatUtils.bytesToString(evaluator.sparkExecutorMemory)),
+      SimpleResult("spark.memory.fraction", evaluator.sparkMemoryFraction.toString)
     )
 
     HeuristicResult(

@@ -19,7 +19,7 @@ package com.linkedin.drelephant.spark.heuristics
 import org.apache.spark.status.api.v1.{StageData, StageStatus, TaskData}
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.Severity
-import org.apache.spark.status.insight.heuristics.{Heuristic, HeuristicResultDetails, HeuristicResult}
+import org.apache.spark.status.insight.heuristics.{Heuristic, SimpleResult, HeuristicResult}
 import org.apache.spark.status.insight.util.Utils
 
 import scala.collection.JavaConverters
@@ -31,19 +31,18 @@ class StagesWithFailedTasksHeuristic()
   extends Heuristic {
 
   import StagesWithFailedTasksHeuristic._
-  import JavaConverters._
 
   override def apply(data: SparkApplicationData): HeuristicResult = {
     val evaluator = new Evaluator(this, data)
     var resultDetails = Seq(
-      new HeuristicResultDetails("Stages with OOM errors", evaluator.stagesWithOOMError.toString),
-      new HeuristicResultDetails("Stages with Overhead memory errors", evaluator.stagesWithOverheadError.toString)
+      new SimpleResult("Stages with OOM errors", evaluator.stagesWithOOMError.toString),
+      new SimpleResult("Stages with Overhead memory errors", evaluator.stagesWithOverheadError.toString)
     )
     if (evaluator.severityOverheadStages.getValue >= Severity.MODERATE.getValue)
-      resultDetails = resultDetails :+ new HeuristicResultDetails("Overhead memory errors", "Some tasks have failed due to overhead memory error. Please try increasing spark.yarn.executor.memoryOverhead by " + increaseMemoryBy +" in spark.yarn.executor.memoryOverhead")
+      resultDetails = resultDetails :+ new SimpleResult("Overhead memory errors", "Some tasks have failed due to overhead memory error. Please try increasing spark.yarn.executor.memoryOverhead by " + increaseMemoryBy +" in spark.yarn.executor.memoryOverhead")
     //TODO: refine recommendations
     if (evaluator.severityOOMStages.getValue >= Severity.MODERATE.getValue)
-      resultDetails = resultDetails :+ new HeuristicResultDetails("OOM errors", "Some tasks have failed due to OOM error. Try increasing spark.executor.memory or decreasing spark.memory.fraction (take a look at unified memory heuristic) or decreasing number of cores.")
+      resultDetails = resultDetails :+ new SimpleResult("OOM errors", "Some tasks have failed due to OOM error. Try increasing spark.executor.memory or decreasing spark.memory.fraction (take a look at unified memory heuristic) or decreasing number of cores.")
     HeuristicResult(
       name,
       resultDetails

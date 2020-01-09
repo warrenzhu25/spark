@@ -63,7 +63,7 @@ object ExecutorsHeuristic extends Heuristic {
 
   object ExecutorsEvaluator extends SparkEvaluator {
 
-    override def evaluate(sparkAppData: SparkApplicationData): Seq[HeuristicResultDetails] = {
+    override def evaluate(sparkAppData: SparkApplicationData): Seq[AnalysisResult] = {
 
       lazy val executorSummaries: Seq[ExecutorSummary] = sparkAppData.executorSummaries
 
@@ -128,39 +128,39 @@ object ExecutorsHeuristic extends Heuristic {
       )
 
       Seq(
-        HeuristicResultDetails(
+        SimpleResult(
           "Total executor storage memory allocated",
           MemoryFormatUtils.bytesToString(totalStorageMemoryAllocated)
         ),
-        HeuristicResultDetails(
+        SimpleResult(
           "Total executor storage memory used",
           MemoryFormatUtils.bytesToString(totalStorageMemoryUsed)
         ),
-        HeuristicResultDetails(
+        SimpleResult(
           "Executor storage memory utilization rate",
           f"${storageMemoryUtilizationRate}%1.3f"
         ),
-        HeuristicResultDetails(
+        SimpleResult(
           "Executor storage memory used distribution",
           Distribution.formatDistributionBytes(storageMemoryUsedDistribution)
         ),
-        HeuristicResultDetails(
+        SimpleResult(
           "Executor task time distribution",
           Distribution.formatDistributionDuration(taskTimeDistribution)
         ),
-        HeuristicResultDetails(
+        SimpleResult(
           "Executor task time sum",
           (totalTaskTime / Statistics.SECOND_IN_MS).toString
         ),
-        HeuristicResultDetails(
+        SimpleResult(
           "Executor input bytes distribution",
           Distribution.formatDistributionBytes(inputBytesDistribution)
         ),
-        HeuristicResultDetails(
+        SimpleResult(
           "Executor shuffle read bytes distribution",
           Distribution.formatDistributionBytes(shuffleReadBytesDistribution)
         ),
-        HeuristicResultDetails(
+        SimpleResult(
           "Executor shuffle write bytes distribution",
           Distribution.formatDistributionBytes(shuffleWriteBytesDistribution)
         )

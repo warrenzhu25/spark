@@ -44,18 +44,18 @@ class ExecutorStorageSpillHeuristic()
   override def apply(data: SparkApplicationData): HeuristicResult = {
     val evaluator = new Evaluator(this, data)
     var resultDetails = Seq(
-      new HeuristicResultDetails("Total memory spilled", MemoryFormatUtils.bytesToString(evaluator.totalMemorySpilled)),
-      new HeuristicResultDetails("Max memory spilled", MemoryFormatUtils.bytesToString(evaluator.maxMemorySpilled)),
-      new HeuristicResultDetails("Mean memory spilled", MemoryFormatUtils.bytesToString(evaluator.meanMemorySpilled)),
-      new HeuristicResultDetails("Fraction of executors having non zero bytes spilled", evaluator.fractionOfExecutorsHavingBytesSpilled.toString)
+      new SimpleResult("Total memory spilled", MemoryFormatUtils.bytesToString(evaluator.totalMemorySpilled)),
+      new SimpleResult("Max memory spilled", MemoryFormatUtils.bytesToString(evaluator.maxMemorySpilled)),
+      new SimpleResult("Mean memory spilled", MemoryFormatUtils.bytesToString(evaluator.meanMemorySpilled)),
+      new SimpleResult("Fraction of executors having non zero bytes spilled", evaluator.fractionOfExecutorsHavingBytesSpilled.toString)
     )
 
     if(evaluator.severity != Severity.NONE){
-      resultDetails :+ new HeuristicResultDetails("Note", "Your execution memory is being spilled. Kindly look into it.")
+      resultDetails :+ new SimpleResult("Note", "Your execution memory is being spilled. Kindly look into it.")
       if(evaluator.sparkExecutorCores >= sparkExecutorCoresThreshold && evaluator.sparkExecutorMemory >= MemoryFormatUtils.stringToBytes(sparkExecutorMemoryThreshold)) {
-        resultDetails :+ new HeuristicResultDetails("Recommendation", "You can try decreasing the number of cores to reduce the number of concurrently running tasks.")
+        resultDetails :+ new SimpleResult("Recommendation", "You can try decreasing the number of cores to reduce the number of concurrently running tasks.")
       } else if (evaluator.sparkExecutorMemory <= MemoryFormatUtils.stringToBytes(sparkExecutorMemoryThreshold)) {
-        resultDetails :+ new HeuristicResultDetails("Recommendation", "You can try increasing the executor memory to reduce spill.")
+        resultDetails :+ new SimpleResult("Recommendation", "You can try increasing the executor memory to reduce spill.")
       }
     }
 

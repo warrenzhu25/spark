@@ -20,6 +20,7 @@ import org.apache.spark.JobExecutionStatus
 import org.apache.spark.status.api.v1.JobData
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.{Severity, SeverityThresholds}
+import org.apache.spark.util.Benchmark.Result
 
 /**
   * A heuristic based on metrics for a Spark app's jobs.
@@ -48,7 +49,7 @@ object JobsHeuristic extends Heuristic {
 
   object JobEvaluator extends SparkEvaluator {
 
-    def evaluate(sparkAppData: SparkApplicationData): Seq[HeuristicResultDetails] = {
+    def evaluate(sparkAppData: SparkApplicationData): Seq[AnalysisResult] = {
 
       lazy val jobDatas: Seq[JobData] = sparkAppData.jobData
 
@@ -89,14 +90,11 @@ object JobsHeuristic extends Heuristic {
       lazy val taskFailureRateSeverities: Seq[Severity] =
       jobsAndTaskFailureRateSeverities.map { case (_, _, severity) => severity }
 
-      def formatFailedJobs(failedJobs: Seq[JobData]): String = failedJobs.map(formatFailedJob).mkString("\n")
-
       def formatFailedJob(jobData: JobData): String = f"job ${jobData.jobId}, ${jobData.name}"
 
-      def formatJobsWithHighTaskFailureRates(jobsWithHighTaskFailureRates: Seq[(JobData, Double)]): String =
+      def formatJobsWithHighTaskFailureRates(jobsWithHighTaskFailureRates: Seq[(JobData, Double)]): Seq[String] =
         jobsWithHighTaskFailureRates
           .map { case (jobData, taskFailureRate) => formatJobWithHighTaskFailureRate(jobData, taskFailureRate) }
-          .mkString("\n")
 
       def formatJobWithHighTaskFailureRate(jobData: JobData, taskFailureRate: Double): String =
         f"job ${jobData.jobId}, ${jobData.name} (task failure rate: ${taskFailureRate}%1.3f)"
@@ -115,11 +113,11 @@ object JobsHeuristic extends Heuristic {
       }
 
       Seq(
-        HeuristicResultDetails("Spark completed jobs count", numCompletedJobs.toString),
-        HeuristicResultDetails("Spark failed jobs count", numFailedJobs.toString),
-        HeuristicResultDetails("Spark failed jobs list", formatFailedJobs(failedJobs)),
-        HeuristicResultDetails("Spark job failure rate", f"${jobFailureRate.getOrElse(0.0D)}%.3f"),
-        HeuristicResultDetails(
+        SimpleResult("Spark completed jobs count", numCompletedJobs.toString),
+        SimpleResult("Spark failed jobs count", numFailedJobs.toString),
+        MultipleValuesResult("Spark failed jobs list", failedJobs.map(formatFailedJob)),
+        SimpleResult("Spark job failure rate", f"${jobFailureRate.getOrElse(0.0D)}%.3f"),
+        MultipleValuesResult(
           "Spark jobs with high task failure rates",
           formatJobsWithHighTaskFailureRates(jobsWithHighTaskFailureRates)
         ))

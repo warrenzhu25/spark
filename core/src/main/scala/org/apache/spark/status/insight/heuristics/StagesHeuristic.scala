@@ -19,7 +19,6 @@ package org.apache.spark.status.insight.heuristics
 import org.apache.spark.status.api.v1.{ExecutorSummary, StageData, StageStatus}
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.{Severity, SeverityThresholds}
-import org.apache.spark.status.insight.heuristics.StagesHeuristic.StagesEvaluator
 import org.apache.spark.status.insight.math.Statistics
 
 import scala.concurrent.duration
@@ -66,7 +65,7 @@ object StagesHeuristic extends Heuristic {
 
     lazy val stageRuntimeMillisSeverityThresholds = DEFAULT_STAGE_RUNTIME_MILLIS_SEVERITY_THRESHOLDS
 
-    override def evaluate(sparkAppData: SparkApplicationData): Seq[HeuristicResultDetails] = {
+    override def evaluate(sparkAppData: SparkApplicationData): Seq[AnalysisResult] = {
 
       lazy val stageDatas: Seq[StageData] = sparkAppData.stageData
 
@@ -85,9 +84,6 @@ object StagesHeuristic extends Heuristic {
         if (numStages == 0) None else Some(numFailedStages.toDouble / numStages.toDouble)
       }
 
-      lazy val stagesWithHighTaskFailureRates: Seq[(StageData, Double)] =
-        stagesWithHighTaskFailureRateSeverities.map { case (stageData, taskFailureRate, _) => (stageData, taskFailureRate) }
-
       lazy val stagesWithLongAverageExecutorRuntimes: Seq[(StageData, Long)] =
         stagesAndAverageExecutorRuntimeSeverities
           .collect { case (stageData, runtime, severity) if severity.getValue > Severity.MODERATE.getValue => (stageData, runtime) }
@@ -96,9 +92,6 @@ object StagesHeuristic extends Heuristic {
 
       lazy val stageFailureRateSeverity: Severity =
         stageFailureRateSeverityThresholds.severityOf(stageFailureRate.getOrElse[Double](0.0D))
-
-      lazy val stagesWithHighTaskFailureRateSeverities: Seq[(StageData, Double, Severity)] =
-        stagesAndTaskFailureRateSeverities.filter { case (_, _, severity) => severity.getValue > Severity.MODERATE.getValue }
 
       lazy val stagesAndTaskFailureRateSeverities: Seq[(StageData, Double, Severity)] = for {
         stageData <- stageDatas
@@ -116,17 +109,30 @@ object StagesHeuristic extends Heuristic {
 
       lazy val runtimeSeverities: Seq[Severity] = stagesAndAverageExecutorRuntimeSeverities.map { case (_, _, severity) => severity }
 
+      val stageAnalysis = new StagesAnalyzer(sparkAppData).getStageAnalysis()
+
       Seq(
-        HeuristicResultDetails("Spark completed stages count", numCompletedStages.toString),
-        HeuristicResultDetails("Spark failed stages count", numFailedStages.toString),
-        HeuristicResultDetails("Spark stage failure rate", f"${stageFailureRate.getOrElse(0.0D)}%.3f"),
-        HeuristicResultDetails(
-          "Spark stages with high task failure rates",
-          formatStagesWithHighTaskFailureRates(stagesWithHighTaskFailureRates)
-        ),
-        HeuristicResultDetails(
+        SimpleResult("Spark completed stages count", numCompletedStages.toString),
+        SimpleResult("Spark failed stages count", numFailedStages.toString),
+        SimpleResult("Spark stage failure rate", f"${stageFailureRate.getOrElse(0.0D)}%.3f"),
+        MultipleValuesResult(
           "Spark stages with long average executor runtimes",
           formatStagesWithLongAverageExecutorRuntimes(stagesWithLongAverageExecutorRuntimes)
+        ),
+        MultipleValuesResult(
+          "Spark task failure result", stageAnalysis.flatMap(_.taskFailureResult.details)
+        ),
+        MultipleValuesResult(
+          "Spark stage failure result", stageAnalysis.flatMap(_.stageFailureResult.details)
+        ),
+        MultipleValuesResult(
+          "Spark task skew result", stageAnalysis.flatMap(_.taskSkewResult.details)
+        ),
+        MultipleValuesResult(
+          "Spark long task result", stageAnalysis.flatMap(_.longTaskResult.details)
+        ),
+        MultipleValuesResult(
+          "Spark task spill result", stageAnalysis.flatMap(_.executionMemorySpillResult.details)
         )
       )
     }
@@ -149,18 +155,16 @@ object StagesHeuristic extends Heuristic {
       (averageExecutorRuntime, stageRuntimeMillisSeverityThresholds.severityOf(averageExecutorRuntime))
     }
 
-    def formatStagesWithHighTaskFailureRates(stagesWithHighTaskFailureRates: Seq[(StageData, Double)]): String =
+    def formatStagesWithHighTaskFailureRates(stagesWithHighTaskFailureRates: Seq[(StageData, Double)]): Seq[String] =
       stagesWithHighTaskFailureRates
         .map { case (stageData, taskFailureRate) => formatStageWithHighTaskFailureRate(stageData, taskFailureRate) }
-        .mkString("\n")
 
     def formatStageWithHighTaskFailureRate(stageData: StageData, taskFailureRate: Double): String =
       f"stage ${stageData.stageId}, attempt ${stageData.attemptId} (task failure rate: ${taskFailureRate}%1.3f)"
 
-    def formatStagesWithLongAverageExecutorRuntimes(stagesWithLongAverageExecutorRuntimes: Seq[(StageData, Long)]): String =
+    def formatStagesWithLongAverageExecutorRuntimes(stagesWithLongAverageExecutorRuntimes: Seq[(StageData, Long)]): Seq[String] =
       stagesWithLongAverageExecutorRuntimes
         .map { case (stageData, runtime) => formatStageWithLongRuntime(stageData, runtime) }
-        .mkString("\n")
 
     def formatStageWithLongRuntime(stageData: StageData, runtime: Long): String =
       f"stage ${stageData.stageId}, attempt ${stageData.attemptId} (runtime: ${Statistics.readableTimespan(runtime)})"

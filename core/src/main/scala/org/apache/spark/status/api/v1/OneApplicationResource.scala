@@ -24,7 +24,7 @@ import com.linkedin.drelephant.spark.heuristics.{StagesWithFailedTasksHeuristic,
 import javax.ws.rs.{DefaultValue, GET, Path, PathParam, Produces, QueryParam}
 import javax.ws.rs.core.{MediaType, Response, StreamingOutput}
 import org.apache.spark.status.insight.SparkApplicationData
-import org.apache.spark.status.insight.heuristics.{ConfigurationHeuristic, ConfigurationParametersHeuristic, DriverHeuristic, ExecutorGcHeuristic, ExecutorStorageSpillHeuristic, ExecutorsHeuristic, HeuristicResult, HeuristicResultDetails, JobsHeuristic, JvmUsedMemoryHeuristic, StagesHeuristic}
+import org.apache.spark.status.insight.heuristics.{ConfigurationHeuristic, ConfigurationParametersHeuristic, DriverHeuristic, ExecutorGcHeuristic, ExecutorStorageSpillHeuristic, ExecutorsHeuristic, HeuristicResult, AnalysisResult, JobsHeuristic, JvmUsedMemoryHeuristic, StagesHeuristic}
 
 import scala.util.control.NonFatal
 import org.apache.spark.{JobExecutionStatus, SparkContext}

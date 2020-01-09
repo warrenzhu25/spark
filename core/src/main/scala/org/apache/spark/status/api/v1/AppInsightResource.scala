@@ -20,7 +20,7 @@ import javax.ws.rs.core.MediaType
 import javax.ws.rs.{GET, Path, Produces}
 import org.apache.spark.JobExecutionStatus
 import org.apache.spark.status.insight.SparkApplicationData
-import org.apache.spark.status.insight.heuristics.{ConfigurationHeuristic, ExecutorGcHeuristic, ExecutorsHeuristic, HeuristicResultDetails, HeuristicResult, JobsHeuristic, StagesHeuristic}
+import org.apache.spark.status.insight.heuristics.{ConfigurationHeuristic, ExecutorGcHeuristic, ExecutorsHeuristic, AnalysisResult, HeuristicResult, JobsHeuristic, StagesHeuristic}
 
 import scala.collection.JavaConverters._
 

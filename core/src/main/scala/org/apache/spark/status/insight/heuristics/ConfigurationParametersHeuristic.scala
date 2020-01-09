@@ -37,51 +37,48 @@ class ConfigurationParametersHeuristic()
 
     // add current configuration parameter values, and recommended parameter values to the result.
     var resultDetails = ArrayBuffer(
-      new HeuristicResultDetails(CURRENT_SPARK_EXECUTOR_MEMORY,
+      new SimpleResult(CURRENT_SPARK_EXECUTOR_MEMORY,
         bytesToString(evaluator.sparkExecutorMemory)),
-      new HeuristicResultDetails(CURRENT_SPARK_DRIVER_MEMORY,
+      new SimpleResult(CURRENT_SPARK_DRIVER_MEMORY,
         bytesToString(evaluator.sparkDriverMemory)),
-      new HeuristicResultDetails(CURRENT_SPARK_EXECUTOR_CORES, evaluator.sparkExecutorCores.toString),
-      new HeuristicResultDetails(CURRENT_SPARK_DRIVER_CORES, evaluator.sparkDriverCores.toString),
-      new HeuristicResultDetails(CURRENT_SPARK_MEMORY_FRACTION, evaluator.sparkMemoryFraction.toString))
+      new SimpleResult(CURRENT_SPARK_EXECUTOR_CORES, evaluator.sparkExecutorCores.toString),
+      new SimpleResult(CURRENT_SPARK_DRIVER_CORES, evaluator.sparkDriverCores.toString),
+      new SimpleResult(CURRENT_SPARK_MEMORY_FRACTION, evaluator.sparkMemoryFraction.toString))
     evaluator.sparkExecutorInstances.foreach { numExecutors =>
-      resultDetails += new HeuristicResultDetails(CURRENT_SPARK_EXECUTOR_INSTANCES, numExecutors.toString)
+      resultDetails += new SimpleResult(CURRENT_SPARK_EXECUTOR_INSTANCES, numExecutors.toString)
     }
     evaluator.sparkExecutorMemoryOverhead.foreach { memOverhead =>
-      resultDetails += new HeuristicResultDetails(CURRENT_SPARK_EXECUTOR_MEMORY_OVERHEAD,
+      resultDetails += new SimpleResult(CURRENT_SPARK_EXECUTOR_MEMORY_OVERHEAD,
         bytesToString(memOverhead))
     }
     evaluator.sparkDriverMemoryOverhead.foreach { memOverhead =>
-      resultDetails += new HeuristicResultDetails(CURRENT_SPARK_DRIVER_MEMORY_OVERHEAD,
+      resultDetails += new SimpleResult(CURRENT_SPARK_DRIVER_MEMORY_OVERHEAD,
         bytesToString(memOverhead))
     }
 
     resultDetails ++= Seq(
-      new HeuristicResultDetails(RECOMMENDED_SPARK_EXECUTOR_CORES,
+      new SimpleResult(RECOMMENDED_SPARK_EXECUTOR_CORES,
         evaluator.recommendedExecutorCores.toString),
-      new HeuristicResultDetails(RECOMMENDED_SPARK_EXECUTOR_MEMORY,
+      new SimpleResult(RECOMMENDED_SPARK_EXECUTOR_MEMORY,
         bytesToString(evaluator.recommendedExecutorMemory)),
-      new HeuristicResultDetails(RECOMMENDED_SPARK_MEMORY_FRACTION,
+      new SimpleResult(RECOMMENDED_SPARK_MEMORY_FRACTION,
         evaluator.recommendedMemoryFraction.toString),
-      new HeuristicResultDetails(RECOMMENDED_SPARK_DRIVER_CORES,
+      new SimpleResult(RECOMMENDED_SPARK_DRIVER_CORES,
         evaluator.recommendedDriverCores.toString),
-      new HeuristicResultDetails(RECOMMENDED_SPARK_DRIVER_MEMORY,
+      new SimpleResult(RECOMMENDED_SPARK_DRIVER_MEMORY,
         bytesToString(evaluator.recommendedDriverMemory))
      )
     evaluator.recommendedExecutorInstances.foreach { numExecutors =>
-      resultDetails += new HeuristicResultDetails(RECOMMENDED_SPARK_EXECUTOR_INSTANCES,
+      resultDetails += new SimpleResult(RECOMMENDED_SPARK_EXECUTOR_INSTANCES,
         numExecutors.toString)
     }
     evaluator.recommendedExecutorMemoryOverhead.foreach { memoryOverhead =>
-      resultDetails += new HeuristicResultDetails(RECOMMENDED_SPARK_EXECUTOR_MEMORY_OVERHEAD,
+      resultDetails += new SimpleResult(RECOMMENDED_SPARK_EXECUTOR_MEMORY_OVERHEAD,
         bytesToString(memoryOverhead))
     }
     evaluator.recommendedDriverMemoryOverhead.foreach { memoryOverhead =>
-      resultDetails += new HeuristicResultDetails(RECOMMENDED_SPARK_DRIVER_MEMORY_OVERHEAD,
+      resultDetails += new SimpleResult(RECOMMENDED_SPARK_DRIVER_MEMORY_OVERHEAD,
         bytesToString(memoryOverhead))
-    }
-    if (evaluator.stageDetails.value.length > 0) {
-      resultDetails += evaluator.stageDetails
     }
 
     HeuristicResult(
@@ -177,14 +174,6 @@ class ConfigurationParametersHeuristic()
      // adjust driver configuration parameters
      val (recommendedDriverCores, recommendedDriverMemory, driverSeverity, driverScore) =
        adjustDriverParameters()
-
-     // stage level informaton and recommendations
-     private val stageDetailsStr = stageAnalysis.flatMap { analysis =>
-       analysis.taskFailureResult.details ++ analysis.stageFailureResult.details ++
-         analysis.taskSkewResult.details ++ analysis.longTaskResult.details ++
-         analysis.executionMemorySpillResult.details
-     }.toArray.mkString("\n")
-     val stageDetails = new HeuristicResultDetails("stage details", stageDetailsStr)
 
      val score = stageAnalysis.map(_.getStageAnalysisResults.map(_.score).sum).sum +
         + jvmUsedMemoryEvaluator.score + driverScore

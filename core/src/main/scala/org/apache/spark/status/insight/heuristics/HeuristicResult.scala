@@ -2,13 +2,25 @@ package org.apache.spark.status.insight.heuristics
 
 import org.apache.spark.status.insight.analysis.Severity
 
-case class HeuristicResultDetails(name: String,
-                                  value: String = "Default",
-                                  suggestedValue: String = "",
-                                  description: String = "")
-
 case class HeuristicResult(name: String,
-                           heuristicRecords: Seq[HeuristicResultDetails])
+                           results: Seq[AnalysisResult])
+
+case class SingleValueResult(name: String,
+                             value: String,
+                             description:String,
+                             suggestedValue: String = "") extends AnalysisResult
+
+case class MultipleValuesResult(name: String,
+                                values: Seq[String],
+                                description: String = "") extends AnalysisResult
+
+case class SimpleResult(name: String,
+                        description:String) extends AnalysisResult
+
+trait AnalysisResult{
+  def name: String
+  def description: String
+}
 
 /** Stage analysis result. */
 private[heuristics] sealed trait StageAnalysisResult {
