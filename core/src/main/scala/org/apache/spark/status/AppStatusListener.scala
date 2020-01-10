@@ -366,6 +366,20 @@ private[spark] class AppStatusListener(
     val sqlExecutionId = Option(event.properties)
       .flatMap(p => Option(p.getProperty(SQL_EXECUTION_ID_KEY)).map(_.toLong))
 
+    // Create the graph data for all the job's stages.
+    var stagesRddGraph = Seq[RDDOperationGraphWrapper]()
+    event.stageInfos.foreach { stage =>
+      val graph = RDDOperationGraph.makeOperationGraph(stage, maxGraphRootNodes)
+      val uigraph = new RDDOperationGraphWrapper(
+        stage.stageId,
+        graph.edges,
+        graph.outgoingEdges,
+        graph.incomingEdges,
+        newRDDOperationCluster(graph.rootCluster))
+      kvstore.write(uigraph)
+      stagesRddGraph :+= uigraph
+    }
+
     val job = new LiveJob(
       event.jobId,
       jobName,
@@ -374,7 +388,8 @@ private[spark] class AppStatusListener(
       event.stageIds,
       jobGroup,
       numTasks,
-      sqlExecutionId)
+      sqlExecutionId,
+      Some(stagesRddGraph))
     liveJobs.put(event.jobId, job)
     liveUpdate(job, now)
 
@@ -385,18 +400,6 @@ private[spark] class AppStatusListener(
       stage.jobs :+= job
       stage.jobIds += event.jobId
       liveUpdate(stage, now)
-    }
-
-    // Create the graph data for all the job's stages.
-    event.stageInfos.foreach { stage =>
-      val graph = RDDOperationGraph.makeOperationGraph(stage, maxGraphRootNodes)
-      val uigraph = new RDDOperationGraphWrapper(
-        stage.stageId,
-        graph.edges,
-        graph.outgoingEdges,
-        graph.incomingEdges,
-        newRDDOperationCluster(graph.rootCluster))
-      kvstore.write(uigraph)
     }
   }
 

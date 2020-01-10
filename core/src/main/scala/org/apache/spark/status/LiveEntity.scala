@@ -68,7 +68,8 @@ private class LiveJob(
     val stageIds: Seq[Int],
     jobGroup: Option[String],
     numTasks: Int,
-    sqlExecutionId: Option[Long]) extends LiveEntity {
+    sqlExecutionId: Option[Long],
+    val stagesRddGraph: Option[Seq[RDDOperationGraphWrapper]]) extends LiveEntity {
 
   var activeTasks = 0
   var completedTasks = 0
@@ -111,7 +112,8 @@ private class LiveJob(
       completedStages.size,
       skippedStages.size,
       failedStages,
-      killedSummary)
+      killedSummary,
+      stagesRddGraph)
     new JobDataWrapper(info, skippedStages, sqlExecutionId)
   }
 

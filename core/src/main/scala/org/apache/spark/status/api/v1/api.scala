@@ -31,6 +31,7 @@ import org.apache.spark.JobExecutionStatus
 import org.apache.spark.executor.ExecutorMetrics
 import org.apache.spark.metrics.ExecutorMetricType
 import org.apache.spark.resource.ResourceInformation
+import org.apache.spark.status.RDDOperationGraphWrapper
 
 case class ApplicationInfo private[spark](
     id: String,
@@ -169,7 +170,8 @@ class JobData private[spark](
     val numCompletedStages: Int,
     val numSkippedStages: Int,
     val numFailedStages: Int,
-    val killedTasksSummary: Map[String, Int])
+    val killedTasksSummary: Map[String, Int],
+    val stagesRddGraph: Option[Seq[RDDOperationGraphWrapper]])
 
 class RDDStorageInfo private[spark](
     val id: Int,
