@@ -71,6 +71,7 @@ jobs:
           goals: install
           options: >-
             -Dcheckstyle.skip=true
+            -DskipTests
             -Dhadoop.home.dir=$(Hadoop.Home)
             -s $(System.ArtifactsDirectory)\settings\settings.xml
             -T 1C
