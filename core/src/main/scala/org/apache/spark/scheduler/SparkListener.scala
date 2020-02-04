@@ -202,6 +202,11 @@ case class SparkListenerApplicationStart(
 @DeveloperApi
 case class SparkListenerApplicationEnd(time: Long) extends SparkListenerEvent
 
+@DeveloperApi
+case class SparkListenerApplicationFinalStatusUpdate(
+    time: Long,
+    finalStatus: Option[String] = None) extends SparkListenerEvent
+
 /**
  * An internal class that describes the metadata of an event log.
  */
@@ -281,6 +286,12 @@ private[spark] trait SparkListenerInterface {
    * Called when the application ends
    */
   def onApplicationEnd(applicationEnd: SparkListenerApplicationEnd): Unit
+
+  /**
+    * Called when the application finalStatus updates
+    */
+  def onApplicationFinalStatusUpdate(
+      applicationfinalStatusUpdate: SparkListenerApplicationFinalStatusUpdate): Unit
 
   /**
    * Called when the driver receives task metrics from an executor in a heartbeat.
@@ -387,6 +398,9 @@ abstract class SparkListener extends SparkListenerInterface {
   override def onApplicationStart(applicationStart: SparkListenerApplicationStart): Unit = { }
 
   override def onApplicationEnd(applicationEnd: SparkListenerApplicationEnd): Unit = { }
+
+  override def onApplicationFinalStatusUpdate(
+      applicationfinalStatusUpdate: SparkListenerApplicationFinalStatusUpdate): Unit = { }
 
   override def onExecutorMetricsUpdate(
       executorMetricsUpdate: SparkListenerExecutorMetricsUpdate): Unit = { }

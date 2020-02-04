@@ -1957,6 +1957,9 @@ class SparkContext(config: SparkConf) extends Logging {
       _driverLogger.foreach(_.stop())
     }
     Utils.tryLogNonFatalError {
+      postApplicationFinalStatusUpdate()
+    }
+    Utils.tryLogNonFatalError {
       _ui.foreach(_.stop())
     }
     if (env != null) {
@@ -2454,6 +2457,16 @@ class SparkContext(config: SparkConf) extends Logging {
   /** Post the application end event */
   private def postApplicationEnd(): Unit = {
     listenerBus.post(SparkListenerApplicationEnd(System.currentTimeMillis))
+  }
+
+  /** Post the application finalStatus update event */
+  private def postApplicationFinalStatusUpdate() {
+    val finalStatus = Option(System.getProperty("spark.yarn.application.finalStatus"))
+    if (finalStatus.isDefined) {
+      logInfo(s"Yarn application has already exited with " + finalStatus)
+      listenerBus.post(SparkListenerApplicationFinalStatusUpdate(System
+        .currentTimeMillis, finalStatus))
+    }
   }
 
   /** Post the environment update event once the task scheduler is ready */

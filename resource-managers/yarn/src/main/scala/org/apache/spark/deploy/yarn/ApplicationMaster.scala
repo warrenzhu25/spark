@@ -17,7 +17,7 @@
 
 package org.apache.spark.deploy.yarn
 
-import java.io.{File, IOException}
+import java.io.{File, IOException, PrintWriter}
 import java.lang.reflect.{InvocationTargetException, Modifier}
 import java.net.{URI, URL}
 import java.security.PrivilegedExceptionAction
@@ -38,10 +38,11 @@ import org.apache.hadoop.yarn.conf.YarnConfiguration
 import org.apache.hadoop.yarn.exceptions.ApplicationAttemptNotFoundException
 import org.apache.hadoop.yarn.server.webproxy.ProxyUriUtils
 import org.apache.hadoop.yarn.util.{ConverterUtils, Records}
+import org.json4s.jackson.JsonMethods._
 
 import org.apache.spark._
 import org.apache.spark.deploy.SparkHadoopUtil
-import org.apache.spark.deploy.history.HistoryServer
+import org.apache.spark.deploy.history.{EventLogFileWriter, HistoryServer}
 import org.apache.spark.deploy.security.HadoopDelegationTokenManager
 import org.apache.spark.deploy.yarn.config._
 import org.apache.spark.internal.Logging
@@ -51,6 +52,7 @@ import org.apache.spark.internal.config.UI._
 import org.apache.spark.metrics.{MetricsSystem, MetricsSystemInstances}
 import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.rpc._
+import org.apache.spark.scheduler.SparkListenerApplicationFinalStatusUpdate
 import org.apache.spark.scheduler.cluster.{CoarseGrainedSchedulerBackend, YarnSchedulerBackend}
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages._
 import org.apache.spark.util._
@@ -257,6 +259,7 @@ private[spark] class ApplicationMaster(
           if (finalStatus == FinalApplicationStatus.SUCCEEDED || isLastAttempt) {
             unregister(finalStatus, finalMsg)
             cleanupStagingDir(new Path(System.getenv("SPARK_YARN_STAGING_DIR")))
+            logApplicationFinalStatusToEventLogFile()
           }
         }
       }
@@ -684,6 +687,43 @@ private[spark] class ApplicationMaster(
     } catch {
       case ioe: IOException =>
         logError("Failed to cleanup staging dir " + stagingDirPath, ioe)
+    }
+  }
+
+  /**
+    * Log the finalStatus to the app event log file
+    */
+  private def logApplicationFinalStatusToEventLogFile() {
+    try {
+      val appId = appAttemptId.getApplicationId().toString()
+      var attemptId: Option[String] = None
+      if (isClusterMode) {
+        attemptId = Option(appAttemptId.getAttemptId()
+          .toString())
+      }
+      logInfo("Logging SparkListenerApplicationFinalStatusUpdate")
+      val logWriter: EventLogFileWriter = EventLogFileWriter(appId, attemptId,
+        getLogDir().get, sparkConf, SparkHadoopUtil.get.newConfiguration(sparkConf))
+      logWriter.start(false)
+      val applicationFinalStatusUpdate = SparkListenerApplicationFinalStatusUpdate(System
+        .currentTimeMillis, Option(finalStatus.toString()))
+      val eventJson = JsonProtocol.sparkEventToJson(applicationFinalStatusUpdate)
+      logWriter.writeEvent(compact(render(eventJson)), true)
+      logWriter.stopWriter()
+    } catch {
+      case e: Exception =>
+        logWarning("Failed to log SparkListenerApplicationFinalStatusUpdate", e)
+    }
+    logInfo("Sucessfully Logging SparkListenerApplicationFinalStatusUpdate")
+  }
+
+  private def getLogDir(): Option[URI] = {
+    val isEventLogEnabled: Boolean = sparkConf.getBoolean("spark.eventLog.enabled", false)
+    if (isEventLogEnabled) {
+      val unresolvedDir = sparkConf.get(EVENT_LOG_DIR).stripSuffix("/")
+      Some(Utils.resolveURI(unresolvedDir))
+    } else {
+      None
     }
   }
 

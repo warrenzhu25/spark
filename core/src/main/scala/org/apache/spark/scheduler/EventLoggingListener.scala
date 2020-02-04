@@ -179,6 +179,12 @@ private[spark] class EventLoggingListener(
   override def onApplicationEnd(event: SparkListenerApplicationEnd): Unit = {
     logEvent(event, flushLogger = true)
   }
+
+  override def onApplicationFinalStatusUpdate(
+      event: SparkListenerApplicationFinalStatusUpdate): Unit = {
+    logEvent(event, flushLogger = true)
+  }
+
   override def onExecutorAdded(event: SparkListenerExecutorAdded): Unit = {
     logEvent(event, flushLogger = true)
   }

@@ -47,7 +47,8 @@ private[spark] class SparkUI private (
     val basePath: String,
     val startTime: Long,
     val appSparkVersion: String,
-    var subCluster: Option[String])
+    var subCluster: Option[String],
+    var finalStatus: Option[String])
   extends WebUI(securityManager, securityManager.getSSLOptions("ui"), SparkUI.getUIPort(conf),
     conf, basePath, "SparkUI")
   with Logging
@@ -121,6 +122,7 @@ private[spark] class SparkUI private (
       id = appId,
       name = appName,
       subCluster = subCluster,
+      finalStatus = finalStatus,
       coresGranted = None,
       maxCores = None,
       coresPerExecutor = None,
@@ -181,10 +183,11 @@ private[spark] object SparkUI {
       basePath: String,
       startTime: Long,
       appSparkVersion: String = org.apache.spark.SPARK_VERSION,
-      subCluster: Option[String] = None): SparkUI = {
+      subCluster: Option[String] = None,
+      finalStatus: Option[String] = None): SparkUI = {
 
     new SparkUI(store, sc, conf, securityManager, appName, basePath,
-      startTime, appSparkVersion, subCluster)
+      startTime, appSparkVersion, subCluster, finalStatus)
   }
 
 }

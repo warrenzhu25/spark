@@ -79,6 +79,21 @@ abstract class EventLogFileWriter(
     }
   }
 
+  protected def appendLogFile(path: Path)(fnSetupWriter: OutputStream => PrintWriter): Unit = {
+    val fstream = fileSystem.append(path)
+    try {
+      val cstream = compressionCodec.map(_.compressedContinuousOutputStream(fstream))
+        .getOrElse(fstream)
+      val bstream = new BufferedOutputStream(cstream, outputBufferSize)
+      logInfo(s"Logging events to $path")
+      writer = Some(fnSetupWriter(bstream))
+    } catch {
+      case e: Exception =>
+        fstream.close()
+        throw e
+    }
+  }
+
   protected def initLogFile(path: Path)(fnSetupWriter: OutputStream => PrintWriter): Unit = {
     if (shouldOverwrite && fileSystem.delete(path, true)) {
       logWarning(s"Event log $path already exists. Overwriting...")
@@ -127,6 +142,10 @@ abstract class EventLogFileWriter(
     writer.foreach(_.close())
   }
 
+  def stopWriter(): Unit = {
+    writer.foreach(_.close())
+  }
+
   protected def renameFile(src: Path, dest: Path, overwrite: Boolean): Unit = {
     if (fileSystem.exists(dest)) {
       if (overwrite) {
@@ -149,7 +168,7 @@ abstract class EventLogFileWriter(
   }
 
   /** initialize writer for event logging */
-  def start(): Unit
+  def start(useInprogress: Boolean = true): Unit
 
   /** writes JSON format of event to file */
   def writeEvent(eventJson: String, flushLogger: Boolean = false): Unit
@@ -217,11 +236,17 @@ class SingleEventLogFileWriter(
 
   protected def inProgressPath = logPath + EventLogFileWriter.IN_PROGRESS
 
-  override def start(): Unit = {
+  override def start(useInprogress: Boolean = true): Unit = {
     requireLogBaseDirAsDirectory()
 
-    initLogFile(new Path(inProgressPath)) { os =>
-      new PrintWriter(new OutputStreamWriter(os, StandardCharsets.UTF_8))
+    if(useInprogress) {
+      initLogFile(new Path(inProgressPath)) { os =>
+        new PrintWriter(new OutputStreamWriter(os, StandardCharsets.UTF_8))
+      }
+    } else {
+      appendLogFile(new Path(logPath)) { os =>
+        new PrintWriter(new OutputStreamWriter(os, StandardCharsets.UTF_8))
+      }
     }
   }
 
@@ -307,7 +332,7 @@ class RollingEventLogFilesWriter(
   private var index: Long = 0L
   private var currentEventLogFilePath: Path = _
 
-  override def start(): Unit = {
+  override def start(useInprogress: Boolean = true): Unit = {
     requireLogBaseDirAsDirectory()
 
     if (fileSystem.exists(logDirForAppPath) && shouldOverwrite) {

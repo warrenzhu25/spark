@@ -372,7 +372,8 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
 
     val ui = SparkUI.create(None, new HistoryAppStatusStore(conf, kvstore), conf, secManager,
       app.info.name, HistoryServer.getAttemptURI(appId, attempt.info.attemptId),
-      attempt.info.startTime.getTime(), attempt.info.appSparkVersion, app.info.subCluster)
+      attempt.info.startTime.getTime(), attempt.info.appSparkVersion, app.info.subCluster,
+      app.info.finalStatus)
 
     // place the tab in UI based on the display order
     loadPlugins().toSeq.sortBy(_.displayOrder).foreach(_.setupUI(ui))
@@ -478,9 +479,12 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
             }
 
             if (shouldReloadLog(info, reader)) {
+              if (reader.completed) {
+                true
+              }
               // ignore fastInProgressParsing when rolling event log is enabled on the log path,
               // to ensure proceeding compaction even fastInProgressParsing is turned on.
-              if (info.appId.isDefined && reader.lastIndex.isEmpty && fastInProgressParsing) {
+              else if (info.appId.isDefined && reader.lastIndex.isEmpty && fastInProgressParsing) {
                 // When fast in-progress parsing is on, we don't need to re-parse when the
                 // size changes, but we do need to invalidate any existing UIs.
                 // Also, we need to update the `lastUpdated time` to display the updated time in
@@ -714,7 +718,8 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       eventString.startsWith(APPL_START_EVENT_PREFIX) ||
         eventString.startsWith(APPL_END_EVENT_PREFIX) ||
         eventString.startsWith(LOG_START_EVENT_PREFIX) ||
-        eventString.startsWith(ENV_UPDATE_EVENT_PREFIX)
+        eventString.startsWith(ENV_UPDATE_EVENT_PREFIX) ||
+        eventString.startsWith(APPL_FINAL_STATUS_UPDATE_EVENT_PREFIX)
     }
 
     val logPath = reader.rootPath
@@ -1279,6 +1284,9 @@ private[history] object FsHistoryProvider {
 
   private val APPL_END_EVENT_PREFIX = "{\"Event\":\"SparkListenerApplicationEnd\""
 
+  private val APPL_FINAL_STATUS_UPDATE_EVENT_PREFIX =
+    "{\"Event\":\"SparkListenerApplicationFinalStatusUpdate\""
+
   private val LOG_START_EVENT_PREFIX = "{\"Event\":\"SparkListenerLogStart\""
 
   private val ENV_UPDATE_EVENT_PREFIX = "{\"Event\":\"SparkListenerEnvironmentUpdate\","
@@ -1378,6 +1386,11 @@ private[history] class AppListingListener(
     attempt.completed = true
   }
 
+  override def onApplicationFinalStatusUpdate(
+      event: SparkListenerApplicationFinalStatusUpdate): Unit = {
+    app.finalStatus = event.finalStatus
+  }
+
   override def onEnvironmentUpdate(event: SparkListenerEnvironmentUpdate): Unit = {
     // Only parse the first env update, since any future changes don't have any effect on
     // the ACLs set for the UI.
@@ -1427,6 +1440,7 @@ private[history] class AppListingListener(
     var id: String = null
     var name: String = null
     var subCluster: Option[String] = None
+    var finalStatus: Option[String] = None
     var coresGranted: Option[Int] = None
     var maxCores: Option[Int] = None
     var coresPerExecutor: Option[Int] = None
@@ -1434,7 +1448,7 @@ private[history] class AppListingListener(
 
     def toView(): ApplicationInfoWrapper = {
       val apiInfo = ApplicationInfo(id, name, coresGranted, maxCores,
-        coresPerExecutor, memoryPerExecutorMB, Nil, subCluster)
+        coresPerExecutor, memoryPerExecutorMB, Nil, subCluster, finalStatus)
       new ApplicationInfoWrapper(apiInfo, List(attempt.toView()))
     }
 

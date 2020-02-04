@@ -55,6 +55,8 @@ private[spark] trait SparkListenerBus
         listener.onApplicationStart(applicationStart)
       case applicationEnd: SparkListenerApplicationEnd =>
         listener.onApplicationEnd(applicationEnd)
+      case applicationFinalStatusUpdate: SparkListenerApplicationFinalStatusUpdate =>
+        listener.onApplicationFinalStatusUpdate(applicationFinalStatusUpdate)
       case metricsUpdate: SparkListenerExecutorMetricsUpdate =>
         listener.onExecutorMetricsUpdate(metricsUpdate)
       case stageExecutorMetrics: SparkListenerStageExecutorMetrics =>

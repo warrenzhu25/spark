@@ -119,6 +119,8 @@ private[spark] class YarnClientSchedulerBackend(
           logError(s"Diagnostics message: $err")
         }
         allowInterrupt = false
+        // Handle the case that AM exits before sc in client mode
+        System.setProperty("spark.yarn.application.finalStatus", state.toString())
         sc.stop()
       } catch {
         case e: InterruptedException => logInfo("Interrupting monitor thread")

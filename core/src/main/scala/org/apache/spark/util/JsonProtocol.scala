@@ -93,6 +93,8 @@ private[spark] object JsonProtocol {
         applicationStartToJson(applicationStart)
       case applicationEnd: SparkListenerApplicationEnd =>
         applicationEndToJson(applicationEnd)
+      case applicationFinalStatusUpdate: SparkListenerApplicationFinalStatusUpdate =>
+        applicationFinalStatusUpdateToJson(applicationFinalStatusUpdate)
       case executorAdded: SparkListenerExecutorAdded =>
         executorAddedToJson(executorAdded)
       case executorRemoved: SparkListenerExecutorRemoved =>
@@ -223,6 +225,14 @@ private[spark] object JsonProtocol {
   def applicationEndToJson(applicationEnd: SparkListenerApplicationEnd): JValue = {
     ("Event" -> SPARK_LISTENER_EVENT_FORMATTED_CLASS_NAMES.applicationEnd) ~
     ("Timestamp" -> applicationEnd.time)
+  }
+
+  def applicationFinalStatusUpdateToJson(
+      applicationFinalStatusUpdate: SparkListenerApplicationFinalStatusUpdate): JValue = {
+      ("Event" -> SPARK_LISTENER_EVENT_FORMATTED_CLASS_NAMES.applicationFinalStatusUpdate) ~
+      ("finalStatus" -> applicationFinalStatusUpdate.finalStatus.
+        map(JString(_)).getOrElse(JNothing)) ~
+      ("Timestamp" -> applicationFinalStatusUpdate.time)
   }
 
   def executorAddedToJson(executorAdded: SparkListenerExecutorAdded): JValue = {
@@ -583,6 +593,8 @@ private[spark] object JsonProtocol {
     val unpersistRDD = Utils.getFormattedClassName(SparkListenerUnpersistRDD)
     val applicationStart = Utils.getFormattedClassName(SparkListenerApplicationStart)
     val applicationEnd = Utils.getFormattedClassName(SparkListenerApplicationEnd)
+    val applicationFinalStatusUpdate =
+      Utils.getFormattedClassName(SparkListenerApplicationFinalStatusUpdate)
     val executorAdded = Utils.getFormattedClassName(SparkListenerExecutorAdded)
     val executorRemoved = Utils.getFormattedClassName(SparkListenerExecutorRemoved)
     val logStart = Utils.getFormattedClassName(SparkListenerLogStart)
@@ -608,6 +620,7 @@ private[spark] object JsonProtocol {
       case `unpersistRDD` => unpersistRDDFromJson(json)
       case `applicationStart` => applicationStartFromJson(json)
       case `applicationEnd` => applicationEndFromJson(json)
+      case `applicationFinalStatusUpdate` => applicationFinalStatusUpdateFromJson(json)
       case `executorAdded` => executorAddedFromJson(json)
       case `executorRemoved` => executorRemovedFromJson(json)
       case `logStart` => logStartFromJson(json)
@@ -736,6 +749,11 @@ private[spark] object JsonProtocol {
 
   def applicationEndFromJson(json: JValue): SparkListenerApplicationEnd = {
     SparkListenerApplicationEnd((json \ "Timestamp").extract[Long])
+  }
+
+  def applicationFinalStatusUpdateFromJson(json: JValue): SparkListenerApplicationFinalStatusUpdate = {
+    val finalStatus = jsonOption(json \ "finalStatus").map(_.extractOrElse[String](""))
+    SparkListenerApplicationFinalStatusUpdate((json \ "Timestamp").extract[Long], finalStatus)
   }
 
   def executorAddedFromJson(json: JValue): SparkListenerExecutorAdded = {
