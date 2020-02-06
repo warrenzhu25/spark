@@ -16,6 +16,7 @@
 
 package com.linkedin.drelephant.spark.heuristics
 
+import org.apache.spark.metrics.{ExecutorMetricType, OffHeapUnifiedMemory, OnHeapUnifiedMemory}
 import org.apache.spark.status.api.v1.ExecutorSummary
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.{MemoryFormatUtils, Severity, SeverityThresholds}
@@ -98,22 +99,12 @@ object UnifiedMemoryHeuristic {
 
     lazy val sparkMemoryFraction: Double = appConfigurationProperties.getOrElse(SPARK_MEMORY_FRACTION_KEY, "0.6").toDouble
 
-    lazy val meanUnifiedMemory: Long = (executorList.map {
-      executorSummary => {
-        (executorSummary.peakUnifiedMemory.getOrElse(EXECUTION_MEMORY, 0).asInstanceOf[Number].longValue
-          + executorSummary.peakUnifiedMemory.getOrElse(STORAGE_MEMORY, 0).asInstanceOf[Number].longValue)
-      }
-    }.sum) / executorList.size
+    lazy val meanUnifiedMemory: Long = executorList.map(getPeakUnifiedMemory).sum / executorList.size
 
-    lazy val maxUnifiedMemory: Long = executorList.map {
-      executorSummary => {
-        (executorSummary.peakUnifiedMemory.getOrElse(EXECUTION_MEMORY, 0).asInstanceOf[Number].longValue
-          + executorSummary.peakUnifiedMemory.getOrElse(STORAGE_MEMORY, 0).asInstanceOf[Number].longValue)
-      }
-    }.max
+    lazy val maxUnifiedMemory: Long = executorList.map(getPeakUnifiedMemory).max
 
     //If sparkMemoryFraction or total Unified Memory allocated is less than their respective thresholds then won't consider for severity
-     lazy val severity: Severity = if (sparkMemoryFraction > SPARK_MEMORY_FRACTION_THRESHOLD && maxMemory > MemoryFormatUtils.stringToBytes(UNIFIED_MEMORY_ALLOCATED_THRESHOLD)) {
+    lazy val severity: Severity = if (sparkMemoryFraction > SPARK_MEMORY_FRACTION_THRESHOLD && maxMemory > MemoryFormatUtils.stringToBytes(UNIFIED_MEMORY_ALLOCATED_THRESHOLD)) {
       if (sparkExecutorMemory <= MemoryFormatUtils.stringToBytes(unifiedMemoryHeuristic.sparkExecutorMemoryThreshold)) {
         Severity.NONE
       } else {
@@ -126,5 +117,12 @@ object UnifiedMemoryHeuristic {
     val executorCount = executorList.size
     lazy val score = Utils.getHeuristicScore(severity, executorCount)
 
+    def getPeakUnifiedMemory(executorSummary: ExecutorSummary): Long = {
+      getMetricValue(executorSummary, OnHeapUnifiedMemory) + getMetricValue(executorSummary, OffHeapUnifiedMemory)
+    }
+
+    def getMetricValue(executorSummary: ExecutorSummary, executorMetricType: ExecutorMetricType) : Long = {
+      executorSummary.peakMemoryMetrics.map(_.getMetricValue(executorMetricType)).getOrElse(0)
+    }
   }
 }

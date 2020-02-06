@@ -24,11 +24,10 @@ import com.linkedin.drelephant.spark.heuristics.{StagesWithFailedTasksHeuristic,
 import javax.ws.rs.{DefaultValue, GET, Path, PathParam, Produces, QueryParam}
 import javax.ws.rs.core.{MediaType, Response, StreamingOutput}
 import org.apache.spark.status.insight.SparkApplicationData
-import org.apache.spark.status.insight.heuristics.{ConfigurationHeuristic, ConfigurationParametersHeuristic, DriverHeuristic, ExecutorGcHeuristic, ExecutorStorageSpillHeuristic, ExecutorsHeuristic, HeuristicResult, AnalysisResult, JobsHeuristic, JvmUsedMemoryHeuristic, StagesHeuristic}
+import org.apache.spark.status.insight.heuristics._
 
 import scala.util.control.NonFatal
 import org.apache.spark.{JobExecutionStatus, SparkContext}
-import org.apache.spark.ui.UIUtils
 
 import scala.collection.JavaConverters._
 
@@ -192,7 +191,6 @@ private[v1] class AbstractApplicationResource extends BaseAppResource {
     StagesHeuristic,
     new ConfigurationParametersHeuristic,
     new DriverHeuristic,
-    new ExecutorStorageSpillHeuristic,
     new StagesWithFailedTasksHeuristic
   )
 

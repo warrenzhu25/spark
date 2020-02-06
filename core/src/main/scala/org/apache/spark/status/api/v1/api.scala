@@ -105,13 +105,9 @@ class ExecutorSummary private[spark](
     val executorLogs: Map[String, String],
     val memoryMetrics: Option[MemoryMetrics],
     val blacklistedInStages: Set[Int],
-
     @JsonSerialize(using = classOf[ExecutorMetricsJsonSerializer])
     @JsonDeserialize(using = classOf[ExecutorMetricsJsonDeserializer])
-    val peakMemoryMetrics: Option[ExecutorMetrics],
-    val totalMemoryBytesSpilled: Long = 0L,
-    val peakJvmUsedMemory: Map[String, Long] = Map.empty,
-    val peakUnifiedMemory: Map[String, Long] = Map.empty)
+    val peakMemoryMetrics: Option[ExecutorMetrics])
 
 class MemoryMetrics private[spark](
     val usedOnHeapStorageMemory: Long,
