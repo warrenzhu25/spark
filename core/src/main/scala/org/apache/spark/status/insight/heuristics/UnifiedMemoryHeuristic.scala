@@ -14,13 +14,12 @@
  * the License.
  */
 
-package com.linkedin.drelephant.spark.heuristics
+package org.apache.spark.status.insight.heuristics
 
 import org.apache.spark.metrics.{ExecutorMetricType, OffHeapUnifiedMemory, OnHeapUnifiedMemory}
 import org.apache.spark.status.api.v1.ExecutorSummary
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.{MemoryFormatUtils, Severity, SeverityThresholds}
-import org.apache.spark.status.insight.heuristics.{AnalysisResult, Heuristic, HeuristicResult, SimpleResult}
 import org.apache.spark.status.insight.util.Utils
 
 import scala.collection.JavaConverters

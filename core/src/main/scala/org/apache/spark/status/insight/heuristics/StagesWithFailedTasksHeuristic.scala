@@ -14,15 +14,12 @@
  * the License.
  */
 
-package com.linkedin.drelephant.spark.heuristics
+package org.apache.spark.status.insight.heuristics
 
 import org.apache.spark.status.api.v1.{StageData, StageStatus, TaskData}
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.Severity
-import org.apache.spark.status.insight.heuristics.{Heuristic, SimpleResult, HeuristicResult}
 import org.apache.spark.status.insight.util.Utils
-
-import scala.collection.JavaConverters
 
 /**
   * A heuristic based on errors encountered by failed tasks. Tasks may fail due to Overhead memory issues or OOM errors. These errors are checked and warning is given accordingly.
@@ -115,7 +112,8 @@ object StagesWithFailedTasksHeuristic {
       } else if (numFailedTasks != 0 && stageStatus == StageStatus.FAILED && numFailedTasks / numCompleteTasks > 0) {
         severityTemp = Severity.CRITICAL
       }
-      return Severity.max(severityTemp, severityStage)
+
+      Severity.max(severityTemp, severityStage)
     }
 
     /**

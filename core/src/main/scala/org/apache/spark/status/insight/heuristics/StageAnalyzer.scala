@@ -1,6 +1,5 @@
 package org.apache.spark.status.insight.heuristics
 
-import com.linkedin.drelephant.spark.heuristics.StagesWithFailedTasksHeuristic
 import org.apache.spark.status.api.v1.{StageData, StageStatus, TaskData}
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.{MemoryFormatUtils, Severity, SeverityThresholds}

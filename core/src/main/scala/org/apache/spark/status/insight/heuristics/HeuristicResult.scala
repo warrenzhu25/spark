@@ -2,6 +2,11 @@ package org.apache.spark.status.insight.heuristics
 
 import org.apache.spark.status.insight.analysis.Severity
 
+trait AnalysisResult{
+  def name: String
+  def description: String
+}
+
 case class HeuristicResult(name: String,
                            results: Seq[AnalysisResult])
 
@@ -16,11 +21,6 @@ case class MultipleValuesResult(name: String,
 
 case class SimpleResult(name: String,
                         description:String) extends AnalysisResult
-
-trait AnalysisResult{
-  def name: String
-  def description: String
-}
 
 /** Stage analysis result. */
 private[heuristics] sealed trait StageAnalysisResult {
