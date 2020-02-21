@@ -140,7 +140,14 @@ private class HistoryServerDiskManager(
     val storePath = active.synchronized {
       val path = appStorePath(appId, attemptId)
       if (path.isDirectory()) {
-        active(appId -> attemptId) = sizeOf(path)
+        try {
+          active(appId -> attemptId) = sizeOf(path)
+        } catch {
+          case e: IllegalArgumentException =>
+            logInfo(s"try to getSecurityManager success?${System.getSecurityManager == null}")
+          // need to throw the exception to keep the original logic
+          throw e
+        }
         Some(path)
       } else {
         None
@@ -233,10 +240,22 @@ private class HistoryServerDiskManager(
       }
 
       if (evicted.nonEmpty) {
+        logInfo(s"Try to delete ${evicted.size} application(s) to free space.")
         val freed = evicted.map { info =>
           logInfo(s"Deleting store for ${info.appId}/${info.attemptId}.")
-          deleteStore(new File(info.path))
-          updateUsage(-info.size, committed = true)
+
+          try {
+            deleteStore(new File(info.path))
+            updateUsage(-info.size, committed = true)
+          } catch {
+            case e: Throwable =>
+            val isActive = active.synchronized {
+              active.contains(info.appId -> info.attemptId)
+            }
+            logInfo(s"${info.appId}/${info.attemptId} is active? ${isActive}")
+            // need to throw the exception to keep the original logic
+            throw e
+          }
           info.size
         }.sum
 
