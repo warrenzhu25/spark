@@ -2037,6 +2037,16 @@ private[spark] object Utils extends Logging {
     path
   }
 
+  /** Load properties from spark-admin.conf under SPARK_CONF_DIR */
+  def getAdminProperties(): Map[String, String] = {
+    val path = getPropertiesFile("spark-admin.conf")
+    if (path == null) {
+      Map.empty
+    } else {
+      getPropertiesFromFile(path)
+    }
+  }
+
   /**
    * Updates Spark config with properties from a set of Properties.
    * Provided properties have the highest priority.
@@ -2099,9 +2109,14 @@ private[spark] object Utils extends Logging {
 
   /** Return the path of the default Spark properties file. */
   def getDefaultPropertiesFile(env: Map[String, String] = sys.env): String = {
+    getPropertiesFile("spark-defaults.conf")
+  }
+
+  /** Return the path of the Spark properties file. */
+  def getPropertiesFile(fileName: String, env: Map[String, String] = sys.env): String = {
     env.get("SPARK_CONF_DIR")
       .orElse(env.get("SPARK_HOME").map { t => s"$t${File.separator}conf" })
-      .map { t => new File(s"$t${File.separator}spark-defaults.conf")}
+      .map { t => new File(s"$t${File.separator}$fileName")}
       .filter(_.isFile)
       .map(_.getAbsolutePath)
       .orNull
