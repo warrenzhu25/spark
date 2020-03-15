@@ -81,6 +81,8 @@ private[spark] trait SparkListenerBus
         listener.onBlockUpdated(blockUpdated)
       case speculativeTaskSubmitted: SparkListenerSpeculativeTaskSubmitted =>
         listener.onSpeculativeTaskSubmitted(speculativeTaskSubmitted)
+      case applicationTypeUpdate: SparkListenerApplicationTypeUpdate =>
+        listener.onApplicationTypeUpdate(applicationTypeUpdate)
       case _ => listener.onOtherEvent(event)
     }
   }

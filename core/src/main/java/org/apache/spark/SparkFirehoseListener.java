@@ -104,6 +104,11 @@ public class SparkFirehoseListener implements SparkListenerInterface {
   }
 
   @Override
+  public final void onApplicationTypeUpdate(SparkListenerApplicationTypeUpdate applicationTypeUpdate){
+    onEvent(applicationTypeUpdate);
+  }
+
+  @Override
   public final void onExecutorMetricsUpdate(
       SparkListenerExecutorMetricsUpdate executorMetricsUpdate) {
     onEvent(executorMetricsUpdate);

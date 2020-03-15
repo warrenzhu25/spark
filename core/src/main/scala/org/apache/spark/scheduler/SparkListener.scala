@@ -189,6 +189,10 @@ case class SparkListenerStageExecutorMetrics(
   extends SparkListenerEvent
 
 @DeveloperApi
+case class SparkListenerApplicationTypeUpdate(time: Long,
+    applicationType: Option[String]) extends SparkListenerEvent
+
+@DeveloperApi
 case class SparkListenerApplicationStart(
     appName: String,
     appId: Option[String],
@@ -276,6 +280,11 @@ private[spark] trait SparkListenerInterface {
    * Called when an RDD is manually unpersisted by the application
    */
   def onUnpersistRDD(unpersistRDD: SparkListenerUnpersistRDD): Unit
+
+  /**
+   * Called when need to update application type
+   */
+  def onApplicationTypeUpdate(applicationTypeUpdate: SparkListenerApplicationTypeUpdate): Unit
 
   /**
    * Called when the application starts
@@ -434,6 +443,9 @@ abstract class SparkListener extends SparkListenerInterface {
 
   override def onSpeculativeTaskSubmitted(
       speculativeTask: SparkListenerSpeculativeTaskSubmitted): Unit = { }
+
+  override def onApplicationTypeUpdate(
+      applicationTypeUpdate: SparkListenerApplicationTypeUpdate): Unit = { }
 
   override def onOtherEvent(event: SparkListenerEvent): Unit = { }
 }

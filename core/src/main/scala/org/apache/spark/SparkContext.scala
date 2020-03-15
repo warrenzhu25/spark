@@ -438,6 +438,9 @@ class SparkContext(config: SparkConf) extends Logging {
 
     _listenerBus = new LiveListenerBus(_conf)
 
+    System.setProperty(SparkContext.SPARK_APPLICATION_TYPE, "SparkBatch")
+    postApplicationTypeUpdate()
+
     // Initialize the app status store and listener before SparkEnv is created so that it gets
     // all events.
     val appStatusSource = AppStatusSource.createSource(conf)
@@ -2482,6 +2485,16 @@ class SparkContext(config: SparkConf) extends Logging {
     }
   }
 
+  /** Post the application type update event */
+  def postApplicationTypeUpdate() {
+    val applicationType = Option(System.getProperty(SparkContext.SPARK_APPLICATION_TYPE))
+    if (applicationType isDefined) {
+      logInfo(s"applicationtype is ${applicationType.toString}")
+      listenerBus.post(SparkListenerApplicationTypeUpdate(
+        System.currentTimeMillis(), applicationType))
+    }
+  }
+
   /** Reports heartbeat metrics for the driver. */
   private def reportHeartBeat(executorMetricsSource: Option[ExecutorMetricsSource]): Unit = {
     val currentMetrics = ExecutorMetrics.getCurrentMetrics(env.memoryManager)
@@ -2664,6 +2677,7 @@ object SparkContext extends Logging {
   private[spark] val SPARK_SCHEDULER_POOL = "spark.scheduler.pool"
   private[spark] val RDD_SCOPE_KEY = "spark.rdd.scope"
   private[spark] val RDD_SCOPE_NO_OVERRIDE_KEY = "spark.rdd.scope.noOverride"
+  private[spark] val SPARK_APPLICATION_TYPE = "spark.application.type"
 
   /**
    * Executor id for the driver.  In earlier versions of Spark, this was `<driver>`, but this was

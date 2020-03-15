@@ -134,11 +134,19 @@ class StreamingContext private[streaming] (
 
   private[streaming] val isCheckpointPresent: Boolean = _cp != null
 
+  System.setProperty(SparkContext.SPARK_APPLICATION_TYPE, "SparkStreaming")
+  logInfo(s"Spark application type is SparkStreaming")
+
   private[streaming] val sc: SparkContext = {
     if (_sc != null) {
+      logInfo(s"_sc => Spark application type is SparkStreaming")
+      _sc.postApplicationTypeUpdate()
       _sc
     } else if (isCheckpointPresent) {
-      SparkContext.getOrCreate(_cp.createSparkConf())
+      val scFromCheckPoint = SparkContext.getOrCreate(_cp.createSparkConf())
+      logInfo(s"scFromCheckPoint => Spark application type is SparkStreaming")
+      scFromCheckPoint.postApplicationTypeUpdate()
+      scFromCheckPoint
     } else {
       throw new SparkException("Cannot create StreamingContext without a SparkContext")
     }

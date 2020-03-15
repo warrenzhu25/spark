@@ -193,6 +193,10 @@ private[spark] class EventLoggingListener(
     logEvent(event, flushLogger = true)
   }
 
+  override def onApplicationTypeUpdate(event: SparkListenerApplicationTypeUpdate): Unit = {
+    logEvent(event, flushLogger = true)
+  }
+
   override def onExecutorBlacklisted(event: SparkListenerExecutorBlacklisted): Unit = {
     logEvent(event, flushLogger = true)
   }

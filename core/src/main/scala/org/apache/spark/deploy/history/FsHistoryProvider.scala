@@ -369,11 +369,11 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       case _: FileNotFoundException =>
         return None
     }
-
+    
     val ui = SparkUI.create(None, new HistoryAppStatusStore(conf, kvstore), conf, secManager,
       app.info.name, HistoryServer.getAttemptURI(appId, attempt.info.attemptId),
       attempt.info.startTime.getTime(), attempt.info.appSparkVersion, app.info.subCluster,
-      app.info.finalStatus)
+      app.info.finalStatus, app.info.applicationType)
 
     // place the tab in UI based on the display order
     loadPlugins().toSeq.sortBy(_.displayOrder).foreach(_.setupUI(ui))
@@ -719,7 +719,8 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
         eventString.startsWith(APPL_END_EVENT_PREFIX) ||
         eventString.startsWith(LOG_START_EVENT_PREFIX) ||
         eventString.startsWith(ENV_UPDATE_EVENT_PREFIX) ||
-        eventString.startsWith(APPL_FINAL_STATUS_UPDATE_EVENT_PREFIX)
+        eventString.startsWith(APPL_FINAL_STATUS_UPDATE_EVENT_PREFIX) ||
+        eventString.startsWith(Type_UPDATE_EVENT_PREFIX)
     }
 
     val logPath = reader.rootPath
@@ -1291,6 +1292,8 @@ private[history] object FsHistoryProvider {
 
   private val ENV_UPDATE_EVENT_PREFIX = "{\"Event\":\"SparkListenerEnvironmentUpdate\","
 
+  private val Type_UPDATE_EVENT_PREFIX = "{\"Event\":\"SparkListenerApplicationTypeUpdate\","
+
   /**
    * Current version of the data written to the listing database. When opening an existing
    * db, if the version does not match this value, the FsHistoryProvider will throw away
@@ -1365,6 +1368,7 @@ private[history] class AppListingListener(
 
   private var gotEnvUpdate = false
   private var halted = false
+  private var allAppTypeUpdated = false
 
   override def onApplicationStart(event: SparkListenerApplicationStart): Unit = {
     app.id = event.appId.orNull
@@ -1391,6 +1395,11 @@ private[history] class AppListingListener(
     app.finalStatus = event.finalStatus
   }
 
+  override def onApplicationTypeUpdate(
+      event: SparkListenerApplicationTypeUpdate): Unit = {
+    app.applicationType = event.applicationType
+  }
+
   override def onEnvironmentUpdate(event: SparkListenerEnvironmentUpdate): Unit = {
     // Only parse the first env update, since any future changes don't have any effect on
     // the ACLs set for the UI.
@@ -1409,6 +1418,18 @@ private[history] class AppListingListener(
       gotEnvUpdate = true
       checkProgress()
     }
+  }
+
+  override def onJobStart(jobStart: SparkListenerJobStart): Unit = {
+    // SHS will read each event log to generate the applicationInfo list.
+    // For completed application, SHS will read all events in the event log.
+    // For in-completed application, SHS will not read all events
+    // it will stop read event log once
+    // SparkListenerEnvironmentUpdate and SparkListenerApplicationEnd events have been read.
+    // This function will add one more stop condition for event log with suffix ".inprogress"
+    // This will make sure SHS get all SparkListenerApplicationTypeUpdate events.
+    allAppTypeUpdated = true
+    checkProgress()
   }
 
   override def onOtherEvent(event: SparkListenerEvent): Unit = event match {
@@ -1430,7 +1451,7 @@ private[history] class AppListingListener(
    * read.
    */
   private def checkProgress(): Unit = {
-    if (haltEnabled && !halted && app.id != null && gotEnvUpdate) {
+    if (haltEnabled && !halted && app.id != null && gotEnvUpdate && allAppTypeUpdated) {
       halted = true
       throw new HaltReplayException()
     }
@@ -1441,6 +1462,7 @@ private[history] class AppListingListener(
     var name: String = null
     var subCluster: Option[String] = None
     var finalStatus: Option[String] = None
+    var applicationType: Option[String] = None
     var coresGranted: Option[Int] = None
     var maxCores: Option[Int] = None
     var coresPerExecutor: Option[Int] = None
@@ -1448,7 +1470,7 @@ private[history] class AppListingListener(
 
     def toView(): ApplicationInfoWrapper = {
       val apiInfo = ApplicationInfo(id, name, coresGranted, maxCores,
-        coresPerExecutor, memoryPerExecutorMB, Nil, subCluster, finalStatus)
+        coresPerExecutor, memoryPerExecutorMB, Nil, subCluster, finalStatus, applicationType)
       new ApplicationInfoWrapper(apiInfo, List(attempt.toView()))
     }
 

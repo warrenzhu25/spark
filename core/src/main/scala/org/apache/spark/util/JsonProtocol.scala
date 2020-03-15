@@ -95,6 +95,8 @@ private[spark] object JsonProtocol {
         applicationEndToJson(applicationEnd)
       case applicationFinalStatusUpdate: SparkListenerApplicationFinalStatusUpdate =>
         applicationFinalStatusUpdateToJson(applicationFinalStatusUpdate)
+      case applicationTypeUpdate: SparkListenerApplicationTypeUpdate =>
+        applicationTypeUpdateToJson(applicationTypeUpdate)
       case executorAdded: SparkListenerExecutorAdded =>
         executorAddedToJson(executorAdded)
       case executorRemoved: SparkListenerExecutorRemoved =>
@@ -233,6 +235,13 @@ private[spark] object JsonProtocol {
       ("finalStatus" -> applicationFinalStatusUpdate.finalStatus.
         map(JString(_)).getOrElse(JNothing)) ~
       ("Timestamp" -> applicationFinalStatusUpdate.time)
+  }
+
+  def applicationTypeUpdateToJson(
+      applicationTypeUpdate: SparkListenerApplicationTypeUpdate): JValue = {
+      ("Event" -> SPARK_LISTENER_EVENT_FORMATTED_CLASS_NAMES.applicationTypeUpdate) ~
+      ("applicationType" -> applicationTypeUpdate.applicationType) ~
+      ("Timestamp" -> applicationTypeUpdate.time)
   }
 
   def executorAddedToJson(executorAdded: SparkListenerExecutorAdded): JValue = {
@@ -595,6 +604,7 @@ private[spark] object JsonProtocol {
     val applicationEnd = Utils.getFormattedClassName(SparkListenerApplicationEnd)
     val applicationFinalStatusUpdate =
       Utils.getFormattedClassName(SparkListenerApplicationFinalStatusUpdate)
+    val applicationTypeUpdate = Utils.getFormattedClassName(SparkListenerApplicationTypeUpdate)
     val executorAdded = Utils.getFormattedClassName(SparkListenerExecutorAdded)
     val executorRemoved = Utils.getFormattedClassName(SparkListenerExecutorRemoved)
     val logStart = Utils.getFormattedClassName(SparkListenerLogStart)
@@ -621,6 +631,7 @@ private[spark] object JsonProtocol {
       case `applicationStart` => applicationStartFromJson(json)
       case `applicationEnd` => applicationEndFromJson(json)
       case `applicationFinalStatusUpdate` => applicationFinalStatusUpdateFromJson(json)
+      case `applicationTypeUpdate` => applicationTypeUpdateFromJson(json)
       case `executorAdded` => executorAddedFromJson(json)
       case `executorRemoved` => executorRemovedFromJson(json)
       case `logStart` => logStartFromJson(json)
@@ -754,6 +765,12 @@ private[spark] object JsonProtocol {
   def applicationFinalStatusUpdateFromJson(json: JValue): SparkListenerApplicationFinalStatusUpdate = {
     val finalStatus = jsonOption(json \ "finalStatus").map(_.extractOrElse[String](""))
     SparkListenerApplicationFinalStatusUpdate((json \ "Timestamp").extract[Long], finalStatus)
+  }
+
+  def applicationTypeUpdateFromJson(json: JValue): SparkListenerApplicationTypeUpdate = {
+    val applicationType = jsonOption(json \ "applicationType").map(_.extractOrElse[String](""))
+    val time = (json \ "Timestamp").extract[Long]
+    SparkListenerApplicationTypeUpdate(time, applicationType)
   }
 
   def executorAddedFromJson(json: JValue): SparkListenerExecutorAdded = {
