@@ -64,6 +64,13 @@ private[ui] case class BatchUIData(
   def numRecords: Long = streamIdToInputInfo.values.map(_.numRecords).sum
 
   /**
+   * Return the input metadata for each input stream
+   */
+  def inputMetaData: Option[Seq[(Int, String)]] = Option(streamIdToInputInfo.values.flatMap {
+    inputInfo => inputInfo.metadataDescription.map(desc => inputInfo.inputStreamId -> desc)
+  }.toSeq)
+
+  /**
    * Update an output operation information of this batch.
    */
   def updateOutputOperationInfo(outputOperationInfo: OutputOperationInfo): Unit = {

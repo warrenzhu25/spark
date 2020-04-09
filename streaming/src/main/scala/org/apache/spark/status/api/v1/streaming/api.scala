@@ -62,7 +62,8 @@ class BatchInfo private[spark](
     val numCompletedOutputOps: Int,
     val numFailedOutputOps: Int,
     val numTotalOutputOps: Int,
-    val firstFailureReason: Option[String])
+    val firstFailureReason: Option[String],
+    val inputMetaData: Option[Seq[(Int, String)]])
 
 class OutputOperationInfo private[spark](
     val outputOpId: OutputOpId,

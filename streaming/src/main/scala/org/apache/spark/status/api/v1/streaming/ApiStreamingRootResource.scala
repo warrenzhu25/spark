@@ -134,7 +134,8 @@ private[v1] class ApiStreamingRootResource extends BaseStreamingAppResource {
           numCompletedOutputOps = batch.numCompletedOutputOp,
           numFailedOutputOps = batch.numFailedOutputOp,
           numTotalOutputOps = batch.outputOperations.size,
-          firstFailureReason = firstFailureReason
+          firstFailureReason = firstFailureReason,
+          inputMetaData = batch.inputMetaData
         )
       }
 
