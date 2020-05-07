@@ -850,6 +850,12 @@ private[spark] class Client(
       sys.env.get("PYTHONHASHSEED").foreach(env.put("PYTHONHASHSEED", _))
     }
 
+    Seq("MT_TOKEN", "MT_USER_NAME").foreach { envname =>
+      if (!env.contains(envname)) {
+        sys.env.get(envname).foreach(env(envname) = _)
+      }
+    }
+
     sys.env.get(ENV_DIST_CLASSPATH).foreach { dcp =>
       env(ENV_DIST_CLASSPATH) = dcp
     }

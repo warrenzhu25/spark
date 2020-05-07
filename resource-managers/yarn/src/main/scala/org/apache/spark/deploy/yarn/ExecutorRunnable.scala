@@ -228,6 +228,12 @@ private[yarn] class ExecutorRunnable(
     System.getenv().asScala.filterKeys(_.startsWith("SPARK"))
       .foreach { case (k, v) => env(k) = v }
 
+    Seq("MT_TOKEN", "MT_USER_NAME").foreach { envname =>
+      if (!env.contains(envname)) {
+        sys.env.get(envname).foreach(env(envname) = _)
+      }
+    }
+
     sparkConf.getExecutorEnv.foreach { case (key, value) =>
       if (key == Environment.CLASSPATH.name()) {
         // If the key of env variable is CLASSPATH, we assume it is a path and append it.
