@@ -117,7 +117,7 @@ private class HistoryServerDiskManager(
    */
   def lease(eventLogSize: Long, isCompressed: Boolean = false): Lease = {
     val needed = approximateSize(eventLogSize, isCompressed)
-    makeRoom(needed)
+    makeRoomForMt(needed)
 
     val tmp = Utils.createTempDir(tmpStoreDir.getPath(), "appstore")
     Utils.chmod700(tmp)
@@ -272,6 +272,46 @@ private class HistoryServerDiskManager(
     new File(appStoreDir, fileName)
   }
 
+  private def makeRoomForMt(size: Long): Unit = {
+    if (free() < size) {
+      logDebug(s"Not enough free space, looking at candidates for deletion...")
+      val evicted = new ListBuffer[ApplicationStoreInfo]()
+      Utils.tryWithResource(
+        listing.view(classOf[ApplicationStoreInfo]).index("lastAccess").closeableIterator()
+      ) { iter =>
+        var needed = size
+        while (needed > 0 && iter.hasNext()) {
+          val info = iter.next()
+          val isActive = active.synchronized {
+            active.contains(info.appId -> info.attemptId)
+          }
+          if (!isActive) {
+            logInfo(s"Deleting store for ${info.appId}/${info.attemptId}.")
+            try {
+              deleteStore(new File(info.path))
+              updateUsage(-info.size, committed = true)
+              evicted += info
+              needed -= info.size
+            } catch {
+              case e: Throwable =>
+                logWarning(s"Failed to delete ${info.appId}/${info.attemptId}")
+            }
+          }
+        }
+        val freed = evicted.map(e => e.size).sum
+        if (freed >= size) {
+          logInfo(s"Deleted ${evicted.size} store(s) to free ${Utils.bytesToString(freed)} " +
+            s"(target = ${Utils.bytesToString(size)}).")
+        } else if (freed < size && freed > 0) {
+          logWarning(s"Unable to free ${Utils.bytesToString(size)} space, " +
+            s"only freed ${Utils.bytesToString(freed)}.")
+        } else {
+          logWarning(s"Unable to free any space to make room for ${Utils.bytesToString(size)}.")
+        }
+      }
+    }
+  }
+
   private def updateAccessTime(appId: String, attemptId: Option[String]): Unit = {
     val path = appStorePath(appId, attemptId)
     val info = ApplicationStoreInfo(path.getAbsolutePath(), clock.getTimeMillis(), appId, attemptId,
@@ -320,7 +360,7 @@ private class HistoryServerDiskManager(
       updateUsage(-leased)
 
       val newSize = sizeOf(tmpPath)
-      makeRoom(newSize)
+      makeRoomForMt(newSize)
       tmpPath.renameTo(dst)
 
       updateUsage(newSize, committed = true)
