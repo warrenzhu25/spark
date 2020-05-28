@@ -32,7 +32,16 @@ private[spark] class StreamingTab(val ssc: StreamingContext, sparkUI: SparkUI)
 
   val parent = sparkUI
   val listener = ssc.progressListener
+  val persistListener = ssc.persistListener
 
+  ssc.addStreamingListener(listener)
+  ssc.sc.addSparkListener(listener)
+  if (persistListener.isDefined) {
+    ssc.addStreamingListener(persistListener.get)
+    ssc.sc.addSparkListener(persistListener.get)
+  }
+
+  parent.setStreamingJobProgressListener(listener)
   attachPage(new StreamingPage(this))
   attachPage(new BatchPage(this))
 

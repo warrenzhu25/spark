@@ -673,6 +673,8 @@ class SparkContext(config: SparkConf) extends Logging {
     }
   }
 
+  def getEventLogDir(): URI = _eventLogDir.get
+
   private[spark] def getLocalProperties: Properties = localProperties.get()
 
   private[spark] def setLocalProperties(props: Properties): Unit = {

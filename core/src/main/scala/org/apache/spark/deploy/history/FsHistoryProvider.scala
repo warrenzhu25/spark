@@ -981,6 +981,9 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       if (deleteLog(fs, logPath)) {
         countDeleted += 1
       }
+      logInfo(s"Deleting expired streaming log for ${attempt.logPath}")
+      val streamingLogPath = new Path(logDir, "streaming_".concat(attempt.logPath))
+      deleteLog(fs, streamingLogPath)
     }
 
     if (remaining.isEmpty) {

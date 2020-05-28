@@ -204,6 +204,8 @@ private[spark] class StreamingJobProgressListener(ssc: StreamingContext)
     ssc.graph.getInputStreamNameAndID.find(_._2 == streamId).map(_._1)
   }
 
+  def batchUIDataLimitNum: Int = batchUIDataLimit
+
   /**
    * Return all InputDStream Ids
    */
@@ -238,6 +240,10 @@ private[spark] class StreamingJobProgressListener(ssc: StreamingContext)
     }.getOrElse {
       streamIds.map(streamId => (streamId, 0L)).toMap
     }
+  }
+
+  def getReceiverInfos: HashMap[Int, ReceiverInfo] = synchronized {
+    receiverInfos
   }
 
   def receiverInfo(receiverId: Int): Option[ReceiverInfo] = synchronized {

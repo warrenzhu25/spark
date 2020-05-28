@@ -47,7 +47,7 @@ import org.apache.spark.streaming.dstream._
 import org.apache.spark.streaming.receiver.Receiver
 import org.apache.spark.streaming.scheduler.
     {ExecutorAllocationManager, JobScheduler, StreamingListener, StreamingListenerStreamingStarted}
-import org.apache.spark.streaming.ui.{StreamingJobProgressListener, StreamingTab}
+import org.apache.spark.streaming.ui.{StreamingJobProgressListener, StreamingPersistListener, StreamingTab}
 import org.apache.spark.util.{CallSite, ShutdownHookManager, ThreadUtils, Utils}
 
 /**
@@ -194,6 +194,16 @@ class StreamingContext private[streaming] (
   private[streaming] val waiter = new ContextWaiter
 
   private[streaming] val progressListener = new StreamingJobProgressListener(this)
+
+  private[streaming] val persistListener: Option[StreamingPersistListener] =
+    if (conf.getBoolean("spark.eventLog.enabled", false) &&
+      conf.getBoolean("spark.streamingLog.enabled", false)) {
+      val listener = new StreamingPersistListener(this)
+      listener.start()
+      Some(listener)
+    } else {
+      None
+    }
 
   private[streaming] val uiTab: Option[StreamingTab] =
     sparkContext.ui match {
@@ -698,6 +708,9 @@ class StreamingContext private[streaming] (
           // Removing the streamingSource to de-register the metrics on stop()
           Utils.tryLogNonFatalError {
             env.metricsSystem.removeSource(streamingSource)
+          }
+          Utils.tryLogNonFatalError {
+            persistListener.foreach(_.stop())
           }
           Utils.tryLogNonFatalError {
             uiTab.foreach(_.detach())
