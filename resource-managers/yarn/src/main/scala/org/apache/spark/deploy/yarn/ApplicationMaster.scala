@@ -153,6 +153,7 @@ private[spark] class ApplicationMaster(
   // In cluster mode, used to tell the AM when the user's SparkContext has been initialized.
   private val sparkContextPromise = Promise[SparkContext]()
 
+
   /**
    * Load the list of localized files set by the client, used when launching executors. This should
    * be called in a context where the needed credentials to access HDFS are available.
@@ -657,6 +658,12 @@ private[spark] class ApplicationMaster(
     val distCacheConf = new SparkConf(false)
     if (args.distCacheConf != null) {
       Utils.getPropertiesFromFile(args.distCacheConf).foreach { case (k, v) =>
+        distCacheConf.set(k, v)
+      }
+      return distCacheConf
+    }
+    if (args.propertiesFile != null) {
+      Utils.getPropertiesFromFile(args.propertiesFile).foreach { case (k, v) =>
         distCacheConf.set(k, v)
       }
     }
