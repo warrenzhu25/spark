@@ -97,6 +97,21 @@ class EventLoggingListenerSuite extends SparkFunSuite with LocalSparkContext wit
     assert(redactedProps(key) == "*********(redacted)")
   }
 
+  test("Event logging with unused spark properties") {
+    // Correct one is spark.sql.shuffle.partitions. This one misses last 's'.
+    val key = "spark.sql.shuffle.partitions"
+    val value = "100"
+    val conf = getLoggingConf(testDirPath, None)
+      .set(key, value)
+    val hadoopconf = SparkHadoopUtil.get.newConfiguration(new SparkConf())
+    val eventLogger = new EventLoggingListener("test", None, testDirPath.toUri(), conf)
+    val envDetails = SparkEnv.environmentDetails(conf, hadoopconf, "FIFO", Seq.empty, Seq.empty)
+    val event = SparkListenerEnvironmentUpdate(envDetails)
+    val unusedProperties = eventLogger.redactEvent(event).environmentDetails("Unused Spark Properties")
+    assert(unusedProperties.size === 1)
+    assert(unusedProperties.contains((key, value)))
+  }
+
   test("Executor metrics update") {
     testStageExecutorMetricsEventLogging()
   }

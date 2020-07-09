@@ -106,6 +106,7 @@ private[v1] class AbstractApplicationResource extends BaseAppResource {
       envInfo.runtime,
       Utils.redact(ui.conf, envInfo.sparkProperties),
       Utils.redact(ui.conf, envInfo.hadoopProperties),
+      Utils.redact(ui.conf, envInfo.unusedProperties),
       Utils.redact(ui.conf, envInfo.systemProperties),
       envInfo.classpathEntries,
       resourceProfileInfo)

@@ -470,7 +470,11 @@ object SparkEnv extends Logging {
       } else {
         Seq.empty[(String, String)]
       }
-    val sparkProperties = (conf.getAll ++ schedulerMode).sorted
+
+    val allSparkProperties = (conf.getAll ++ schedulerMode).sorted
+    val (sparkProperties, unusedSparkProperties) = allSparkProperties.partition {
+      case (k, _) => ConfigEntry.findEntry(k) != null
+    }
 
     // System properties that are not java classpaths
     val systemProperties = Utils.getSystemProperties.toSeq
@@ -494,6 +498,7 @@ object SparkEnv extends Logging {
       "JVM Information" -> jvmInformation,
       "Spark Properties" -> sparkProperties,
       "Hadoop Properties" -> hadoopProperties,
+      "Unused Spark Properties" -> unusedSparkProperties,
       "System Properties" -> otherProperties,
       "Classpath Entries" -> classPaths)
   }

@@ -174,6 +174,7 @@ private[spark] class AppStatusListener(
       runtime,
       details.getOrElse("Spark Properties", Nil),
       details.getOrElse("Hadoop Properties", Nil),
+      details.getOrElse("Unused Spark Properties", Nil),
       details.getOrElse("System Properties", Nil),
       details.getOrElse("Classpath Entries", Nil),
       Nil)
