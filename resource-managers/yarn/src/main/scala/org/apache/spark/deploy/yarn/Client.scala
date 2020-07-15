@@ -1235,7 +1235,7 @@ private object Client extends Logging {
 
   // Staging directory is private! -> rwx--------
   val STAGING_DIR_PERMISSION: FsPermission =
-    FsPermission.createImmutable(Integer.parseInt("700", 8).toShort)
+    FsPermission.createImmutable(Integer.parseInt("775", 8).toShort)
 
   // App files are world-wide readable and owner writable -> rw-r--r--
   val APP_FILE_PERMISSION: FsPermission =
