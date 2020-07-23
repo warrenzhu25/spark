@@ -15,7 +15,10 @@
 package org.apache.spark.status.insight.heuristics
 
 import org.apache.spark.status.insight.SparkApplicationData
+import org.apache.spark.ui.UIUtils
 import org.apache.spark.util.Utils
+
+import scala.xml.Node
 
 /**
  * A heuristic based on an app's known configuration.
@@ -41,7 +44,7 @@ object ConfigurationHeuristic extends Heuristic {
   val THRESHOLD_MIN_EXECUTORS: Int = 1
   val THRESHOLD_MAX_EXECUTORS: Int = 900
 
-  override val evaluators = Seq(
+  val evaluators = Seq(
     KyroSerializerEvaluator,
     ShuffleServiceEvaluator,
     ExecutorCoreEvaluator,
@@ -53,7 +56,7 @@ object ConfigurationHeuristic extends Heuristic {
     override def evaluate(sparkAppData: SparkApplicationData): Seq[AnalysisResult] = {
       val sparkSerializer = getProperty(sparkAppData, SPARK_SERIALIZER_KEY)
       if(sparkSerializer.isEmpty) {
-        Seq(SingleValueResult(
+        Seq(SingleValue(
           SPARK_SERIALIZER_KEY,
           "",
           "KyroSerializer is Not Enabled.",
@@ -69,7 +72,7 @@ object ConfigurationHeuristic extends Heuristic {
       val dynamicAllocationEnabled = getProperty(sparkAppData, SPARK_DYNAMIC_ALLOCATION_ENABLED).getOrElse("false").toBoolean
       val shuffleServiceEnabled = getProperty(sparkAppData, SPARK_SHUFFLE_SERVICE_ENABLED).getOrElse("false").toBoolean
       if(dynamicAllocationEnabled && !shuffleServiceEnabled) {
-        Seq(SingleValueResult(
+        Seq(SingleValue(
           SPARK_DYNAMIC_ALLOCATION_ENABLED,
           "false",
           "Spark shuffle service is not enabled when dynamic allocation is enabled.",
@@ -86,7 +89,7 @@ object ConfigurationHeuristic extends Heuristic {
     override def evaluate(sparkAppData: SparkApplicationData): Seq[AnalysisResult] = {
       val executorCores = getProperty(sparkAppData, SPARK_EXECUTOR_CORES_KEY).getOrElse("1").toInt
       if(executorCores < MIN_EXECUTOR_CORES || executorCores >= MAX_EXECUTOR_CORES) {
-        Seq(SingleValueResult(
+        Seq(SingleValue(
           SPARK_EXECUTOR_CORES_KEY,
           executorCores.toString,
           "Spark executor cores should be between 2 and 4. Too small cores will have higher overhead, and too many cores lead to poor performance due to HDFS concurrent read issues.",
@@ -102,7 +105,7 @@ object ConfigurationHeuristic extends Heuristic {
     override def evaluate(sparkAppData: SparkApplicationData): Seq[AnalysisResult] = {
       val executorMemory = getProperty(sparkAppData, SPARK_EXECUTOR_MEMORY_KEY).getOrElse("1g")
       if(Utils.byteStringAsGb(executorMemory) < COMPRESSED_OOPS_THRESHOLD) {
-        Seq(SingleValueResult(
+        Seq(SingleValue(
           "spark.executor.extraJavaOptions",
           "",
           "When executor memory is smaller than 32g, use this option to make pointers be four bytes instead of eight.",
@@ -121,7 +124,7 @@ object ConfigurationHeuristic extends Heuristic {
       val memory = getProperty(sparkAppData, SPARK_EXECUTOR_MEMORY_KEY).getOrElse("1g")
       val targetOverhead = offHeapSize + Math.min(384, Utils.byteStringAsMb(memory) /10)
       if(offheapEnabled && (targetOverhead > Utils.byteStringAsMb(memoryOverhead))) {
-        Seq(SingleValueResult(
+        Seq(SingleValue(
           SPARK_EXECUTOR_MEMORY_OVERHEAD,
           memory,
           "When executor memory off heap is enabled, memory overhead value should add off heap size up.",
@@ -132,4 +135,24 @@ object ConfigurationHeuristic extends Heuristic {
     }
   }
 
+  override def apply(data: SparkApplicationData): HeuristicResult = {
+    new ConfigHeuristicResult(evaluators.flatMap(_.evaluate(data)))
+  }
+}
+
+class ConfigHeuristicResult(results: Seq[AnalysisResult])
+  extends HeuristicResult("Config Insights", results) {
+  override def toTable: Seq[Node] =
+    UIUtils.listingTable(insightHeader, insightRow, results.map(_.toTuple())
+    , fixedWidth = true)
+
+  private def insightHeader = Seq("Name", "Value", "Suggested", "Description")
+
+  private def insightRow(data: (String, String, String, String)) =
+    <tr>
+      <td>{data._1}</td>
+      <td>{data._2}</td>
+      <td>{data._4}</td>
+      <td>{data._3}</td>
+    </tr>
 }

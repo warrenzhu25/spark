@@ -20,78 +20,19 @@ import org.apache.spark.status.api.v1.ExecutorSummary
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.{MemoryFormatUtils, Severity, SeverityThresholds}
 import org.apache.spark.status.insight.util.Utils
+import org.apache.spark.ui.UIUtils
 
 import scala.collection.JavaConverters
 import scala.util.Try
+import scala.xml.Node
 
 /**
   * A heuristic based the driver's configurations and memory used.
   * It checks whether the configuration values specified are within the threshold range.
   * It also analyses the peak JVM memory used and time spent in GC by the job.
   */
-class DriverHeuristic()
-  extends Heuristic {
 
-  import DriverHeuristic._
-
-  val gcSeverityThresholds: SeverityThresholds = DEFAULT_GC_SEVERITY_THRESHOLDS
-
-  val sparkOverheadMemoryThreshold: SeverityThresholds = DEFAULT_SPARK_OVERHEAD_MEMORY_THRESHOLDS
-
-  val sparkExecutorMemoryThreshold: String = DEFAULT_SPARK_EXECUTOR_MEMORY_THRESHOLD
-
-  lazy val driverPeakJvmMemoryThresholdString = MAX_DRIVER_PEAK_JVM_USED_MEMORY_THRESHOLD_KEY
-
-  override def apply(data: SparkApplicationData): HeuristicResult = {
-    val evaluator = new Evaluator(this, data)
-
-    def formatProperty(property: Option[String]): String =
-      property.getOrElse("Not presented. Using default.")
-
-    var resultDetails = Seq(
-      new SimpleResult(
-        SPARK_DRIVER_MEMORY_KEY,
-        formatProperty(evaluator.driverMemoryBytes.map(MemoryFormatUtils.bytesToString))
-      ),
-      //Removing driver GC heuristics for now
-//      new HeuristicResultDetails(
-//        "Ratio of time spent in GC to total time", evaluator.ratio.toString
-//      ),
-      new SimpleResult(
-        SPARK_DRIVER_CORES_KEY,
-        formatProperty(evaluator.driverCores.map(_.toString))
-      ),
-      new SimpleResult(
-        SPARK_YARN_DRIVER_MEMORY_OVERHEAD,
-        evaluator.sparkYarnDriverMemoryOverhead
-      ),
-      new SimpleResult(DRIVER_PEAK_JVM_USED_MEMORY_HEURISTIC_NAME, MemoryFormatUtils.bytesToString(evaluator.maxDriverPeakJvmUsedMemory))
-    )
-    if(evaluator.severityJvmUsedMemory != Severity.NONE) {
-      resultDetails = resultDetails :+ new SimpleResult("Driver Peak JVM used Memory", "The allocated memory for the driver (in " + SPARK_DRIVER_MEMORY_KEY + ") is much more than the peak JVM used memory by the driver.")
-      resultDetails = resultDetails :+ new SimpleResult(SUGGESTED_SPARK_DRIVER_MEMORY_HEURISTIC_NAME, MemoryFormatUtils.roundOffMemoryStringToNextInteger(MemoryFormatUtils.bytesToString(((1 + BUFFER_FRACTION)  * (evaluator.maxDriverPeakJvmUsedMemory + reservedMemory)).toLong)))
-    }
-    if (evaluator.severityGc != Severity.NONE) {
-      resultDetails = resultDetails :+ new SimpleResult("Gc ratio high", "The driver is spending too much time on GC. We recommend increasing the driver memory.")
-    }
-    if(evaluator.severityDriverCores != Severity.NONE) {
-      resultDetails = resultDetails :+ new SimpleResult("Driver Cores", "Please do not specify excessive number of driver cores. Change it in the field : " + SPARK_DRIVER_CORES_KEY)
-    }
-    if(evaluator.severityDriverMemoryOverhead != Severity.NONE) {
-      resultDetails = resultDetails :+ new SimpleResult("Driver Overhead Memory", "Please do not specify excessive amount of overhead memory for Driver. Change it in the field " + SPARK_YARN_DRIVER_MEMORY_OVERHEAD)
-    }
-    if(evaluator.severityDriverMemory != Severity.NONE) {
-      resultDetails = resultDetails :+ new SimpleResult("Spark Driver Memory", "Please do not specify excessive amount of memory for Driver. Change it in the field " + SPARK_DRIVER_MEMORY_KEY)
-    }
-
-    HeuristicResult(
-      name,
-      resultDetails
-    )
-  }
-}
-
-object DriverHeuristic {
+object DriverHeuristic extends Heuristic{
 
   val SPARK_DRIVER_MEMORY_KEY = "spark.driver.memory"
   val SPARK_DRIVER_CORES_KEY = "spark.driver.cores"
@@ -118,7 +59,16 @@ object DriverHeuristic {
 
   val DEFAULT_SPARK_EXECUTOR_MEMORY_THRESHOLD = "2G"
 
-  class Evaluator(driverHeuristic: DriverHeuristic, data: SparkApplicationData) {
+  val gcSeverityThresholds: SeverityThresholds = DEFAULT_GC_SEVERITY_THRESHOLDS
+
+  val sparkOverheadMemoryThreshold: SeverityThresholds = DEFAULT_SPARK_OVERHEAD_MEMORY_THRESHOLDS
+
+  val sparkExecutorMemoryThreshold: String = DEFAULT_SPARK_EXECUTOR_MEMORY_THRESHOLD
+
+  lazy val driverPeakJvmMemoryThresholdString = MAX_DRIVER_PEAK_JVM_USED_MEMORY_THRESHOLD_KEY
+
+
+  class Evaluator(data: SparkApplicationData) {
     lazy val appConfigurationProperties: Map[String, String] =
       data.appConf
 
@@ -139,7 +89,7 @@ object DriverHeuristic {
     val MAX_DRIVER_PEAK_JVM_USED_MEMORY_THRESHOLDS : SeverityThresholds =
       DEFAULT_MAX_DRIVER_PEAK_JVM_USED_MEMORY_THRESHOLDS
 
-    lazy val severityJvmUsedMemory : Severity = if (driverMemoryBytes.getOrElse(0L).asInstanceOf[Number].longValue <= MemoryFormatUtils.stringToBytes(driverHeuristic.sparkExecutorMemoryThreshold)) {
+    lazy val severityJvmUsedMemory : Severity = if (driverMemoryBytes.getOrElse(0L).asInstanceOf[Number].longValue <= MemoryFormatUtils.stringToBytes(sparkExecutorMemoryThreshold)) {
       Severity.NONE
     } else {
       MAX_DRIVER_PEAK_JVM_USED_MEMORY_THRESHOLDS.severityOf(driverMemoryBytes.getOrElse(0L).asInstanceOf[Number].longValue)
@@ -147,7 +97,7 @@ object DriverHeuristic {
 
     //Gc Calculations
     val ratio : Double = driver.totalGCTime.toDouble / driver.totalDuration.toDouble
-    val severityGc = driverHeuristic.gcSeverityThresholds.severityOf(ratio)
+    val severityGc = gcSeverityThresholds.severityOf(ratio)
 
     lazy val driverMemoryBytes: Option[Long] =
       Try(getProperty(SPARK_DRIVER_MEMORY_KEY).map(MemoryFormatUtils.stringToBytes)).getOrElse(None)
@@ -167,7 +117,7 @@ object DriverHeuristic {
 
     val severityDriverMemory = DEFAULT_SPARK_MEMORY_THRESHOLDS.severityOf(driverMemoryBytes.getOrElse(0).asInstanceOf[Number].longValue)
     val severityDriverCores = DEFAULT_SPARK_CORES_THRESHOLDS.severityOf(driverCores.getOrElse(0).asInstanceOf[Number].intValue)
-    val severityDriverMemoryOverhead = driverHeuristic.sparkOverheadMemoryThreshold.severityOf(MemoryFormatUtils.stringToBytes(sparkYarnDriverMemoryOverhead))
+    val severityDriverMemoryOverhead = DriverHeuristic.sparkOverheadMemoryThreshold.severityOf(MemoryFormatUtils.stringToBytes(sparkYarnDriverMemoryOverhead))
 
     //Severity for the configuration thresholds
     val severityConfThresholds: Severity = Severity.max(severityDriverCores, severityDriverMemory, severityDriverMemoryOverhead)
@@ -179,4 +129,67 @@ object DriverHeuristic {
     private def getProperty(key: String): Option[String] = appConfigurationProperties.get(key)
   }
 
+  class DriverHeuristicResult(results: Seq[AnalysisResult])
+    extends HeuristicResult("Driver Insights", results) {
+    override def toTable: Seq[Node] =
+      UIUtils.listingTable(insightHeader, insightRow, results.map(_.toTuple())
+        , fixedWidth = true)
+
+    private def insightHeader = Seq("Name", "Value", "Description", "Suggestion")
+
+    private def insightRow(data: (String, String, String, String)) =
+      <tr>
+        <td>{data._1}</td>
+        <td>{data._2}</td>
+        <td>{data._4}</td>
+        <td>{data._3}</td>
+      </tr>
+  }
+
+  override def apply(data: SparkApplicationData): HeuristicResult = {
+    val evaluator = new Evaluator(data)
+
+    def formatProperty(property: Option[String]): String =
+      property.getOrElse("Not presented. Using default.")
+
+    var resultDetails = Seq(
+      new SingleValue(
+        SPARK_DRIVER_MEMORY_KEY,
+        formatProperty(evaluator.driverMemoryBytes.map(MemoryFormatUtils.bytesToString))
+      ),
+      //Removing driver GC heuristics for now
+      //      new HeuristicResultDetails(
+      //        "Ratio of time spent in GC to total time", evaluator.ratio.toString
+      //      ),
+      new SingleValue(
+        SPARK_DRIVER_CORES_KEY,
+        formatProperty(evaluator.driverCores.map(_.toString))
+      ),
+      new SingleValue(
+        SPARK_YARN_DRIVER_MEMORY_OVERHEAD,
+        evaluator.sparkYarnDriverMemoryOverhead
+      ),
+      new SingleValue(DRIVER_PEAK_JVM_USED_MEMORY_HEURISTIC_NAME, MemoryFormatUtils.bytesToString(evaluator.maxDriverPeakJvmUsedMemory))
+    )
+    if(evaluator.severityJvmUsedMemory != Severity.NONE) {
+      resultDetails = resultDetails :+ new SingleValue("Driver Peak JVM used Memory", "The allocated memory for the driver (in " + SPARK_DRIVER_MEMORY_KEY + ") is much more than the peak JVM used memory by the driver.")
+      resultDetails = resultDetails :+ new SingleValue(SUGGESTED_SPARK_DRIVER_MEMORY_HEURISTIC_NAME, MemoryFormatUtils.roundOffMemoryStringToNextInteger(MemoryFormatUtils.bytesToString(((1 + BUFFER_FRACTION)  * (evaluator.maxDriverPeakJvmUsedMemory + reservedMemory)).toLong)))
+    }
+    if (evaluator.severityGc != Severity.NONE) {
+      resultDetails = resultDetails :+ new SingleValue("Gc ratio high", "The driver is spending too much time on GC. We recommend increasing the driver memory.")
+    }
+    if(evaluator.severityDriverCores != Severity.NONE) {
+      resultDetails = resultDetails :+ new SingleValue("Driver Cores", "Please do not specify excessive number of driver cores. Change it in the field : " + SPARK_DRIVER_CORES_KEY)
+    }
+    if(evaluator.severityDriverMemoryOverhead != Severity.NONE) {
+      resultDetails = resultDetails :+ new SingleValue("Driver Overhead Memory", "Please do not specify excessive amount of overhead memory for Driver. Change it in the field " + SPARK_YARN_DRIVER_MEMORY_OVERHEAD)
+    }
+    if(evaluator.severityDriverMemory != Severity.NONE) {
+      resultDetails = resultDetails :+ new SingleValue("Spark Driver Memory", "Please do not specify excessive amount of memory for Driver. Change it in the field " + SPARK_DRIVER_MEMORY_KEY)
+    }
+
+    new DriverHeuristicResult(
+      resultDetails
+    )
+  }
 }

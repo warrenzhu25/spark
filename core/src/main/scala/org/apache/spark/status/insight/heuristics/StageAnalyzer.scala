@@ -1,3 +1,17 @@
+/*
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
 package org.apache.spark.status.insight.heuristics
 
 import org.apache.spark.status.api.v1.{StageData, StageStatus, TaskData}
@@ -138,7 +152,7 @@ private[heuristics] class StagesAnalyzer(private val data: SparkApplicationData)
       val taskFailureResult = checkForTaskFailure(stageId, stageData)
       val gcResult = checkForGC(stageId, stageData)
 
-      new StageAnalysis(stageData.stageId, executionMemorySpillResult, longTaskResult,
+      StageAnalysis(stageData.stageId, executionMemorySpillResult, longTaskResult,
         taskSkewResult, taskFailureResult, stageFailureResult, gcResult, stageData.numTasks,
         medianTime, maxTime, stageDuration, stageData.inputBytes, stageData.outputBytes,
         stageData.shuffleReadBytes, stageData.shuffleWriteBytes)
@@ -374,7 +388,8 @@ private[heuristics] class StagesAnalyzer(private val data: SparkApplicationData)
    * @param stageData stage data.
    * @return results of stage failure analysis for the stage.
    */
-  private def checkForStageFailure(stageId: Int, stageData: StageData): SimpleStageAnalysisResult = {
+  private def checkForStageFailure(stageId: Int, stageData: StageData):
+  SimpleStageAnalysisResult = {
     val severity = if (stageData.status == StageStatus.FAILED) {
       Severity.CRITICAL
     } else {

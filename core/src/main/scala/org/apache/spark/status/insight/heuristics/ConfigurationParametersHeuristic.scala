@@ -15,92 +15,29 @@
 
 package org.apache.spark.status.insight.heuristics
 
-import scala.collection.JavaConverters
-import scala.collection.mutable.ArrayBuffer
 import org.apache.commons.io.FileUtils
 import org.apache.spark.status.api.v1.ExecutorSummary
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.{MemoryFormatUtils, Severity}
+import org.apache.spark.ui.UIUtils
+
+import scala.collection.mutable.ArrayBuffer
+import scala.xml.Node
 
 /**
   * A heuristic for recommending configuration parameter values, based on metrics from the application run.
   */
-class ConfigurationParametersHeuristic()
-  extends Heuristic {
 
-  import ConfigurationParametersHeuristic._
-  import ConfigurationHeuristicsConstants._
-
-  override def apply(data: SparkApplicationData): HeuristicResult = {
-
-    val evaluator = new Evaluator(this, data)
-
-    // add current configuration parameter values, and recommended parameter values to the result.
-    var resultDetails = ArrayBuffer(
-      new SimpleResult(CURRENT_SPARK_EXECUTOR_MEMORY,
-        bytesToString(evaluator.sparkExecutorMemory)),
-      new SimpleResult(CURRENT_SPARK_DRIVER_MEMORY,
-        bytesToString(evaluator.sparkDriverMemory)),
-      new SimpleResult(CURRENT_SPARK_EXECUTOR_CORES, evaluator.sparkExecutorCores.toString),
-      new SimpleResult(CURRENT_SPARK_DRIVER_CORES, evaluator.sparkDriverCores.toString),
-      new SimpleResult(CURRENT_SPARK_MEMORY_FRACTION, evaluator.sparkMemoryFraction.toString))
-    evaluator.sparkExecutorInstances.foreach { numExecutors =>
-      resultDetails += new SimpleResult(CURRENT_SPARK_EXECUTOR_INSTANCES, numExecutors.toString)
-    }
-    evaluator.sparkExecutorMemoryOverhead.foreach { memOverhead =>
-      resultDetails += new SimpleResult(CURRENT_SPARK_EXECUTOR_MEMORY_OVERHEAD,
-        bytesToString(memOverhead))
-    }
-    evaluator.sparkDriverMemoryOverhead.foreach { memOverhead =>
-      resultDetails += new SimpleResult(CURRENT_SPARK_DRIVER_MEMORY_OVERHEAD,
-        bytesToString(memOverhead))
-    }
-
-    resultDetails ++= Seq(
-      new SimpleResult(RECOMMENDED_SPARK_EXECUTOR_CORES,
-        evaluator.recommendedExecutorCores.toString),
-      new SimpleResult(RECOMMENDED_SPARK_EXECUTOR_MEMORY,
-        bytesToString(evaluator.recommendedExecutorMemory)),
-      new SimpleResult(RECOMMENDED_SPARK_MEMORY_FRACTION,
-        evaluator.recommendedMemoryFraction.toString),
-      new SimpleResult(RECOMMENDED_SPARK_DRIVER_CORES,
-        evaluator.recommendedDriverCores.toString),
-      new SimpleResult(RECOMMENDED_SPARK_DRIVER_MEMORY,
-        bytesToString(evaluator.recommendedDriverMemory))
-     )
-    evaluator.recommendedExecutorInstances.foreach { numExecutors =>
-      resultDetails += new SimpleResult(RECOMMENDED_SPARK_EXECUTOR_INSTANCES,
-        numExecutors.toString)
-    }
-    evaluator.recommendedExecutorMemoryOverhead.foreach { memoryOverhead =>
-      resultDetails += new SimpleResult(RECOMMENDED_SPARK_EXECUTOR_MEMORY_OVERHEAD,
-        bytesToString(memoryOverhead))
-    }
-    evaluator.recommendedDriverMemoryOverhead.foreach { memoryOverhead =>
-      resultDetails += new SimpleResult(RECOMMENDED_SPARK_DRIVER_MEMORY_OVERHEAD,
-        bytesToString(memoryOverhead))
-    }
-
-    HeuristicResult(
-      name,
-      resultDetails
-    )
-  }
-}
-
- object ConfigurationParametersHeuristic {
+object ConfigurationParametersHeuristic extends Heuristic {
    import ConfigurationHeuristicsConstants._
 
    /**
      * Evaluate the metrics for a given Spark application, and determine recommended configuration
      * parameter values
      *
-     * @param configurationParametersHeuristic configuration parameters heurisitc
      * @param data Spark application data
      */
-   class Evaluator(
-       configurationParametersHeuristic: ConfigurationParametersHeuristic,
-       data: SparkApplicationData) {
+   class Evaluator(data: SparkApplicationData) {
      lazy val appConfigurationProperties: Map[String, String] =
        data.appConf
 
@@ -146,9 +83,7 @@ class ConfigurationParametersHeuristic()
 
      val currentParallelism = sparkExecutorInstances.map(_ * sparkExecutorCores)
 
-     val jvmUsedMemoryHeuristic =
-       new JvmUsedMemoryHeuristic()
-     val jvmUsedMemoryEvaluator = new JvmUsedMemoryHeuristic.Evaluator(jvmUsedMemoryHeuristic, data)
+     val jvmUsedMemoryEvaluator = new JvmUsedMemoryHeuristic.Evaluator(data)
 
      val stageAnalyzer =
        new StagesAnalyzer(data)
@@ -345,10 +280,8 @@ class ConfigurationParametersHeuristic()
        * @return the recommended values for driver cores, memory, severity and score
        */
      private def adjustDriverParameters(): (Int, Long, Severity, Int) = {
-       val driverHeuristic =
-         new DriverHeuristic()
 
-       val driverEvaluator = new DriverHeuristic.Evaluator(driverHeuristic, data)
+       val driverEvaluator = new DriverHeuristic.Evaluator(data)
 
        val driverCores = Math.min(sparkDriverCores, DEFAULT_MAX_DRIVER_CORES)
 
@@ -443,4 +376,63 @@ class ConfigurationParametersHeuristic()
      }
      s"${Math.ceil(value).toInt}${unit}"
    }
+
+   override def apply(data: SparkApplicationData): HeuristicResult = {
+
+     val evaluator = new Evaluator(data)
+
+     // add current configuration parameter values, and recommended parameter values to the result.
+     var resultDetails = ArrayBuffer(
+       SingleValue(SPARK_EXECUTOR_MEMORY,
+         bytesToString(evaluator.sparkExecutorMemory),
+         suggested = bytesToString(evaluator.recommendedExecutorMemory)),
+       SingleValue(SPARK_DRIVER_MEMORY,
+         bytesToString(evaluator.sparkDriverMemory),
+         suggested = bytesToString(evaluator.recommendedDriverMemory)),
+       SingleValue(SPARK_EXECUTOR_CORES,
+         evaluator.sparkExecutorCores.toString,
+         suggested = evaluator.recommendedExecutorCores.toString),
+       SingleValue(SPARK_DRIVER_CORES,
+         evaluator.sparkDriverCores.toString,
+         suggested = evaluator.recommendedDriverCores.toString),
+       SingleValue(SPARK_MEMORY_FRACTION,
+         evaluator.sparkMemoryFraction.toString,
+         suggested = evaluator.recommendedMemoryFraction.toString))
+
+     evaluator.sparkExecutorInstances.foreach { numExecutors =>
+       resultDetails += SingleValue(SPARK_EXECUTOR_INSTANCES, numExecutors.toString,
+       suggested = evaluator.recommendedExecutorInstances.get.toString)
+     }
+     evaluator.sparkExecutorMemoryOverhead.foreach { memOverhead =>
+       resultDetails += SingleValue(SPARK_EXECUTOR_MEMORY_OVERHEAD,
+         bytesToString(memOverhead),
+         suggested = evaluator.recommendedExecutorMemoryOverhead.get.toString
+       )
+     }
+     evaluator.sparkDriverMemoryOverhead.foreach { memOverhead =>
+       resultDetails += SingleValue(SPARK_DRIVER_MEMORY_OVERHEAD,
+         bytesToString(memOverhead),
+         suggested = evaluator.recommendedDriverMemoryOverhead.get.toString
+       )
+     }
+
+     new ConfigParamsHeuristicResult(resultDetails)
+   }
  }
+
+class ConfigParamsHeuristicResult(results: Seq[AnalysisResult])
+  extends HeuristicResult("Config Params Insights", results) {
+  override def toTable: Seq[Node] =
+    UIUtils.listingTable(insightHeader, insightRow, results.map(_.toTuple())
+      , fixedWidth = true)
+
+  private def insightHeader = Seq("Name", "Value", "Suggestion", "Description")
+
+  private def insightRow(data: (String, String, String, String)) =
+    <tr>
+      <td>{data._1}</td>
+      <td>{data._2}</td>
+      <td>{data._4}</td>
+      <td>{data._3}</td>
+    </tr>
+}

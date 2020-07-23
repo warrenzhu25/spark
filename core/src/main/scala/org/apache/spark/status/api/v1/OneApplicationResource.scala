@@ -20,7 +20,6 @@ import java.io.OutputStream
 import java.util.{List => JList}
 import java.util.zip.ZipOutputStream
 
-import com.linkedin.drelephant.spark.heuristics.{StagesWithFailedTasksHeuristic, UnifiedMemoryHeuristic}
 import javax.ws.rs.{DefaultValue, GET, Path, PathParam, Produces, QueryParam}
 import javax.ws.rs.core.{MediaType, Response, StreamingOutput}
 import org.apache.spark.status.insight.SparkApplicationData
@@ -189,9 +188,9 @@ private[v1] class AbstractApplicationResource extends BaseAppResource {
     ExecutorsHeuristic,
     JobsHeuristic,
     StagesHeuristic,
-    new ConfigurationParametersHeuristic,
-    new DriverHeuristic,
-    new StagesWithFailedTasksHeuristic
+    ConfigurationParametersHeuristic,
+    DriverHeuristic,
+    StagesWithFailedTasksHeuristic
   )
 
   @GET

@@ -20,7 +20,7 @@ import javax.ws.rs.core.MediaType
 import javax.ws.rs.{GET, Path, Produces}
 import org.apache.spark.JobExecutionStatus
 import org.apache.spark.status.insight.SparkApplicationData
-import org.apache.spark.status.insight.heuristics.{ConfigurationHeuristic, ExecutorGcHeuristic, ExecutorsHeuristic, AnalysisResult, HeuristicResult, JobsHeuristic, StagesHeuristic}
+import org.apache.spark.status.insight.heuristics.{AnalysisResult, ConfigurationHeuristic, ConfigurationParametersHeuristic, DriverHeuristic, ExecutorGcHeuristic, ExecutorsHeuristic, HeuristicResult, JobsHeuristic, StagesHeuristic, StagesWithFailedTasksHeuristic}
 
 import scala.collection.JavaConverters._
 
@@ -32,12 +32,15 @@ private[v1] class AppInsightResource extends BaseAppResource {
     ExecutorGcHeuristic,
     ExecutorsHeuristic,
     JobsHeuristic,
-    StagesHeuristic
+    StagesHeuristic,
+    ConfigurationParametersHeuristic,
+    DriverHeuristic,
+    StagesWithFailedTasksHeuristic
   )
 
   @GET
-  @Path("suggestions")
-  def Suggestion(): Seq[HeuristicResult] = {
+  @Path("insights")
+  def insights(): Seq[HeuristicResult] = {
     heuristic.map(_.apply(appData()))
   }
 

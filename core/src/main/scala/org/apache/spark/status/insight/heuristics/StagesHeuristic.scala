@@ -19,10 +19,13 @@ package org.apache.spark.status.insight.heuristics
 import org.apache.spark.status.api.v1.{ExecutorSummary, StageData, StageStatus}
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.{Severity, SeverityThresholds}
+import org.apache.spark.status.insight.heuristics.ConfigurationHeuristic.evaluators
 import org.apache.spark.status.insight.math.Statistics
+import org.apache.spark.ui.UIUtils
 
 import scala.concurrent.duration
 import scala.concurrent.duration.Duration
+import scala.xml.Node
 
 /**
   * A heuristic based on metrics for a Spark app's stages.
@@ -55,7 +58,7 @@ object StagesHeuristic extends Heuristic {
 
   val SPARK_EXECUTOR_INSTANCES_KEY = "spark.executor.instances"
 
-  override val evaluators = Seq(StagesEvaluator)
+  val evaluators = Seq(StagesEvaluator)
 
   object StagesEvaluator extends SparkEvaluator {
 
@@ -112,26 +115,26 @@ object StagesHeuristic extends Heuristic {
       val stageAnalysis = new StagesAnalyzer(sparkAppData).getStageAnalysis()
 
       Seq(
-        SimpleResult("Spark completed stages count", numCompletedStages.toString),
-        SimpleResult("Spark failed stages count", numFailedStages.toString),
-        SimpleResult("Spark stage failure rate", f"${stageFailureRate.getOrElse(0.0D)}%.3f"),
-        MultipleValuesResult(
+        SingleValue("Spark completed stages count", numCompletedStages.toString),
+        SingleValue("Spark failed stages count", numFailedStages.toString),
+        SingleValue("Spark stage failure rate", f"${stageFailureRate.getOrElse(0.0D)}%.3f"),
+        MultipleValues(
           "Spark stages with long average executor runtimes",
           formatStagesWithLongAverageExecutorRuntimes(stagesWithLongAverageExecutorRuntimes)
         ),
-        MultipleValuesResult(
+        MultipleValues(
           "Spark task failure result", stageAnalysis.flatMap(_.taskFailureResult.details)
         ),
-        MultipleValuesResult(
+        MultipleValues(
           "Spark stage failure result", stageAnalysis.flatMap(_.stageFailureResult.details)
         ),
-        MultipleValuesResult(
+        MultipleValues(
           "Spark task skew result", stageAnalysis.flatMap(_.taskSkewResult.details)
         ),
-        MultipleValuesResult(
+        MultipleValues(
           "Spark long task result", stageAnalysis.flatMap(_.longTaskResult.details)
         ),
-        MultipleValuesResult(
+        MultipleValues(
           "Spark task spill result", stageAnalysis.flatMap(_.executionMemorySpillResult.details)
         )
       )
@@ -179,4 +182,23 @@ object StagesHeuristic extends Heuristic {
       minutesSeverityThresholds.ascending
     )
   }
+
+  override def apply(data: SparkApplicationData): HeuristicResult = {
+    new StagesHeuristicResult(evaluators.flatMap(_.evaluate(data)))
+  }
+}
+
+class StagesHeuristicResult(results: Seq[AnalysisResult])
+  extends HeuristicResult("Stage Insights", results) {
+  override def toTable: Seq[Node] =
+    UIUtils.listingTable(insightHeader, insightRow, results.map(_.toTuple())
+      , fixedWidth = true)
+
+  private def insightHeader = Seq("Name", "Value")
+
+  private def insightRow(data: (String, String, String, String)) =
+    <tr>
+      <td>{data._1}</td>
+      <td>{data._2}</td>
+    </tr>
 }

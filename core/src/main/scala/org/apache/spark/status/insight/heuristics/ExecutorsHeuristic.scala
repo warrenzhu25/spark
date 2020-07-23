@@ -19,10 +19,13 @@ package org.apache.spark.status.insight.heuristics
 import org.apache.spark.status.api.v1.ExecutorSummary
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.{MemoryFormatUtils, Severity, SeverityThresholds}
+import org.apache.spark.status.insight.heuristics.ConfigurationHeuristic.evaluators
 import org.apache.spark.status.insight.math.Statistics
+import org.apache.spark.ui.UIUtils
 
 import scala.collection.JavaConverters
 import scala.collection.mutable.ArrayBuffer
+import scala.xml.Node
 
 /**
   * A heuristic based on metrics for a Spark app's executors.
@@ -59,7 +62,7 @@ object ExecutorsHeuristic extends Heuristic {
 
   val ignoreMaxMillisLessThanThreshold = DEFAULT_IGNORE_MAX_MILLIS_LESS_THAN_THRESHOLD
 
-  override val evaluators = Seq(ExecutorsEvaluator)
+  val evaluators = Seq(ExecutorsEvaluator)
 
   object ExecutorsEvaluator extends SparkEvaluator {
 
@@ -128,39 +131,39 @@ object ExecutorsHeuristic extends Heuristic {
       )
 
       Seq(
-        SimpleResult(
+        SingleValue(
           "Total executor storage memory allocated",
           MemoryFormatUtils.bytesToString(totalStorageMemoryAllocated)
         ),
-        SimpleResult(
+        SingleValue(
           "Total executor storage memory used",
           MemoryFormatUtils.bytesToString(totalStorageMemoryUsed)
         ),
-        SimpleResult(
+        SingleValue(
           "Executor storage memory utilization rate",
           f"${storageMemoryUtilizationRate}%1.3f"
         ),
-        SimpleResult(
+        SingleValue(
           "Executor storage memory used distribution",
           Distribution.formatDistributionBytes(storageMemoryUsedDistribution)
         ),
-        SimpleResult(
+        SingleValue(
           "Executor task time distribution",
           Distribution.formatDistributionDuration(taskTimeDistribution)
         ),
-        SimpleResult(
+        SingleValue(
           "Executor task time sum",
           (totalTaskTime / Statistics.SECOND_IN_MS).toString
         ),
-        SimpleResult(
+        SingleValue(
           "Executor input bytes distribution",
           Distribution.formatDistributionBytes(inputBytesDistribution)
         ),
-        SimpleResult(
+        SingleValue(
           "Executor shuffle read bytes distribution",
           Distribution.formatDistributionBytes(shuffleReadBytesDistribution)
         ),
-        SimpleResult(
+        SingleValue(
           "Executor shuffle write bytes distribution",
           Distribution.formatDistributionBytes(shuffleWriteBytesDistribution)
         )
@@ -214,4 +217,23 @@ object ExecutorsHeuristic extends Heuristic {
     def formatDistributionDuration(distribution: Distribution): String =
       formatDistribution(distribution, Statistics.readableTimespan)
   }
+
+  override def apply(data: SparkApplicationData): HeuristicResult = {
+    new ExecutorsHeuristicResult(evaluators.flatMap(_.evaluate(data)))
+  }
+}
+
+class ExecutorsHeuristicResult(results: Seq[AnalysisResult])
+  extends HeuristicResult("Executors Insights", results) {
+  override def toTable: Seq[Node] =
+    UIUtils.listingTable(insightHeader, insightRow, results.map(_.toTuple())
+      , fixedWidth = true)
+
+  private def insightHeader = Seq("Name", "Value")
+
+  private def insightRow(data: (String, String, String, String)) =
+    <tr>
+      <td>{data._1}</td>
+      <td>{data._2}</td>
+    </tr>
 }

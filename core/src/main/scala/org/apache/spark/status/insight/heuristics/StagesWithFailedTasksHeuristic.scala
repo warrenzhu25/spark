@@ -20,41 +20,38 @@ import org.apache.spark.status.api.v1.{StageData, StageStatus, TaskData}
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.Severity
 import org.apache.spark.status.insight.util.Utils
+import org.apache.spark.ui.UIUtils
+
+import scala.xml.Node
 
 /**
-  * A heuristic based on errors encountered by failed tasks. Tasks may fail due to Overhead memory issues or OOM errors. These errors are checked and warning is given accordingly.
+ * A heuristic based on errors encountered by failed tasks. Tasks may fail due to Overhead memory
+ * issues or OOM errors. These errors are checked and warning is given accordingly.
   */
-class StagesWithFailedTasksHeuristic()
-  extends Heuristic {
-
-  import StagesWithFailedTasksHeuristic._
-
-  override def apply(data: SparkApplicationData): HeuristicResult = {
-    val evaluator = new Evaluator(this, data)
-    var resultDetails = Seq(
-      new SimpleResult("Stages with OOM errors", evaluator.stagesWithOOMError.toString),
-      new SimpleResult("Stages with Overhead memory errors", evaluator.stagesWithOverheadError.toString)
-    )
-    if (evaluator.severityOverheadStages.getValue >= Severity.MODERATE.getValue)
-      resultDetails = resultDetails :+ new SimpleResult("Overhead memory errors", "Some tasks have failed due to overhead memory error. Please try increasing spark.yarn.executor.memoryOverhead by " + increaseMemoryBy +" in spark.yarn.executor.memoryOverhead")
-    //TODO: refine recommendations
-    if (evaluator.severityOOMStages.getValue >= Severity.MODERATE.getValue)
-      resultDetails = resultDetails :+ new SimpleResult("OOM errors", "Some tasks have failed due to OOM error. Try increasing spark.executor.memory or decreasing spark.memory.fraction (take a look at unified memory heuristic) or decreasing number of cores.")
-    HeuristicResult(
-      name,
-      resultDetails
-    )
-  }
-}
-
-object StagesWithFailedTasksHeuristic {
+object StagesWithFailedTasksHeuristic extends Heuristic {
 
   val OOM_ERROR = "java.lang.OutOfMemoryError"
   val OVERHEAD_MEMORY_ERROR = "killed by YARN for exceeding memory limits"
   val ratioThreshold: Double = 2
   val increaseMemoryBy: String = "1G"
 
-  class Evaluator(memoryFractionHeuristic: StagesWithFailedTasksHeuristic, data: SparkApplicationData) {
+  override def apply(data: SparkApplicationData): HeuristicResult = {
+    val evaluator = new Evaluator(data)
+    var resultDetails = Seq(
+      new SingleValue("Stages with OOM errors", evaluator.stagesWithOOMError.toString),
+      new SingleValue("Stages with Overhead memory errors", evaluator.stagesWithOverheadError.toString)
+    )
+    if (evaluator.severityOverheadStages.getValue >= Severity.MODERATE.getValue)
+      resultDetails = resultDetails :+ new SingleValue("Overhead memory errors", "Some tasks have failed due to overhead memory error. Please try increasing spark.yarn.executor.memoryOverhead by " + increaseMemoryBy +" in spark.yarn.executor.memoryOverhead")
+    //TODO: refine recommendations
+    if (evaluator.severityOOMStages.getValue >= Severity.MODERATE.getValue)
+      resultDetails = resultDetails :+ new SingleValue("OOM errors", "Some tasks have failed due to OOM error. Try increasing spark.executor.memory or decreasing spark.memory.fraction (take a look at unified memory heuristic) or decreasing number of cores.")
+    new StageFailureHeuristicResult(
+      resultDetails
+    )
+  }
+
+  class Evaluator(data: SparkApplicationData) {
     lazy val stagesWithFailedTasks: Seq[StageData] = data.stagesWithFailedTasks
 
     /**
@@ -142,4 +139,21 @@ object StagesWithFailedTasksHeuristic {
 
   }
 
+}
+
+class StageFailureHeuristicResult(results: Seq[AnalysisResult])
+  extends HeuristicResult("Stage Failure Insights", results) {
+  override def toTable: Seq[Node] =
+    UIUtils.listingTable(insightHeader, insightRow, results.map(_.toTuple())
+      , fixedWidth = true)
+
+  private def insightHeader = Seq("Name", "Value", "Description", "Suggestion")
+
+  private def insightRow(data: (String, String, String, String)) =
+    <tr>
+      <td>{data._1}</td>
+      <td>{data._2}</td>
+      <td>{data._4}</td>
+      <td>{data._3}</td>
+    </tr>
 }

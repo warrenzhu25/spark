@@ -1,9 +1,25 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
 package org.apache.spark.status.insight.heuristics
 
 import org.apache.spark.metrics._
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.MemoryFormatUtils
 import org.apache.spark.status.insight.heuristics.MemoryEvaluator._
+import org.apache.spark.ui.UIUtils
+
+import scala.xml.Node
 
 private [heuristics] trait MemoryAnalyzer {
   def analysis(data: SparkApplicationData): HeuristicResult
@@ -28,9 +44,8 @@ abstract class PeakMemoryAnalyzer(val executorMetricType: ExecutorMetricType)
     results ++ getCurrentConfigs(memoryEvaluator.appConf)
     results ++ getSuggested(memoryEvaluator)
 
-    HeuristicResult(
-      s"$executorMetricType Heuristic",
-      results.map({ case (a, b) => SimpleResult(a, b)})
+    new MemoryHeuristicResult(
+      results.map({ case (a, b) => SingleValue(a, b)})
     )
   }
 
@@ -124,3 +139,22 @@ object PeakStorageHeapMemoryAnalyzer extends PeakMemoryAnalyzer(OnHeapStorageMem
     Seq((SPARK_MEMORY_STORAGE_FRACTION, suggestedStorageFraction.toString))
   }
 }
+
+class MemoryHeuristicResult(results: Seq[AnalysisResult])
+  extends HeuristicResult("Memory Insights", results) {
+  override def toTable: Seq[Node] =
+    UIUtils.listingTable(insightHeader, insightRow, results.map(_.toTuple())
+      , fixedWidth = true)
+
+  private def insightHeader = Seq("Name", "Value", "Description", "Suggestion")
+
+  private def insightRow(data: (String, String, String, String)) =
+    <tr>
+      <td>{data._1}</td>
+      <td>{data._2}</td>
+      <td>{data._4}</td>
+      <td>{data._3}</td>
+    </tr>
+}
+
+

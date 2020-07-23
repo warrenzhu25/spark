@@ -20,7 +20,11 @@ import org.apache.spark.JobExecutionStatus
 import org.apache.spark.status.api.v1.JobData
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.{Severity, SeverityThresholds}
+import org.apache.spark.status.insight.heuristics.ConfigurationHeuristic.evaluators
+import org.apache.spark.ui.UIUtils
 import org.apache.spark.util.Benchmark.Result
+
+import scala.xml.Node
 
 /**
   * A heuristic based on metrics for a Spark app's jobs.
@@ -45,7 +49,7 @@ object JobsHeuristic extends Heuristic {
 
   val taskFailureRateSeverityThresholds = DEFAULT_TASK_FAILURE_RATE_SEVERITY_THRESHOLDS
 
-  override val evaluators = Seq(JobEvaluator)
+  val evaluators = Seq(JobEvaluator)
 
   object JobEvaluator extends SparkEvaluator {
 
@@ -113,14 +117,32 @@ object JobsHeuristic extends Heuristic {
       }
 
       Seq(
-        SimpleResult("Spark completed jobs count", numCompletedJobs.toString),
-        SimpleResult("Spark failed jobs count", numFailedJobs.toString),
-        MultipleValuesResult("Spark failed jobs list", failedJobs.map(formatFailedJob)),
-        SimpleResult("Spark job failure rate", f"${jobFailureRate.getOrElse(0.0D)}%.3f"),
-        MultipleValuesResult(
+        SingleValue("Spark completed jobs count", numCompletedJobs.toString),
+        SingleValue("Spark failed jobs count", numFailedJobs.toString),
+        MultipleValues("Spark failed jobs list", failedJobs.map(formatFailedJob)),
+        SingleValue("Spark job failure rate", f"${jobFailureRate.getOrElse(0.0D)}%.3f"),
+        MultipleValues(
           "Spark jobs with high task failure rates",
           formatJobsWithHighTaskFailureRates(jobsWithHighTaskFailureRates)
         ))
     }
   }
+
+  override def apply(data: SparkApplicationData): HeuristicResult =
+    new JobsHeuristicResult(evaluators.flatMap(_.evaluate(data)))
+}
+
+class JobsHeuristicResult(results: Seq[AnalysisResult])
+  extends HeuristicResult("Jobs Insights", results) {
+  override def toTable: Seq[Node] =
+    UIUtils.listingTable(insightHeader, insightRow, results.map(_.toTuple())
+      , fixedWidth = true)
+
+  private def insightHeader = Seq("Name", "Value")
+
+  private def insightRow(data: (String, String, String, String)) =
+    <tr>
+      <td>{data._1}</td>
+      <td>{data._2}</td>
+    </tr>
 }

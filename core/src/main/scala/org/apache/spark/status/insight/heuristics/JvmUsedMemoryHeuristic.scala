@@ -18,41 +18,16 @@ import org.apache.spark.status.api.v1.ExecutorSummary
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.{MemoryFormatUtils, Severity, SeverityThresholds}
 import org.apache.spark.status.insight.util.Utils
+import org.apache.spark.ui.UIUtils
 
 import scala.collection.JavaConverters
+import scala.xml.Node
 
 /**
   * A heuristic based on peak JVM used memory for the spark executors
   *
   */
-class JvmUsedMemoryHeuristic()
-  extends Heuristic {
-
-  import JvmUsedMemoryHeuristic._
-
-  lazy val sparkExecutorMemoryThreshold: String = DEFAULT_SPARK_EXECUTOR_MEMORY_THRESHOLD
-
-  override def apply(data: SparkApplicationData): HeuristicResult = {
-    val evaluator = new Evaluator(this, data)
-
-    var resultDetails = Seq(
-      new SimpleResult(MAX_EXECUTOR_PEAK_JVM_USED_MEMORY_HEURISTIC_NAME, MemoryFormatUtils.bytesToString(evaluator.maxExecutorPeakJvmUsedMemory)),
-      new SimpleResult("spark.executor.memory", MemoryFormatUtils.bytesToString(evaluator.sparkExecutorMemory))
-    )
-
-    if (evaluator.severity != Severity.NONE) {
-      resultDetails = resultDetails :+ new SimpleResult("Executor Memory", "The allocated memory for the executor (in " + SPARK_EXECUTOR_MEMORY + ") is much more than the peak JVM used memory by executors.")
-      resultDetails = resultDetails :+ new SimpleResult("Suggested spark.executor.memory", MemoryFormatUtils.roundOffMemoryStringToNextInteger((MemoryFormatUtils.bytesToString(((1 + BUFFER_FRACTION) * evaluator.maxExecutorPeakJvmUsedMemory).toLong))))
-    }
-
-    HeuristicResult(
-      name,
-      resultDetails
-    )
-  }
-}
-
-object JvmUsedMemoryHeuristic {
+object JvmUsedMemoryHeuristic extends Heuristic {
   val JVM_USED_MEMORY = "jvmUsedMemory"
   val SPARK_EXECUTOR_MEMORY = "spark.executor.memory"
   val SPARK_EXECUTOR_MEMORY_THRESHOLD_KEY = "spark_executor_memory_threshold"
@@ -65,7 +40,25 @@ object JvmUsedMemoryHeuristic {
 
   lazy val DEFAULT_SPARK_EXECUTOR_MEMORY_THRESHOLD = "2G"
 
-  class Evaluator(jvmUsedMemoryHeuristic: JvmUsedMemoryHeuristic, data: SparkApplicationData) {
+  lazy val sparkExecutorMemoryThreshold: String = DEFAULT_SPARK_EXECUTOR_MEMORY_THRESHOLD
+
+  override def apply(data: SparkApplicationData): HeuristicResult = {
+    val evaluator = new Evaluator(data)
+
+    var resultDetails = Seq(
+      new SingleValue(MAX_EXECUTOR_PEAK_JVM_USED_MEMORY_HEURISTIC_NAME, MemoryFormatUtils.bytesToString(evaluator.maxExecutorPeakJvmUsedMemory)),
+      new SingleValue("spark.executor.memory", MemoryFormatUtils.bytesToString(evaluator.sparkExecutorMemory))
+    )
+
+    if (evaluator.severity != Severity.NONE) {
+      resultDetails = resultDetails :+ new SingleValue("Executor Memory", "The allocated memory for the executor (in " + SPARK_EXECUTOR_MEMORY + ") is much more than the peak JVM used memory by executors.")
+      resultDetails = resultDetails :+ new SingleValue("Suggested spark.executor.memory", MemoryFormatUtils.roundOffMemoryStringToNextInteger((MemoryFormatUtils.bytesToString(((1 + BUFFER_FRACTION) * evaluator.maxExecutorPeakJvmUsedMemory).toLong))))
+    }
+
+    new JvmUsedMemoryHeuristicResult(resultDetails)
+  }
+
+  class Evaluator(data: SparkApplicationData) {
     lazy val appConfigurationProperties: Map[String, String] =
       data.appConf
 
@@ -83,7 +76,7 @@ object JvmUsedMemoryHeuristic {
 
     val MAX_EXECUTOR_PEAK_JVM_USED_MEMORY_THRESHOLDS: SeverityThresholds = DEFAULT_MAX_EXECUTOR_PEAK_JVM_USED_MEMORY_THRESHOLDS
 
-    lazy val severity = if (sparkExecutorMemory <= MemoryFormatUtils.stringToBytes(jvmUsedMemoryHeuristic.sparkExecutorMemoryThreshold)) {
+    lazy val severity = if (sparkExecutorMemory <= MemoryFormatUtils.stringToBytes(sparkExecutorMemoryThreshold)) {
       Severity.NONE
     } else {
       MAX_EXECUTOR_PEAK_JVM_USED_MEMORY_THRESHOLDS.severityOf(sparkExecutorMemory)
@@ -91,7 +84,20 @@ object JvmUsedMemoryHeuristic {
 
     val executorCount = executorList.size
     lazy val score = Utils.getHeuristicScore(severity, executorCount)
-
   }
+}
 
+class JvmUsedMemoryHeuristicResult(results: Seq[AnalysisResult])
+  extends HeuristicResult("Jvm Memory Insights", results) {
+  override def toTable: Seq[Node] =
+    UIUtils.listingTable(insightHeader, insightRow, results.map(_.toTuple())
+      , fixedWidth = true)
+
+  private def insightHeader = Seq("Name", "Value")
+
+  private def insightRow(data: (String, String, String, String)) =
+    <tr>
+      <td>{data._1}</td>
+      <td>{data._2}</td>
+    </tr>
 }

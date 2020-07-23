@@ -19,11 +19,14 @@ package org.apache.spark.status.insight.heuristics
 import org.apache.spark.status.api.v1.ExecutorSummary
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.analysis.SeverityThresholds
+import org.apache.spark.ui.UIUtils
+
+import scala.xml.Node
 
 /**
   * A heuristic based on GC time and CPU run time. It calculates the ratio of the total time a job spends in GC to the total run time of a job and warns if too much time is spent in GC.
   */
-object ExecutorGcHeuristic extends Heuristic{
+object ExecutorGcHeuristic extends Heuristic {
   val SPARK_EXECUTOR_MEMORY = "spark.executor.memory"
   val SPARK_EXECUTOR_CORES = "spark.executor.cores"
 
@@ -37,7 +40,7 @@ object ExecutorGcHeuristic extends Heuristic{
   val DEFAULT_GC_SEVERITY_D_THRESHOLDS =
     SeverityThresholds(low = 0.05D, moderate = 0.04D, severe = 0.03D, critical = 0.01D, ascending = false)
 
-  override val evaluators = Seq(ExecutorsGcEvaluator)
+  val evaluators = Seq(ExecutorsGcEvaluator)
 
   object ExecutorsGcEvaluator extends SparkEvaluator {
     override def evaluate(sparkAppData: SparkApplicationData): Seq[AnalysisResult] = {
@@ -48,9 +51,9 @@ object ExecutorGcHeuristic extends Heuristic{
       val ratio: Double = jvmTime.toDouble / executorRunTimeTotal.toDouble
 
       Seq(
-        SimpleResult("GC time to Executor Run time ratio", ratio.toString),
-        SimpleResult("Total GC time", jvmTime.toString),
-        SimpleResult("Total Executor Runtime", executorRunTimeTotal.toString)
+        SingleValue("GC time to Executor Run time ratio", ratio.toString),
+        SingleValue("Total GC time", jvmTime.toString),
+        SingleValue("Total Executor Runtime", executorRunTimeTotal.toString)
       )
     }
     /**
@@ -69,6 +72,23 @@ object ExecutorGcHeuristic extends Heuristic{
     }
   }
 
+  override def apply(data: SparkApplicationData): HeuristicResult = {
+    new ExecutorGcHeuristicResult(evaluators.flatMap(_.evaluate(data)))
+  }
+}
 
+class ExecutorGcHeuristicResult(results: Seq[AnalysisResult])
+  extends HeuristicResult("Executor GC Insights", results) {
+  override def toTable: Seq[Node] =
+    UIUtils.listingTable(insightHeader, insightRow, results.map(_.toTuple())
+      , fixedWidth = true)
+
+  private def insightHeader = Seq("Name", "Value")
+
+  private def insightRow(data: (String, String, String, String)) =
+    <tr>
+      <td>{data._1}</td>
+      <td>{data._2}</td>
+    </tr>
 }
 
