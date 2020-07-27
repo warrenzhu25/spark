@@ -43,6 +43,7 @@ if not exist "%SPARK_JARS_DIR%"\ (
 
 set LAUNCH_CLASSPATH=%SPARK_JARS_DIR%\*
 set PATH=%PATH%;%HADOOP_HOME%\bin
+for /f "delims=" %%i in ('hadoop classpath') do set HADOOP_CLASSPATH=%%i
 
 rem Add the launcher build dir to the classpath if requested.
 if not "x%SPARK_PREPEND_CLASSES%"=="x" (

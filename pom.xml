@@ -3266,6 +3266,9 @@
     -->
     <profile>
       <id>hadoop-provided</id>
+      <activation>
+        <activeByDefault>true</activeByDefault>
+      </activation>
     </profile>
     <profile>
       <id>hive-provided</id>
