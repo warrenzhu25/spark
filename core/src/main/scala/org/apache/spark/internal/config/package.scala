@@ -194,6 +194,11 @@ package object config {
       .toSequence
       .createWithDefault(GarbageCollectionMetrics.OLD_GENERATION_BUILTIN_GARBAGE_COLLECTORS)
 
+  private[spark] val EVENT_LOG_EXTENDED_ATTRIBUTE =
+    ConfigBuilder("spark.eventLog.extended.attribute.enabled")
+      .booleanConf
+      .createWithDefault(true)
+
   private[spark] val EVENT_LOG_OVERWRITE =
     ConfigBuilder("spark.eventLog.overwrite")
       .version("1.0.0")

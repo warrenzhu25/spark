@@ -33,6 +33,10 @@ import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize
 import org.apache.hadoop.fs.{FileStatus, FileSystem, Path}
 import org.apache.hadoop.hdfs.DistributedFileSystem
+import com.google.common.io.ByteStreams
+import com.google.common.util.concurrent.MoreExecutors
+import org.apache.hadoop.fs.{FileStatus, FileSystem, Path, XAttrSetFlag}
+import org.apache.hadoop.hdfs.{DFSInputStream, DistributedFileSystem}
 import org.apache.hadoop.hdfs.protocol.HdfsConstants
 import org.apache.hadoop.security.AccessControlException
 import org.fusesource.leveldbjni.internal.NativeDB
@@ -109,6 +113,9 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   logInfo(s"History server ui acls " + (if (historyUiAclsEnable) "enabled" else "disabled") +
     "; users with admin permissions: " + historyUiAdminAcls.mkString(",") +
     "; groups with admin permissions" + historyUiAdminAclsGroups.mkString(","))
+
+  // Switch on enable generate application list from extended attributes
+  private val USE_EXTENDED_ATTRIBUTE = conf.getBoolean("spark.history.useExtendedAttribute", false)
 
   private val hadoopConf = SparkHadoopUtil.get.newConfiguration(conf)
   // Visible for testing
@@ -527,7 +534,12 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
                 listing.write(LogInfo(reader.rootPath.toString(), newLastScanTime,
                   LogType.EventLogs, None, None, reader.fileSizeForLastIndex, reader.lastIndex,
                   None, reader.completed))
-                reader.fileSizeForLastIndex > 0
+                if (USE_EXTENDED_ATTRIBUTE) {
+                  reader.fileSizeForLastIndex >= 0
+                } else
+                {
+                  reader.fileSizeForLastIndex > 0
+                }
               } catch {
                 case _: FileNotFoundException => false
               }
@@ -705,6 +717,52 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     }
   }
 
+  private def getLogXAttrs(path: Path, scanTime: Long)
+  : Option[ApplicationInfoWrapper] = try {
+    val xattrs = fs.getXAttrs(path)
+    val appId = new String(xattrs.get("user.appId"))
+    val appName = new String(xattrs.get("user.appName"))
+    val subcluster = new String(xattrs.get("user.subcluster"))
+    val applicationType = new String(xattrs.get("user.appType"))
+
+    val attemptId = new String(xattrs.get("user.attemptId"))
+    val startTime = new String(xattrs.get("user.startTime")).toLong
+    val sparkUser = new String(xattrs.get("user.sparkUser"))
+    val sparkVersion = new String(xattrs.get("user.sparkVersion"))
+    val viewAcls = new String(xattrs.get("user.viewAcls"))
+    val adminAcls = new String(xattrs.get("user.adminAcls"))
+    val viewAclsGroups = new String(xattrs.get("user.viewAclsGroups"))
+    val adminAclsGroups = new String(xattrs.get("user.adminAclsGroups"))
+
+    var endTime = -1L
+    var completed = false
+    var duration = 0L
+    var finalStatus: Option[String] = None
+
+    if (xattrs.containsKey("user.endTime")) {
+      endTime = new String(xattrs.get("user.endTime")).toLong
+      duration = endTime - startTime
+      completed = true
+    }
+
+    if (xattrs.containsKey("user.finalStatus")) {
+      finalStatus = Option(new String(xattrs.get("user.finalStatus")))
+    }
+
+    val applicationAttemptInfo = new ApplicationAttemptInfo(Option(attemptId),
+      new Date(startTime), new Date(endTime), new Date(scanTime),
+      duration, sparkUser, completed, sparkVersion)
+    val attemptInfoWrapper = new AttemptInfoWrapper(applicationAttemptInfo,
+      path.toString, 0, Some(0), Some(adminAcls), Some(viewAcls),
+      Some(adminAclsGroups), Some(viewAclsGroups))
+    val applicationInfo = new ApplicationInfo(appId, appName, None, None, None, None, Nil,
+      Some(subcluster), finalStatus, Some(applicationType))
+    Some(new ApplicationInfoWrapper(applicationInfo, List(attemptInfoWrapper)))
+  } catch {
+    case _: Throwable =>
+      None
+  }
+
   /**
    * Replay the given log file, saving the application in the listing db.
    * Visable for testing
@@ -725,6 +783,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
 
     val logPath = reader.rootPath
     val appCompleted = reader.completed
+    var getFromLog = true
     val reparseChunkSize = conf.get(END_EVENT_REPARSE_CHUNK_SIZE)
 
     // Enable halt support in listener if:
@@ -737,9 +796,24 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     val listener = new AppListingListener(reader, clock, shouldHalt)
     bus.addListener(listener)
 
-    logInfo(s"Parsing $logPath for listing data...")
+
     val logFiles = reader.listEventLogFiles
-    parseAppEventLogs(logFiles, bus, !appCompleted, eventsFilter)
+    if (USE_EXTENDED_ATTRIBUTE) {
+      logInfo(s"Get $logPath extended attributes for listing data...")
+      val appInfo = getLogXAttrs(reader.rootPath, scanTime)
+      if (appInfo.isDefined) {
+        listener.setApp(appInfo.get)
+        getFromLog = false
+        logInfo(s"Finished get $logPath extended attributes for listing data...")
+      } else {
+        logInfo(s"Can't get from extended attributes, need fallback to event log...")
+        logInfo(s"Parsing $logPath for listing data...")
+        parseAppEventLogs(logFiles, bus, !appCompleted, eventsFilter)
+      }
+    } else {
+      logInfo(s"Parsing $logPath for listing data...")
+      parseAppEventLogs(logFiles, bus, !appCompleted, eventsFilter)
+    }
 
     // If enabled above, the listing listener will halt parsing when there's enough information to
     // create a listing entry. When the app is completed, or fast parsing is disabled, we still need
@@ -760,7 +834,8 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     // just skipping from the current position, but there isn't a a good way to detect what the
     // current position is, since the replay listener bus buffers data internally.
     val lookForEndEvent = shouldHalt && (appCompleted || !fastInProgressParsing)
-    if (lookForEndEvent && listener.applicationInfo.isDefined) {
+
+    if (getFromLog && lookForEndEvent && listener.applicationInfo.isDefined) {
       val lastFile = logFiles.last
       Utils.tryWithResource(EventLogFileReader.openEventLog(lastFile.getPath, fs)) { in =>
         val target = lastFile.getLen - reparseChunkSize
@@ -1447,6 +1522,32 @@ private[history] class AppListingListener(
     } else {
       None
     }
+  }
+
+  def setApp(appInfo: ApplicationInfoWrapper): Unit = {
+    app.id = appInfo.info.id
+    app.name = appInfo.info.name
+    app.subCluster = appInfo.info.subCluster
+
+    app.applicationType = appInfo.info.applicationType
+    app.finalStatus = appInfo.info.finalStatus
+
+    val attemptInfo = appInfo.attempts.head
+    attempt.attemptId = attemptInfo.info.attemptId
+    attempt.startTime = attemptInfo.info.startTime
+    attempt.lastUpdated = new Date(clock.getTimeMillis())
+    attempt.sparkUser = attemptInfo.info.sparkUser
+
+    attempt.endTime = attemptInfo.info.endTime
+    attempt.lastUpdated = attemptInfo.info.lastUpdated
+    attempt.duration = attemptInfo.info.duration
+    attempt.completed = attemptInfo.info.completed
+
+    attempt.viewAcls = attemptInfo.viewAcls
+    attempt.adminAcls = attemptInfo.adminAcls
+    attempt.viewAclsGroups = attemptInfo.viewAclsGroups
+    attempt.adminAclsGroups = attemptInfo.adminAcls
+    attempt.appSparkVersion = attemptInfo.info.appSparkVersion
   }
 
   /**

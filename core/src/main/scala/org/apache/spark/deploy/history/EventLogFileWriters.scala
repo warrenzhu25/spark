@@ -20,17 +20,19 @@ package org.apache.spark.deploy.history
 import java.io._
 import java.net.URI
 import java.nio.charset.StandardCharsets
+import java.util
 
 import org.apache.commons.compress.utils.CountingOutputStream
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{FileStatus, FileSystem, FSDataOutputStream, Path}
+import org.apache.hadoop.fs.{FileStatus, FileSystem, FSDataOutputStream, Path, XAttrSetFlag}
 import org.apache.hadoop.fs.permission.FsPermission
 
-import org.apache.spark.SparkConf
+import org.apache.spark.{SPARK_VERSION, SparkConf}
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config._
 import org.apache.spark.io.CompressionCodec
+import org.apache.spark.scheduler._
 import org.apache.spark.util.Utils
 
 /**
@@ -68,7 +70,7 @@ abstract class EventLogFileWriter(
   private[history] val compressionCodecName = compressionCodec.map { c =>
     CompressionCodec.getShortName(c.getClass.getName)
   }
-
+  private var gotEnvUpdated = false
   // Only defined if the file system scheme is not local
   protected var hadoopDataStream: Option[FSDataOutputStream] = None
   protected var writer: Option[PrintWriter] = None
@@ -164,6 +166,82 @@ abstract class EventLogFileWriter(
       fileSystem.setTimes(dest, System.currentTimeMillis(), -1)
     } catch {
       case e: Exception => logDebug(s"failed to set time of $dest", e)
+    }
+  }
+
+  def setXAttrByEvent(event: SparkListenerEvent): Unit = {
+    val targetPath = logPath + EventLogFileWriter.IN_PROGRESS
+    val path = new Path(targetPath)
+    event match {
+      case environmentUpdate: SparkListenerEnvironmentUpdate =>
+        if (!gotEnvUpdated) {
+          val allProperties = environmentUpdate.environmentDetails("Spark Properties").toMap
+          fileSystem.setXAttr(path, "user.viewAcls",
+            allProperties.getOrElse("spark.ui.view.acls", "").getBytes(),
+            util.EnumSet.of(XAttrSetFlag.CREATE))
+          fileSystem.setXAttr(path, "user.adminAcls",
+            allProperties.getOrElse("spark.admin.acls", "").getBytes(),
+            util.EnumSet.of(XAttrSetFlag.CREATE))
+          fileSystem.setXAttr(path, "user.viewAclsGroups",
+            allProperties.getOrElse("spark.ui.view.acls.groups", "").getBytes(),
+            util.EnumSet.of(XAttrSetFlag.CREATE))
+          fileSystem.setXAttr(path, "user.adminAclsGroups",
+            allProperties.getOrElse("spark.admin.acls.groups", "").getBytes(),
+            util.EnumSet.of(XAttrSetFlag.CREATE))
+          gotEnvUpdated = true
+        }
+
+      case applicationStart: SparkListenerApplicationStart =>
+        log.info("set xattr for app start")
+        fileSystem.setXAttr(path, "user.appId", applicationStart.appId.getOrElse("").getBytes(),
+          util.EnumSet.of(XAttrSetFlag.CREATE))
+        fileSystem.setXAttr(path, "user.appName", applicationStart.appName.getBytes(),
+          util.EnumSet.of(XAttrSetFlag.CREATE))
+        fileSystem.setXAttr(path, "user.subcluster",
+          applicationStart.subCluster.getOrElse("").getBytes(),
+          util.EnumSet.of(XAttrSetFlag.CREATE))
+        fileSystem.setXAttr(path, "user.attemptId",
+          applicationStart.appAttemptId.getOrElse("").getBytes(),
+          util.EnumSet.of(XAttrSetFlag.CREATE))
+        fileSystem.setXAttr(path, "user.startTime",
+          applicationStart.time.toString.getBytes(),
+          util.EnumSet.of(XAttrSetFlag.CREATE))
+        fileSystem.setXAttr(path, "user.sparkUser",
+          applicationStart.sparkUser.getBytes(),
+          util.EnumSet.of(XAttrSetFlag.CREATE))
+        fileSystem.setXAttr(path, "user.sparkVersion",
+          SPARK_VERSION.getBytes(),
+          util.EnumSet.of(XAttrSetFlag.CREATE))
+
+      case applicationEnd: SparkListenerApplicationEnd =>
+        log.info("set xattr for app end")
+        fileSystem.setXAttr(path, "user.endTime",
+          applicationEnd.time.toString.getBytes(),
+          util.EnumSet.of(XAttrSetFlag.CREATE))
+
+      case applicationFinalStatusUpdate: SparkListenerApplicationFinalStatusUpdate =>
+        val xattrs = fileSystem.getXAttrs(path)
+        if (xattrs.containsKey("user.finalStatus")) {
+          fileSystem.setXAttr(path, "user.finalStatus",
+            applicationFinalStatusUpdate.finalStatus.getOrElse("").getBytes(),
+            util.EnumSet.of(XAttrSetFlag.REPLACE))
+        } else {
+          fileSystem.setXAttr(path, "user.finalStatus",
+            applicationFinalStatusUpdate.finalStatus.getOrElse("").getBytes(),
+            util.EnumSet.of(XAttrSetFlag.CREATE))
+        }
+
+      case applicationTypeUpdate: SparkListenerApplicationTypeUpdate =>
+        val xattrs = fileSystem.getXAttrs(path)
+        if (xattrs.containsKey("user.appType")) {
+          fileSystem.setXAttr(path, "user.appType",
+            applicationTypeUpdate.applicationType.getOrElse("").getBytes(),
+            util.EnumSet.of(XAttrSetFlag.REPLACE))
+        } else {
+          fileSystem.setXAttr(path, "user.appType",
+            applicationTypeUpdate.applicationType.getOrElse("").getBytes(),
+            util.EnumSet.of(XAttrSetFlag.CREATE))
+        }
     }
   }
 

@@ -63,6 +63,8 @@ private[spark] class EventLoggingListener(
   private[scheduler] val logWriter: EventLogFileWriter =
     EventLogFileWriter(appId, appAttemptId, logBaseDir, sparkConf, hadoopConf)
 
+  private val setExtendedAttribute = sparkConf.get(EVENT_LOG_EXTENDED_ATTRIBUTE)
+
   // For testing. Keep track of all JSON serialized events that have been logged.
   private[scheduler] val loggedEvents = new mutable.ArrayBuffer[JValue]
 
@@ -93,8 +95,13 @@ private[spark] class EventLoggingListener(
   }
 
   /** Log the event as JSON. */
-  private def logEvent(event: SparkListenerEvent, flushLogger: Boolean = false): Unit = {
+  private def logEvent(event: SparkListenerEvent, flushLogger: Boolean = false,
+                       enableXAttr: Boolean = false): Unit = {
     val eventJson = JsonProtocol.sparkEventToJson(event)
+    // set extended attributes
+    if (enableXAttr) {
+      logWriter.setXAttrByEvent(event)
+    }
     logWriter.writeEvent(compact(render(eventJson)), flushLogger)
     if (testing) {
       loggedEvents += eventJson
@@ -128,7 +135,7 @@ private[spark] class EventLoggingListener(
   }
 
   override def onEnvironmentUpdate(event: SparkListenerEnvironmentUpdate): Unit = {
-    logEvent(redactEvent(event))
+    logEvent(redactEvent(event), enableXAttr = setExtendedAttribute)
   }
 
   // Events that trigger a flush
@@ -173,16 +180,16 @@ private[spark] class EventLoggingListener(
   }
 
   override def onApplicationStart(event: SparkListenerApplicationStart): Unit = {
-    logEvent(event, flushLogger = true)
+    logEvent(event, flushLogger = true, enableXAttr = setExtendedAttribute)
   }
 
   override def onApplicationEnd(event: SparkListenerApplicationEnd): Unit = {
-    logEvent(event, flushLogger = true)
+    logEvent(event, flushLogger = true, enableXAttr = setExtendedAttribute)
   }
 
   override def onApplicationFinalStatusUpdate(
       event: SparkListenerApplicationFinalStatusUpdate): Unit = {
-    logEvent(event, flushLogger = true)
+    logEvent(event, flushLogger = true, enableXAttr = setExtendedAttribute)
   }
 
   override def onExecutorAdded(event: SparkListenerExecutorAdded): Unit = {
@@ -194,7 +201,7 @@ private[spark] class EventLoggingListener(
   }
 
   override def onApplicationTypeUpdate(event: SparkListenerApplicationTypeUpdate): Unit = {
-    logEvent(event, flushLogger = true)
+    logEvent(event, flushLogger = true, enableXAttr = setExtendedAttribute)
   }
 
   override def onExecutorBlacklisted(event: SparkListenerExecutorBlacklisted): Unit = {
