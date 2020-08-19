@@ -19,16 +19,20 @@ package org.apache.spark.ui
 
 import java.util.Date
 
-import org.apache.spark.{SecurityManager, SparkConf, SparkContext}
+import org.apache.spark.SecurityManager
+import org.apache.spark.SparkConf
+import org.apache.spark.SparkContext
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.UI._
 import org.apache.spark.scheduler._
 import org.apache.spark.status.AppStatusStore
 import org.apache.spark.status.api.v1._
+import org.apache.spark.status.insight.ui.InsightsTab
 import org.apache.spark.ui.JettyUtils._
 import org.apache.spark.ui.env.EnvironmentTab
 import org.apache.spark.ui.exec.ExecutorsTab
-import org.apache.spark.ui.jobs.{JobsTab, StagesTab}
+import org.apache.spark.ui.jobs.JobsTab
+import org.apache.spark.ui.jobs.StagesTab
 import org.apache.spark.ui.storage.StorageTab
 
 /**
@@ -63,6 +67,7 @@ private[spark] class SparkUI private (
     attachTab(new StorageTab(this, store))
     attachTab(new EnvironmentTab(this, store))
     attachTab(new ExecutorsTab(this))
+    attachTab(new InsightsTab(this, store))
     addStaticHandler(SparkUI.STATIC_RESOURCE_DIR)
     attachHandler(createRedirectHandler("/", "/jobs/", basePath = basePath))
     attachHandler(ApiRootResource.getServletHandler(this))
