@@ -52,7 +52,7 @@ object ConfigurationHeuristic extends Heuristic {
           "Kryo is significantly faster and more compact." +
             "You need to add 'conf.registerKryoClasses(Array(classOf[MyClass1])'",
           "org.apache.spark.serializer.KryoSerializer",
-          Severity.Low
+          Severity.LOW
         ))
       } else {
         Seq.empty
@@ -192,24 +192,6 @@ object ConfigurationHeuristic extends Heuristic {
 
 class ConfigHeuristicResult(results: Seq[AnalysisResult])
   extends HeuristicResult("Config Insights", results) {
-  override def toTable: Seq[Node] =
-    UIUtils.listingTable(insightHeader, insightRow, results.map(_.toTuple)
-    , fixedWidth = true)
-
-  private val insightHeader = Seq("Name", "Value", "Suggested", "Description", "Severity")
-
-  private def insightRow(data: (String, String, String, String, String)) =
-    <tr>
-      <td>{data._1}</td>
-      <td>{data._2}</td>
-      <td>{data._4}</td>
-      <td>{data._3}</td>
-      <td>
-        <span data-toggle="tooltip" title={Severity.valueOf(data._5).getTooltip}>
-          {data._5}
-        </span>
-      </td>
-    </tr>
 }
 
 trait ConfigEvaluator {

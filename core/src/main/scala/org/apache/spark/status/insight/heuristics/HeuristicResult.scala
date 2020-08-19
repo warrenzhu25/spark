@@ -16,7 +16,9 @@
  */
 package org.apache.spark.status.insight.heuristics
 
-import scala.xml.Node
+import scala.xml.{Elem, Node}
+
+import org.apache.spark.ui.UIUtils
 
 trait AnalysisResult {
   def severity: Severity
@@ -24,7 +26,26 @@ trait AnalysisResult {
 }
 
 abstract class HeuristicResult(val name: String, results: Seq[AnalysisResult]) {
-  def toTable: Seq[Node]
+
+  def toTable: Seq[Node] =
+    UIUtils.listingTable(insightHeader, insightRow, results.map(_.toTuple)
+      , fixedWidth = true)
+
+  protected val insightHeader: Seq[String] =
+    Seq("Name", "Value", "Suggested", "Description", "Severity")
+
+  protected def insightRow(data: (String, String, String, String, String)): Elem =
+    <tr>
+      <td>{data._1}</td>
+      <td>{data._2}</td>
+      <td>{data._4}</td>
+      <td>{data._3}</td>
+      <td>
+        <span data-toggle="tooltip" title={Severity.valueOf(data._5).getTooltip}>
+          {data._5}
+        </span>
+      </td>
+    </tr>
 }
 
 case class SingleValue(name: String,
@@ -35,5 +56,15 @@ case class SingleValue(name: String,
                        ) extends AnalysisResult {
   override def toTuple(): (String, String, String, String, String) = {
     (name, value, description, suggested, severity.name())
+  }
+}
+
+case class MultipleValues(name: String,
+                          values: Seq[String],
+                          description: Option[String] = None,
+                          override val severity: Severity = Severity.Normal
+                         ) extends AnalysisResult {
+  override def toTuple(): (String, String, String, String, String) = {
+    (name, values.mkString("\n"), description.getOrElse(""), "", severity.name())
   }
 }

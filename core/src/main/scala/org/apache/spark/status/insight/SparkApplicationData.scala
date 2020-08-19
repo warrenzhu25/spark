@@ -25,4 +25,5 @@ case class SparkApplicationData(
                          appInfo: ApplicationInfo,
                          jobData: Seq[JobData],
                          stageData: Seq[StageData],
-                         executorSummaries: Seq[ExecutorSummary])
+                         executorSummaries: Seq[ExecutorSummary],
+                         stagesWithFailedTasks: Seq[StageData] = Seq.empty)

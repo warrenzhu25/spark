@@ -26,7 +26,7 @@ import org.apache.spark.JobExecutionStatus
 import org.apache.spark.status.AppStatusStore
 import org.apache.spark.status.api.v1.StageStatus
 import org.apache.spark.status.insight.SparkApplicationData
-import org.apache.spark.status.insight.heuristics.ConfigurationHeuristic
+import org.apache.spark.status.insight.heuristics._
 import org.apache.spark.ui.{SparkUI, SparkUITab, UIUtils, WebUIPage}
 
 class InsightsTab(parent: SparkUI, store: AppStatusStore) extends SparkUITab(parent, "insights") {
@@ -45,7 +45,13 @@ private[ui] class InsightsPage(
   extends WebUIPage("") {
 
   private val heuristic = Seq(
-    ConfigurationHeuristic
+    ConfigurationHeuristic,
+    ConfigurationParametersHeuristic,
+    UnifiedMemoryHeuristic,
+    DriverHeuristic,
+    JvmUsedMemoryHeuristic,
+    StagesHeuristic,
+    StagesWithFailedTasksHeuristic
   )
 
   def render(request: HttpServletRequest): Seq[Node] = {
