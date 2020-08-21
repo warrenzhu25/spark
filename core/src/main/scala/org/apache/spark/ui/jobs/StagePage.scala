@@ -461,7 +461,7 @@ private[ui] class StagePage(parent: StagesTab, store: AppStatusStore) extends We
   }
 
   def failureSummaryTable(failureSummary: Seq[FailureSummary]): Seq[Node] = {
-    val propertyHeader = Seq("Exception", "Message", "Count", "Details")
+    val propertyHeader = Seq("Exception", "Message", "Count", "Details", "Diagnosis")
     val headerClasses = Seq("sorttable_alpha", "sorttable_alpha")
     UIUtils.listingTable(propertyHeader, failureSummaryRow,
       failureSummary,
@@ -474,6 +474,7 @@ private[ui] class StagePage(parent: StagesTab, store: AppStatusStore) extends We
       <td>{e.exceptionFailure.message}</td>
       <td>{e.count}</td>
       {errorMessageCell(e.exceptionFailure.stackTrace)}
+      <td>{diagnosisCell(FailureDiagnosis.analysis(e.exceptionFailure))}</td>
     </tr>
   }
 }
@@ -853,5 +854,22 @@ private[spark] object ApiHelper {
       })
     val details = UIUtils.detailsUINode(isMultiline, error)
     <td>{errorSummary}{details}</td>
+  }
+
+  def diagnosisCell(diagnosisResult: Option[DiagnosisResult]): Seq[Node] = {
+    diagnosisResult match {
+      case Some(d) =>
+        <p>{d.desc}</p> ++
+        {paragraphCell(d.rootCause)} ++
+        {paragraphCell(d.configs)}
+      case _ => Seq.empty[Node]
+    }
+  }
+
+  def paragraphCell(content: Option[String]): Seq[Node] = {
+    content match {
+      case Some(s) => <p>{s}</p>
+      case _ => Seq.empty[Node]
+    }
   }
 }
