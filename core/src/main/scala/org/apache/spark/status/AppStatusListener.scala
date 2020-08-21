@@ -672,7 +672,7 @@ private[spark] class AppStatusListener(
       task.errorMessage = errorMessage
       task.failureReason = event.reason match {
         case e: ExceptionFailure =>
-          Some(new v1.FailureReason(e.className, e.description, e.toErrorString))
+          Some(new v1.FailureReason(e.className.split("\\.").last, e.description, e.toErrorString))
         case e: ExecutorLostFailure =>
           Some(new v1.FailureReason(e.getClass.getSimpleName,
             e.reason.getOrElse("").split('\n')(0), e.toErrorString))
