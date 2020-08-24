@@ -380,7 +380,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     val ui = SparkUI.create(None, new HistoryAppStatusStore(conf, kvstore), conf, secManager,
       app.info.name, HistoryServer.getAttemptURI(appId, attempt.info.attemptId),
       attempt.info.startTime.getTime(), attempt.info.appSparkVersion, app.info.subCluster,
-      app.info.finalStatus, app.info.applicationType)
+      app.info.queue, app.info.finalStatus, app.info.applicationType)
 
     // place the tab in UI based on the display order
     loadPlugins().toSeq.sortBy(_.displayOrder).foreach(_.setupUI(ui))
@@ -1452,6 +1452,7 @@ private[history] class AppListingListener(
     app.id = event.appId.orNull
     app.name = event.appName
     app.subCluster = event.subCluster
+    app.queue = event.queue
 
     attempt.attemptId = event.appAttemptId
     attempt.startTime = new Date(event.time)
@@ -1565,6 +1566,7 @@ private[history] class AppListingListener(
     var id: String = null
     var name: String = null
     var subCluster: Option[String] = None
+    var queue: Option[String] = None
     var finalStatus: Option[String] = None
     var applicationType: Option[String] = None
     var coresGranted: Option[Int] = None
@@ -1574,7 +1576,7 @@ private[history] class AppListingListener(
 
     def toView(): ApplicationInfoWrapper = {
       val apiInfo = ApplicationInfo(id, name, coresGranted, maxCores,
-        coresPerExecutor, memoryPerExecutorMB, Nil, subCluster, finalStatus, applicationType)
+        coresPerExecutor, memoryPerExecutorMB, Nil, subCluster, queue, finalStatus, applicationType)
       new ApplicationInfoWrapper(apiInfo, List(attempt.toView()))
     }
 

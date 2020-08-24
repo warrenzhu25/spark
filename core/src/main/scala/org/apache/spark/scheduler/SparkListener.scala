@@ -201,7 +201,8 @@ case class SparkListenerApplicationStart(
     appAttemptId: Option[String],
     driverLogs: Option[Map[String, String]] = None,
     driverAttributes: Option[Map[String, String]] = None,
-    subCluster: Option[String] = None) extends SparkListenerEvent
+    subCluster: Option[String] = None,
+    queue: Option[String] = None) extends SparkListenerEvent
 
 @DeveloperApi
 case class SparkListenerApplicationEnd(time: Long) extends SparkListenerEvent

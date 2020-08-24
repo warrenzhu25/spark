@@ -217,6 +217,7 @@ private[spark] object JsonProtocol {
     ("App Name" -> applicationStart.appName) ~
     ("App ID" -> applicationStart.appId.map(JString(_)).getOrElse(JNothing)) ~
     ("subCluster" -> applicationStart.subCluster.map(JString(_)).getOrElse(JNothing)) ~
+    ("Queue" -> applicationStart.queue.map(JString(_)).getOrElse(JNothing)) ~
     ("Timestamp" -> applicationStart.time) ~
     ("User" -> applicationStart.sparkUser) ~
     ("App Attempt ID" -> applicationStart.appAttemptId.map(JString(_)).getOrElse(JNothing)) ~
@@ -749,13 +750,14 @@ private[spark] object JsonProtocol {
     val appName = (json \ "App Name").extract[String]
     val appId = jsonOption(json \ "App ID").map(_.extract[String])
     val subCluster = jsonOption(json \ "subCluster").map(_.extractOrElse[String](""))
+    val queue = jsonOption(json \ "Queue").map(_.extract[String])
     val time = (json \ "Timestamp").extract[Long]
     val sparkUser = (json \ "User").extract[String]
     val appAttemptId = jsonOption(json \ "App Attempt ID").map(_.extract[String])
     val driverLogs = jsonOption(json \ "Driver Logs").map(mapFromJson)
     val driverAttributes = jsonOption(json \ "Driver Attributes").map(mapFromJson)
     SparkListenerApplicationStart(appName, appId, time, sparkUser, appAttemptId, driverLogs,
-      driverAttributes, subCluster)
+      driverAttributes, subCluster, queue)
   }
 
   def applicationEndFromJson(json: JValue): SparkListenerApplicationEnd = {

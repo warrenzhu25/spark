@@ -48,6 +48,7 @@ private[spark] class SparkUI private (
     val startTime: Long,
     val appSparkVersion: String,
     var subCluster: Option[String],
+    var queue: Option[String],
     var finalStatus: Option[String],
     var applicationType: Option[String])
   extends WebUI(securityManager, securityManager.getSSLOptions("ui"), SparkUI.getUIPort(conf),
@@ -128,11 +129,11 @@ private[spark] class SparkUI private (
         case None => Some("SparkBatch")
       }
     }
-
     Iterator(new ApplicationInfo(
       id = appId,
       name = appName,
       subCluster = subCluster,
+      queue = queue,
       finalStatus = finalStatus,
       applicationType = appType,
       coresGranted = None,
@@ -196,11 +197,12 @@ private[spark] object SparkUI {
       startTime: Long,
       appSparkVersion: String = org.apache.spark.SPARK_VERSION,
       subCluster: Option[String] = None,
+      queue: Option[String] = None,
       finalStatus: Option[String] = None,
       applicationType: Option[String] = None): SparkUI = {
 
     new SparkUI(store, sc, conf, securityManager, appName, basePath,
-      startTime, appSparkVersion, subCluster, finalStatus, applicationType)
+      startTime, appSparkVersion, subCluster, queue, finalStatus, applicationType)
   }
 
 }

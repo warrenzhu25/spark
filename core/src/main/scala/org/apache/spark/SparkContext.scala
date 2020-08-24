@@ -470,7 +470,7 @@ class SparkContext(config: SparkConf) extends Logging {
       if (conf.get(UI_ENABLED)) {
         Some(SparkUI.create(Some(this), _statusStore, _conf,
           _env.securityManager, appName, "", startTime,
-          subCluster = Some(subCluster)))
+          subCluster = Some(subCluster), queue = Some(conf.get("spark.yarn.queue", "default"))))
       } else {
         // For tests, do not enable the UI
         None
@@ -2455,7 +2455,7 @@ class SparkContext(config: SparkConf) extends Logging {
     // the cluster manager to get an application ID (in case the cluster manager provides one).
     listenerBus.post(SparkListenerApplicationStart(appName, Some(applicationId),
       startTime, sparkUser, applicationAttemptId, schedulerBackend.getDriverLogUrls,
-      schedulerBackend.getDriverAttributes, Some(subCluster)))
+      schedulerBackend.getDriverAttributes, Some(subCluster), Some(config.get("spark.yarn.queue", "default"))))
     _driverLogger.foreach(_.startSync(_hadoopConfiguration))
   }
 

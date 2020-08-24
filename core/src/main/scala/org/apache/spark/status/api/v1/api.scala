@@ -42,6 +42,7 @@ case class ApplicationInfo private[spark](
     memoryPerExecutorMB: Option[Int],
     attempts: Seq[ApplicationAttemptInfo],
     subCluster: Option[String] = None,
+    queue: Option[String] = None,
     finalStatus: Option[String] = None,
     applicationType: Option[String] = None)
 
