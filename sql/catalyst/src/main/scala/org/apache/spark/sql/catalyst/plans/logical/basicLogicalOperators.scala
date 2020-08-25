@@ -550,8 +550,8 @@ case class Range(
 /**
  * This is a Group by operator with the aggregate functions and projections.
  *
- * @param groupingExpressions expressions for grouping keys
- * @param aggregateExpressions expressions for a project list, which could contain
+ * @define groupingExpressions expressions for grouping keys
+ * @define aggregateExpressions expressions for a project list, which could contain
  *                             [[AggregateFunction]]s.
  *
  * Note: Currently, aggregateExpressions is the project list of this Group by operator. Before
@@ -559,16 +559,15 @@ case class Range(
  * on aggregateExpressions, which could reference an expression in groupingExpressions.
  * For example, see the rule [[org.apache.spark.sql.catalyst.optimizer.SimplifyExtractValueOps]]
  */
-case class Aggregate(
-    groupingExpressions: Seq[Expression],
-    aggregateExpressions: Seq[NamedExpression],
-    child: LogicalPlan)
-  extends UnaryNode {
+abstract class AggregateLike extends UnaryNode {
+  def groupingExpressions: Seq[Expression]
+  def aggregateExpressions: Seq[NamedExpression]
+  def child: LogicalPlan
 
   override lazy val resolved: Boolean = {
     val hasWindowExpressions = aggregateExpressions.exists ( _.collect {
-        case window: WindowExpression => window
-      }.nonEmpty
+      case window: WindowExpression => window
+    }.nonEmpty
     )
 
     !expressions.exists(!_.resolved) && childrenResolved && !hasWindowExpressions
@@ -580,6 +579,50 @@ case class Aggregate(
   override lazy val validConstraints: Set[Expression] = {
     val nonAgg = aggregateExpressions.filter(_.find(_.isInstanceOf[AggregateExpression]).isEmpty)
     getAllValidConstraints(nonAgg)
+  }
+}
+
+case class Aggregate(
+    groupingExpressions: Seq[Expression],
+    aggregateExpressions: Seq[NamedExpression],
+    child: LogicalPlan)
+  extends AggregateLike
+
+/**
+ * This operator is doing partial aggregation in the individual Map task
+ * The output of this operator is groupingExpressions ++ otherAggregateExpressions
+ *
+ * This operator is similar to [[Aggregate]] class. One of the difference between these is
+ * that this will always output output grouping expressions along with aggregate expressions
+ * (unlike [[Aggregate]]). That's why groupingExpressions are NamedExpressions here.
+ *
+ * @param groupingExpressions - named expressions on which we want to do groupby
+ * @param otherAggregateExpressions - other named expressions containing aggregate expressions
+ *                                  groupingExpressions should not be made part of this
+ *                                  list (unlike Aggregate) as they are already part of output
+ * @param child - child logical plan
+ */
+case class LocalAggregate(
+  groupingExpressions: Seq[NamedExpression],
+  otherAggregateExpressions: Seq[NamedExpression],
+  child: LogicalPlan) extends AggregateLike {
+
+  lazy val aggregateExpressions = groupingExpressions ++ otherAggregateExpressions
+
+  /**
+   * This represents the reduction done by this LocalAggregate as compared to the child
+   * While calculating this, we assume that LA will function like an Aggregate and so
+   * this number gives the highest advantage this LA can give
+   */
+  lazy val reductionRatioAssumingAggregateStats: BigInt = {
+    val childSizeInBytes = child.stats.sizeInBytes
+    val aggregateSizeInBytes = Aggregate(groupingExpressions, aggregateExpressions, child)
+      .stats.sizeInBytes
+    if (aggregateSizeInBytes == BigInt(0)) {
+      childSizeInBytes
+    } else {
+      childSizeInBytes / aggregateSizeInBytes
+    }
   }
 }
 

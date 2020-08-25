@@ -18,8 +18,7 @@
 package org.apache.spark.sql.catalyst.plans.logical.statsEstimation
 
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeMap}
-import org.apache.spark.sql.catalyst.plans.logical.{Aggregate, Statistics}
-
+import org.apache.spark.sql.catalyst.plans.logical.{Aggregate, LocalAggregate, Statistics}
 
 object AggregateEstimation {
   import EstimationUtils._
@@ -71,5 +70,33 @@ object AggregateEstimation {
     } else {
       None
     }
+  }
+
+  def estimateLocalAggregateStats(la: LocalAggregate): Option[Statistics] = {
+    val childStats = la.child.stats
+
+    // Find new size in bytes
+    // The following size in bytes estimation is taken from
+    // `SizeInBytesOnlyStatsPlanVisitor.visitUnaryNode`.
+    val childRowSize = EstimationUtils.getSizePerRow(la.child.output)
+    val outputRowSize = EstimationUtils.getSizePerRow(la.output)
+    // Assume there will be the same number of rows as child has.
+    // There should be some overhead in Row object, the size should not be zero when there is
+    // no columns, this help to prevent divide-by-zero error.
+    var sizeInBytes = (childStats.sizeInBytes * outputRowSize) / childRowSize
+    if (sizeInBytes == 0) {
+      // sizeInBytes can't be zero, or sizeInBytes of BinaryNode will also be zero
+      // (product of children).
+      sizeInBytes = 1
+    }
+
+    // Find new column stats
+    val outputAttrStats = if (childStats.attributeStats.nonEmpty) {
+      getOutputMap(childStats.attributeStats, la.output)
+    } else {
+      childStats.attributeStats
+    }
+
+    Some(childStats.copy(sizeInBytes = sizeInBytes, attributeStats = outputAttrStats))
   }
 }

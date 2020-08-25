@@ -544,6 +544,34 @@ object SQLConf {
     .booleanConf
     .createWithDefault(true)
 
+  val INFER_FILTERS_FROM_DISJUNCTIONS_ENABLED =
+    buildConf("spark.sql.inferFiltersFromDisjunctions.enabled")
+      .internal()
+      .doc("When true, the query optimizer will try to infer filters from disjunctions so that" +
+        " they can be pushed down through join")
+      .booleanConf
+      .createWithDefault(true)
+
+  val PREAGGREGATION_ENABLED = buildConf("spark.sql.preaggregation.enabled")
+    .doc("When true, the query optimizer will try to push down Aggregate below " +
+      "Joins to improve the query performance")
+    .booleanConf
+    .createWithDefault(true)
+
+  val PREAGGREGATION_CBO_ENABLED = buildConf("spark.sql.preaggregation.cbo.enabled")
+    .internal()
+    .doc("When true, the query optimizer will try to use stats to decide whether" +
+      " to use preaggregation or not")
+    .booleanConf
+    .createWithDefault(true)
+
+  val PREAGGREGATION_CBO_SHUFFLE_JOIN_PUSHDOWN_THRESHOLD =
+    buildConf("spark.sql.preaggregation.cbo.shuffleJoinPushdownThreshold")
+      .doc("Reduction in sizeInBytes ratio above which pre-aggregation would be kicked" +
+        " for non-broadcast joins.")
+      .intConf
+      .createWithDefault(100)
+
   val ESCAPED_STRING_LITERALS = buildConf("spark.sql.parser.escapedStringLiterals")
     .internal()
     .doc("When true, string literals (including regex patterns) remain escaped in our SQL " +
@@ -2854,6 +2882,15 @@ class SQLConf extends Serializable with Logging {
   def caseSensitiveAnalysis: Boolean = getConf(SQLConf.CASE_SENSITIVE)
 
   def constraintPropagationEnabled: Boolean = getConf(CONSTRAINT_PROPAGATION_ENABLED)
+
+  def inferFiltersFromDisjunctions: Boolean = getConf(INFER_FILTERS_FROM_DISJUNCTIONS_ENABLED)
+
+  def preaggregationEnabled: Boolean = getConf(PREAGGREGATION_ENABLED)
+
+  def cboBasedPreaggregationEnabled: Boolean = getConf(PREAGGREGATION_CBO_ENABLED)
+
+  def preaggregationCboShuffleJoinThreshold: Int = getConf(
+    PREAGGREGATION_CBO_SHUFFLE_JOIN_PUSHDOWN_THRESHOLD)
 
   def escapedStringLiterals: Boolean = getConf(ESCAPED_STRING_LITERALS)
 

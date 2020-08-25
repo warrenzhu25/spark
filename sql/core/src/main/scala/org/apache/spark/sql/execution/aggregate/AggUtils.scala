@@ -87,6 +87,26 @@ object AggUtils {
     }
   }
 
+  def planLocalAggregateWithoutDistinct(
+     groupingExpressions: Seq[NamedExpression],
+     aggregateExpressions: Seq[AggregateExpression],
+     resultExpressions: Seq[NamedExpression],
+     child: SparkPlan): Seq[SparkPlan] = {
+
+    val completeAggregateExpressions = aggregateExpressions.map(_.copy(mode = Complete))
+    val completeAggregateAttributes = completeAggregateExpressions.map(_.resultAttribute)
+
+    val localAggregate = createAggregate(
+      requiredChildDistributionExpressions = None,
+      groupingExpressions = groupingExpressions,
+      aggregateExpressions = completeAggregateExpressions,
+      aggregateAttributes = completeAggregateAttributes,
+      initialInputBufferOffset = 0,
+      resultExpressions = resultExpressions,
+      child = child)
+    localAggregate :: Nil
+  }
+
   def planAggregateWithoutDistinct(
       groupingExpressions: Seq[NamedExpression],
       aggregateExpressions: Seq[AggregateExpression],

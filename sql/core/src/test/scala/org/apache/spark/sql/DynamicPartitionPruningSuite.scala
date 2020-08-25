@@ -21,6 +21,7 @@ import org.scalatest.GivenWhenThen
 
 import org.apache.spark.sql.catalyst.expressions.{CodegenObjectFactoryMode, DynamicPruningExpression, Expression}
 import org.apache.spark.sql.catalyst.plans.ExistenceJoin
+import org.apache.spark.sql.catalyst.plans.logical.{Join, LocalAggregate}
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, AdaptiveSparkPlanHelper}
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ReusedExchangeExec}
@@ -1356,6 +1357,35 @@ abstract class DynamicPartitionPruningSuiteBase
           }
         }
       }
+    }
+  }
+
+  test("test preaggregation with DPP") {
+    val confs = Seq(
+      SQLConf.CBO_ENABLED.key -> "true",
+      SQLConf.PREAGGREGATION_ENABLED.key -> "true",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1",
+      SQLConf.PREAGGREGATION_CBO_ENABLED.key -> "false",
+      SQLConf.DYNAMIC_PARTITION_PRUNING_REUSE_BROADCAST.key -> "false",
+      SQLConf.DYNAMIC_PARTITION_PRUNING_ENABLED.key -> "true",
+      SQLConf.DYNAMIC_PARTITION_PRUNING_USE_STATS.key -> "false"
+    )
+
+    withSQLConf(confs: _*) {
+      val df = sql(
+        """
+          |SELECT f.product_id, sum(f.units_sold) FROM fact_stats f
+          |JOIN dim_stats s
+          |ON f.store_id = s.store_id WHERE s.country = 'DE'
+          |GROUP BY f.product_id
+        """.stripMargin)
+      checkPartitionPruningPredicate(df, true, false)
+      val joins = df.queryExecution.optimizedPlan.collect {
+        case j: Join => j
+      }
+      assert(joins.nonEmpty)
+      assert(joins.head.left.isInstanceOf[LocalAggregate])
+      assert(joins.head.right.isInstanceOf[LocalAggregate])
     }
   }
 }

@@ -22,6 +22,7 @@ import org.apache.spark.sql.catalyst.catalog.SessionCatalog
 import org.apache.spark.sql.catalyst.optimizer._
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.rules.Rule
+import org.apache.spark.sql.catalyst.optimizer.ms.preaggregation.PushdownLocalAggregate
 import org.apache.spark.sql.connector.catalog.CatalogManager
 import org.apache.spark.sql.execution.datasources.PruneFileSourcePartitions
 import org.apache.spark.sql.execution.datasources.SchemaPruning
@@ -41,6 +42,11 @@ class SparkOptimizer(
 
   override def defaultBatches: Seq[Batch] = (preOptimizationBatches ++ super.defaultBatches :+
     Batch("Optimize Metadata Only Query", Once, OptimizeMetadataOnlyQuery(catalog)) :+
+    Batch("Extract Python UDFs", Once,
+      Seq(ExtractPythonUDFFromAggregate, ExtractPythonUDFs): _*) :+
+    Batch("PreAggregation", Once, PushdownLocalAggregate) :+
+    Batch("Prune File Source Table Partitions", Once, PruneFileSourcePartitions) :+
+    Batch("Parquet Schema Pruning", Once, ParquetSchemaPruning) :+
     Batch("PartitionPruning", Once,
       PartitionPruning,
       OptimizeSubqueries) :+

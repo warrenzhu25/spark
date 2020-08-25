@@ -17,6 +17,7 @@
 
 package org.apache.spark.sql.execution
 
+import org.apache.spark.SparkException
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{execution, AnalysisException, Strategy}
 import org.apache.spark.sql.catalyst.InternalRow
@@ -408,8 +409,12 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
         EventTimeWatermarkExec(columnName, delay, planLater(child)) :: Nil
 
       case PhysicalAggregation(
-        namedGroupingExpressions, aggregateExpressions, rewrittenResultExpressions, child) =>
+        namedGroupingExpressions, aggregateExpressions, rewrittenResultExpressions, child, la) =>
 
+        if (la) {
+          // This case should never happen as we have checks for this in [[PushdownLocalAggregate]]
+          throw new SparkException("Streaming aggregation doesn't support local aggregation")
+        }
         if (aggregateExpressions.exists(PythonUDF.isGroupedAggPandasUDF)) {
           throw new AnalysisException(
             "Streaming aggregation doesn't support group aggregate pandas UDF")
@@ -510,7 +515,8 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
    */
   object Aggregation extends Strategy {
     def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
-      case PhysicalAggregation(groupingExpressions, aggExpressions, resultExpressions, child)
+      case PhysicalAggregation(
+          groupingExpressions, aggExpressions, resultExpressions, child, isLocalAggregate)
         if aggExpressions.forall(expr => expr.isInstanceOf[AggregateExpression]) =>
         val aggregateExpressions = aggExpressions.map(expr =>
           expr.asInstanceOf[AggregateExpression])
@@ -535,50 +541,63 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
         }
 
         val aggregateOperator =
-          if (functionsWithDistinct.isEmpty) {
-            AggUtils.planAggregateWithoutDistinct(
-              normalizedGroupingExpressions,
+          if (isLocalAggregate) {
+            AggUtils.planLocalAggregateWithoutDistinct(
+              groupingExpressions,
               aggregateExpressions,
               resultExpressions,
               planLater(child))
           } else {
-            // functionsWithDistinct is guaranteed to be non-empty. Even though it may contain
-            // more than one DISTINCT aggregate function, all of those functions will have the
-            // same column expressions. For example, it would be valid for functionsWithDistinct
-            // to be [COUNT(DISTINCT foo), MAX(DISTINCT foo)], but
-            // [COUNT(DISTINCT bar), COUNT(DISTINCT foo)] is disallowed because those two distinct
-            // aggregates have different column expressions.
-            val distinctExpressions = functionsWithDistinct.head.aggregateFunction.children
-            val normalizedNamedDistinctExpressions = distinctExpressions.map { e =>
-              // Ideally this should be done in `NormalizeFloatingNumbers`, but we do it here
-              // because `distinctExpressions` is not extracted during logical phase.
-              NormalizeFloatingNumbers.normalize(e) match {
-                case ne: NamedExpression => ne
-                case other =>
-                  // Keep the name of the original expression.
-                  val name = e match {
-                    case ne: NamedExpression => ne.name
-                    case _ => e.toString
-                  }
-                  Alias(other, name)()
+            if (functionsWithDistinct.isEmpty) {
+              AggUtils.planAggregateWithoutDistinct(
+                groupingExpressions,
+                aggregateExpressions,
+                resultExpressions,
+                planLater(child))
+            } else {
+              // functionsWithDistinct is guaranteed to be non-empty. Even though it may contain
+              // more than one DISTINCT aggregate function, all of those functions will have the
+              // same column expressions. For example, it would be valid for functionsWithDistinct
+              // to be [COUNT(DISTINCT foo), MAX(DISTINCT foo)], but
+              // [COUNT(DISTINCT bar), COUNT(DISTINCT foo)] is disallowed because those two distinct
+              // aggregates have different column expressions.
+              val distinctExpressions =
+              functionsWithDistinct.head.aggregateFunction.children.filterNot(_.foldable)
+              val normalizedNamedDistinctExpressions = distinctExpressions.map { e =>
+                // Ideally this should be done in `NormalizeFloatingNumbers`, but we do it here
+                // because `distinctExpressions` is not extracted during logical phase.
+                NormalizeFloatingNumbers.normalize(e) match {
+                  case ne: NamedExpression => ne
+                  case other =>
+                    // Keep the name of the original expression.
+                    val name = e match {
+                      case ne: NamedExpression => ne.name
+                      case _ => e.toString
+                    }
+                    Alias(other, name)()
+                }
               }
+              AggUtils.planAggregateWithOneDistinct(
+                normalizedGroupingExpressions,
+                functionsWithDistinct,
+                functionsWithoutDistinct,
+                distinctExpressions,
+                normalizedNamedDistinctExpressions,
+                resultExpressions,
+                planLater(child))
             }
-
-            AggUtils.planAggregateWithOneDistinct(
-              normalizedGroupingExpressions,
-              functionsWithDistinct,
-              functionsWithoutDistinct,
-              distinctExpressions,
-              normalizedNamedDistinctExpressions,
-              resultExpressions,
-              planLater(child))
           }
 
         aggregateOperator
 
-      case PhysicalAggregation(groupingExpressions, aggExpressions, resultExpressions, child)
+      case PhysicalAggregation(groupingExpressions, aggExpressions, resultExpressions, child, la)
         if aggExpressions.forall(expr => expr.isInstanceOf[PythonUDF]) =>
         val udfExpressions = aggExpressions.map(expr => expr.asInstanceOf[PythonUDF])
+
+        if (la) {
+          // This case should never happen as we have checks for this in [[PushdownLocalAggregate]]
+          throw new SparkException("LocalAggregate is not supported with GroupedAggPandasUDF")
+        }
 
         Seq(execution.python.AggregateInPandasExec(
           groupingExpressions,
@@ -586,7 +605,7 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
           resultExpressions,
           planLater(child)))
 
-      case PhysicalAggregation(_, _, _, _) =>
+      case PhysicalAggregation(_, _, _, _, _) =>
         // If cannot match the two cases above, then it's an error
         throw new AnalysisException(
           "Cannot use a mixture of aggregate function and group aggregate pandas UDF")

@@ -676,8 +676,8 @@ object ColumnPruning extends Rule[LogicalPlan] {
   })
 
   /** Applies a projection only when the child is producing unnecessary attributes */
-  private def prunedChild(c: LogicalPlan, allReferences: AttributeSet) =
-    if (!c.outputSet.subsetOf(allReferences)) {
+  private[optimizer] def prunedChild(c: LogicalPlan, allReferences: AttributeSet): LogicalPlan =
+    if ((c.outputSet -- allReferences.filter(c.outputSet.contains)).nonEmpty) {
       Project(c.output.filter(allReferences.contains), c)
     } else {
       c
@@ -1095,7 +1095,7 @@ object PushPredicateThroughNonJoin extends Rule[LogicalPlan] with PredicateHelpe
       val aliasMap = getAliasMap(project)
       project.copy(child = Filter(replaceAlias(condition, aliasMap), grandChild))
 
-    case filter @ Filter(condition, aggregate: Aggregate)
+    case filter @ Filter(condition, aggregate: AggregateLike)
       if aggregate.aggregateExpressions.forall(_.deterministic)
         && aggregate.groupingExpressions.nonEmpty =>
       val aliasMap = getAliasMap(aggregate)
@@ -1115,7 +1115,10 @@ object PushPredicateThroughNonJoin extends Rule[LogicalPlan] with PredicateHelpe
       if (pushDown.nonEmpty) {
         val pushDownPredicate = pushDown.reduce(And)
         val replaced = replaceAlias(pushDownPredicate, aliasMap)
-        val newAggregate = aggregate.copy(child = Filter(replaced, aggregate.child))
+        val newAggregate = aggregate match {
+          case la: LocalAggregate => la.copy(child = Filter(replaced, aggregate.child))
+          case agg: Aggregate => agg.copy(child = Filter(replaced, aggregate.child))
+        }
         // If there is no more filter to stay up, just eliminate the filter.
         // Otherwise, create "Filter(stayUp) <- Aggregate <- Filter(pushDownPredicate)".
         if (stayUp.isEmpty) newAggregate else Filter(stayUp.reduce(And), newAggregate)
@@ -1202,7 +1205,7 @@ object PushPredicateThroughNonJoin extends Rule[LogicalPlan] with PredicateHelpe
     AttributeMap(plan.projectList.collect { case a: Alias => (a.toAttribute, a.child) })
   }
 
-  def getAliasMap(plan: Aggregate): AttributeMap[Expression] = {
+  def getAliasMap(plan: AggregateLike): AttributeMap[Expression] = {
     // Find all the aliased expressions in the aggregate list that don't include any actual
     // AggregateExpression or PythonUDF, and create a map from the alias to the expression
     val aliasMap = plan.aggregateExpressions.collect {

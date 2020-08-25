@@ -66,7 +66,15 @@ object SizeInBytesOnlyStatsPlanVisitor extends LogicalPlanVisitor[Statistics] {
     }
   }
 
-  override def visitDistinct(p: Distinct): Statistics = default(p)
+  override def visitLocalAggregate(p: LocalAggregate): Statistics = {
+    visitUnaryNode(p)
+  }
+
+  override def visitDistinct(p: Distinct): Statistics = {
+    // [[ReplaceDistinctWithAggregate]] rules replaces a Distinct with an Aggregate
+    // So get the stats of Aggregate
+    visitAggregate(Aggregate(p.child.output, p.child.output, p.child))
+  }
 
   override def visitExcept(p: Except): Statistics = p.left.stats.copy()
 

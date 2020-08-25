@@ -161,6 +161,58 @@ class AggregateEstimationSuite extends StatsEstimationTestBase with PlanTest {
     }
   }
 
+  test("local aggregate stats estimation for lesser output columns than child") {
+    withSQLConf(SQLConf.CBO_ENABLED.key -> "true") {
+      val tableColumns = Seq("key11", "key12", "key21", "key22", "key31", "key32")
+      val tableRowCount = 4
+      val child = StatsTestPlan(
+        outputList = tableColumns.map(nameToAttr),
+        rowCount = tableRowCount,
+        // rowCount * (overhead + column size)
+        size = Some(4 * (8 + 24)),
+        attributeStats = AttributeMap(tableColumns.map(nameToColInfo)))
+      // Construct a LocalAggregate for testing
+      val groupByColumns = Seq("key11")
+      val attributes = groupByColumns.map(nameToAttr)
+      val testLa = LocalAggregate(
+        groupingExpressions = attributes,
+        otherAggregateExpressions = attributes :+ Alias(Count(Literal(1)), "cnt")(),
+        child)
+      // sizeInBytes = childSize * outputRowSize / childRowSize
+      val laStats = testLa.stats
+      // la has 3 output columns and child has 6 output columns
+      assert(laStats.sizeInBytes === 128 * (8 + (2 * 4 + 1 * 8)) / (8 + 24))
+      assert(laStats.sizeInBytes < child.stats.sizeInBytes)
+      assert(laStats.rowCount === child.stats.rowCount)
+    }
+  }
+
+  test("local aggregate stats estimation for more output columns than child") {
+    withSQLConf(SQLConf.CBO_ENABLED.key -> "true") {
+      val tableColumns = Seq("key11", "key12")
+      val tableRowCount = 4
+      val child = StatsTestPlan(
+        outputList = tableColumns.map(nameToAttr),
+        rowCount = tableRowCount,
+        // rowCount * (overhead + column size)
+        size = Some(4 * (8 + 8)),
+        attributeStats = AttributeMap(tableColumns.map(nameToColInfo)))
+      // Construct a LocalAggregate for testing
+      val groupByColumns = Seq("key11", "key12")
+      val attributes = groupByColumns.map(nameToAttr)
+      val testLa = LocalAggregate(
+        groupingExpressions = attributes,
+        otherAggregateExpressions = attributes :+ Alias(Count(Literal(1)), "cnt")(),
+        child)
+      // sizeInBytes = childSize * outputRowSize / childRowSize
+      val laStats = testLa.stats
+      // la has 5 output columns and child has 2 output columns
+      assert(laStats.sizeInBytes ===  64 * (8 + (4 * 4 + 1 * 8)) / (8 + 8))
+      assert(laStats.sizeInBytes > child.stats.sizeInBytes)
+      assert(laStats.rowCount === child.stats.rowCount)
+    }
+  }
+
   private def checkAggStats(
       tableColumns: Seq[String],
       tableRowCount: BigInt,
