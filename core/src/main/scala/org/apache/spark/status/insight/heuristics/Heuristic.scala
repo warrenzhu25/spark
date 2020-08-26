@@ -19,5 +19,5 @@ package org.apache.spark.status.insight.heuristics
 import org.apache.spark.status.insight.SparkApplicationData
 
 trait Heuristic {
-  def apply(data: SparkApplicationData): HeuristicResult
+  def apply(data: SparkApplicationData): Option[HeuristicResult]
 }

@@ -17,13 +17,15 @@
 
 package org.apache.spark.status.insight
 
+import org.apache.spark.executor.ExecutorMetricsDistributions
 import org.apache.spark.status.api.v1.{ApplicationInfo, ExecutorSummary, JobData, StageData}
 
 case class SparkApplicationData(
-                         appId: String,
-                         appConf: Map[String, String],
-                         appInfo: ApplicationInfo,
-                         jobData: Seq[JobData],
-                         stageData: Seq[StageData],
-                         executorSummaries: Seq[ExecutorSummary],
-                         stagesWithFailedTasks: Seq[StageData] = Seq.empty)
+  appId: String,
+  appConf: Map[String, String],
+  appInfo: ApplicationInfo,
+  jobData: Seq[JobData],
+  stageData: Seq[StageData],
+  executorSummaries: Seq[ExecutorSummary],
+  executorMetricsDistributions: Option[ExecutorMetricsDistributions],
+  stagesWithFailedTasks: Seq[StageData] = Seq.empty)

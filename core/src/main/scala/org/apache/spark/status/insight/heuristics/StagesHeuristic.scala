@@ -181,8 +181,8 @@ object StagesHeuristic extends Heuristic {
     )
   }
 
-  override def apply(data: SparkApplicationData): HeuristicResult = {
-    new StagesHeuristicResult(evaluators.flatMap(_.evaluate(data)))
+  override def apply(data: SparkApplicationData): Option[HeuristicResult] = {
+    Some(new StagesHeuristicResult(evaluators.flatMap(_.evaluate(data))))
   }
 }
 

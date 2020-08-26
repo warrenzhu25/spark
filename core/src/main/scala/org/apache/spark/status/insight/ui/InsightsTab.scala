@@ -47,9 +47,8 @@ private[ui] class InsightsPage(
   private val heuristic = Seq(
     ConfigurationHeuristic,
     ConfigurationParametersHeuristic,
-    UnifiedMemoryHeuristic,
     DriverHeuristic,
-    JvmUsedMemoryHeuristic,
+    MemoryUsageHeuristic,
     StagesHeuristic,
     StagesWithFailedTasksHeuristic
   )
@@ -64,7 +63,7 @@ private[ui] class InsightsPage(
   }
 
   private def insightsTable() = {
-    heuristic.map(_.apply(appData())).map(r =>
+    heuristic.flatMap(_.apply(appData())).map(r =>
     <span class="collapse-aggregated-classpathEntries collapse-table"
           onClick="collapseTable('collapse-aggregated-classpathEntries',
             'aggregated-classpathEntries')">
@@ -80,12 +79,14 @@ private[ui] class InsightsPage(
   }
 
   private def appData(): SparkApplicationData = {
-    val applicationInfo = store.applicationInfo()
-    val appConfig = store.environmentInfo().sparkProperties.map(a => a._1 -> a._2).toMap
-    val jobData = store.jobsList(List.empty[JobExecutionStatus].asJava)
-    val stageData = store.stageList(List.empty[StageStatus].asJava)
-    val executorSummary = store.executorList(false)
 
-    SparkApplicationData(appId, appConfig, applicationInfo, jobData, stageData, executorSummary)
+    SparkApplicationData(
+      appId,
+      appConf = store.environmentInfo().sparkProperties.map(a => a._1 -> a._2).toMap,
+      appInfo = store.applicationInfo(),
+      jobData = store.jobsList(List.empty[JobExecutionStatus].asJava),
+      stageData = store.stageList(List.empty[StageStatus].asJava),
+      executorSummaries = store.executorList(false),
+      executorMetricsDistributions = store.executorMetricSummary(false, Array(0.5, 1.0)))
   }
 }

@@ -22,30 +22,19 @@ import org.apache.spark.ui.UIUtils
 
 trait AnalysisResult {
   def severity: Severity
-  def toTuple: (String, String, String, String, String)
+  def header: Seq[String]
+  def row: Seq[Node]
 }
 
 abstract class HeuristicResult(val name: String, results: Seq[AnalysisResult]) {
 
-  def toTable: Seq[Node] =
-    UIUtils.listingTable(insightHeader, insightRow, results.map(_.toTuple)
-      , fixedWidth = true)
-
-  protected val insightHeader: Seq[String] =
-    Seq("Name", "Value", "Suggested", "Description", "Severity")
-
-  protected def insightRow(data: (String, String, String, String, String)): Elem =
-    <tr>
-      <td>{data._1}</td>
-      <td>{data._2}</td>
-      <td>{data._4}</td>
-      <td>{data._3}</td>
-      <td>
-        <span data-toggle="tooltip" title={Severity.valueOf(data._5).getTooltip}>
-          {data._5}
-        </span>
-      </td>
-    </tr>
+  def toTable: Seq[Node] = {
+    assert(results.nonEmpty)
+    UIUtils.listingTable(results.head.header,
+      (r: AnalysisResult) => r.row,
+      results,
+      fixedWidth = true)
+  }
 }
 
 case class SingleValue(name: String,
@@ -54,8 +43,22 @@ case class SingleValue(name: String,
                        suggested: String = "",
                        override val severity: Severity = Severity.Normal
                        ) extends AnalysisResult {
-  override def toTuple(): (String, String, String, String, String) = {
-    (name, value, description, suggested, severity.name())
+
+  override val header: Seq[String] =
+    Seq("Name", "Value", "Suggested", "Description", "Severity")
+
+  override val row: Seq[Node] = {
+    <tr>
+      <td>{name}</td>
+      <td>{value}</td>
+      <td>{description}</td>
+      <td>{suggested}</td>
+      <td>
+        <span data-toggle="tooltip" title={severity.getTooltip}>
+          {severity}
+        </span>
+      </td>
+    </tr>
   }
 }
 
@@ -64,7 +67,19 @@ case class MultipleValues(name: String,
                           description: Option[String] = None,
                           override val severity: Severity = Severity.Normal
                          ) extends AnalysisResult {
-  override def toTuple(): (String, String, String, String, String) = {
-    (name, values.mkString("\n"), description.getOrElse(""), "", severity.name())
+  override val header: Seq[String] =
+    Seq("Name", "Value", "Description", "Severity")
+
+  override val row: Elem = {
+    <tr>
+      <td>{name}</td>
+      <td>{values.mkString("\n")}</td>
+      <td>{description}</td>
+      <td>
+        <span data-toggle="tooltip" title={severity.getTooltip}>
+          {severity}
+        </span>
+      </td>
+    </tr>
   }
 }

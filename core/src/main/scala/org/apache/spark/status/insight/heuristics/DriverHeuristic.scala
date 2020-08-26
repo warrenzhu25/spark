@@ -129,7 +129,7 @@ object DriverHeuristic extends Heuristic{
     extends HeuristicResult("Driver Insights", results) {
   }
 
-  override def apply(data: SparkApplicationData): HeuristicResult = {
+  override def apply(data: SparkApplicationData): Option[HeuristicResult] = {
     val evaluator = new Evaluator(data)
 
     def formatProperty(property: Option[String]): String =
@@ -171,8 +171,8 @@ object DriverHeuristic extends Heuristic{
       resultDetails = resultDetails :+ new SingleValue("Spark Driver Memory", "Please do not specify excessive amount of memory for Driver. Change it in the field " + SPARK_DRIVER_MEMORY_KEY)
     }
 
-    new DriverHeuristicResult(
+    Some(new DriverHeuristicResult(
       resultDetails
-    )
+    ))
   }
 }

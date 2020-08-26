@@ -15,6 +15,7 @@
 package org.apache.spark.status.insight.heuristics
 
 import scala.xml.Node
+
 import org.apache.spark.status.api.v1.ExecutorSummary
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.heuristics.util.Utils
@@ -38,7 +39,7 @@ object JvmUsedMemoryHeuristic extends Heuristic {
 
   lazy val sparkExecutorMemoryThreshold: String = DEFAULT_SPARK_EXECUTOR_MEMORY_THRESHOLD
 
-  override def apply(data: SparkApplicationData): HeuristicResult = {
+  override def apply(data: SparkApplicationData): Option[HeuristicResult] = {
     val evaluator = new Evaluator(data)
 
     var resultDetails = Seq(
@@ -55,7 +56,7 @@ object JvmUsedMemoryHeuristic extends Heuristic {
         new SingleValue("Suggested spark.executor.memory", MemoryFormatUtils.roundOffMemoryStringToNextInteger((MemoryFormatUtils.bytesToString(((1 + BUFFER_FRACTION) * evaluator.maxExecutorPeakJvmUsedMemory).toLong))))
     }
 
-    new JvmUsedMemoryHeuristicResult(resultDetails)
+    Some(new MemoryUsageHeuristicResult(resultDetails))
   }
 
   class Evaluator(data: SparkApplicationData) {
@@ -88,17 +89,20 @@ object JvmUsedMemoryHeuristic extends Heuristic {
   }
 }
 
+
+
+
 class JvmUsedMemoryHeuristicResult(results: Seq[AnalysisResult])
   extends HeuristicResult("Jvm Memory Insights", results) {
-  override def toTable: Seq[Node] =
-    UIUtils.listingTable(insightHeader, insightRow, results.map(_.toTuple)
-      , fixedWidth = true)
-
-  override val insightHeader = Seq("Name", "Value")
-
-  override def insightRow(data: (String, String, String, String, String)) =
-    <tr>
-      <td>{data._1}</td>
-      <td>{data._2}</td>
-    </tr>
+//  override def toTable: Seq[Node] =
+//    UIUtils.listingTable(insightHeader, insightRow, results.map(_.toTuple)
+//      , fixedWidth = true)
+//
+//  override val insightHeader = Seq("Name", "Value")
+//
+//  override def insightRow(data: (String, String, String, String, String)) =
+//    <tr>
+//      <td>{data._1}</td>
+//      <td>{data._2}</td>
+//    </tr>
 }

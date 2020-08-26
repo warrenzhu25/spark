@@ -31,6 +31,7 @@ object ConfigurationHeuristicsConstants {
   val SPARK_EXECUTOR_OPTIONS = "spark.executor.extraJavaOptions"
   val SPARK_SQL_SHUFFLE_PARTITIONS = "spark.sql.shuffle.partitions"
   val SPARK_MEMORY_FRACTION = "spark.memory.fraction"
+  val SPARK_MEMORY_STORAGE_FRACTION = "spark.memory.storageFraction"
   val SPARK_SERIALIZER = "spark.serializer"
   val SPARK_APPLICATION_DURATION = "spark.application.duration"
   val SPARK_SHUFFLE_SERVICE_ENABLED = "spark.shuffle.service.enabled"
@@ -42,7 +43,6 @@ object ConfigurationHeuristicsConstants {
 
   // Spark default configuration values
   val SPARK_EXECUTOR_MEMORY_DEFAULT = "1g"
-  val SPARK_EXECUTOR_MEMORY_OVERHEAD_MIN = 384 * 1024 * 1024
   // the minimum amount of overhead memory
   val SPARK_MEMORY_OVERHEAD_MIN_DEFAULT = 384L << 20 // 384MB
   // if the overhead memory is not explicitly specified by the user, the default amount is
@@ -54,7 +54,8 @@ object ConfigurationHeuristicsConstants {
   val SPARK_EXECUTOR_CORES_DEFAULT = 1
   val SPARK_DRIVER_CORES_DEFAULT = 1
   val SPARK_SQL_SHUFFLE_PARTITIONS_DEFAULT = 200
-  val SPARK_MEMORY_FRACTION_DEFAULT = 0.6
+  val SPARK_MEMORY_FRACTION_DEFAULT = "0.6"
+  val SPARK_MEMORY_STORAGE_FRACTION_DEFAULT = "0.5"
 
   // number of milliseconds in a minute
   val MILLIS_PER_MIN = 1000D * 60.0D

@@ -54,8 +54,9 @@ object ConfigurationParametersHeuristic extends Heuristic {
        .get(SPARK_EXECUTOR_CORES).map(_.toInt).getOrElse(SPARK_EXECUTOR_CORES_DEFAULT)
      lazy val sparkDriverCores = appConfigurationProperties
        .get(SPARK_DRIVER_CORES).map(_.toInt).getOrElse(SPARK_DRIVER_CORES_DEFAULT)
-     lazy val sparkMemoryFraction = appConfigurationProperties
-       .get(SPARK_MEMORY_FRACTION).map(_.toDouble).getOrElse(SPARK_MEMORY_FRACTION_DEFAULT)
+     lazy val sparkMemoryFraction: Double = appConfigurationProperties
+       .getOrElse(SPARK_MEMORY_FRACTION, SPARK_MEMORY_FRACTION_DEFAULT)
+       .toDouble
      lazy val sparkSqlShufflePartitions = appConfigurationProperties
        .get(SPARK_SQL_SHUFFLE_PARTITIONS)
        .map(_.toInt)
@@ -69,7 +70,7 @@ object ConfigurationParametersHeuristic extends Heuristic {
 
      // from observation of user applications, adjusting spark.memory.fraction has not had
      // much benefit, so always set to the default value.
-     val recommendedMemoryFraction: Double = SPARK_MEMORY_FRACTION_DEFAULT
+     val recommendedMemoryFraction: Double = SPARK_MEMORY_FRACTION_DEFAULT.toDouble
 
      // recommended executor configuration values, whose recommended values will be
      // adjusted as various metrics are analyzed. Initialize to current values.
@@ -386,7 +387,7 @@ object ConfigurationParametersHeuristic extends Heuristic {
      s"${Math.ceil(value).toInt}${unit}"
    }
 
-   override def apply(data: SparkApplicationData): HeuristicResult = {
+   override def apply(data: SparkApplicationData): Option[HeuristicResult] = {
 
      val evaluator = new Evaluator(data)
 
@@ -425,7 +426,7 @@ object ConfigurationParametersHeuristic extends Heuristic {
        )
      }
 
-     new ConfigParamsHeuristicResult(resultDetails)
+     Some(new ConfigParamsHeuristicResult(resultDetails))
    }
  }
 

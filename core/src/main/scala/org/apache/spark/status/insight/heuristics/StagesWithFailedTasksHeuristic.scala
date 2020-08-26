@@ -34,7 +34,7 @@ object StagesWithFailedTasksHeuristic extends Heuristic {
   val ratioThreshold: Double = 2
   val increaseMemoryBy: String = "1G"
 
-  override def apply(data: SparkApplicationData): HeuristicResult = {
+  override def apply(data: SparkApplicationData): Option[HeuristicResult] = {
     val evaluator = new Evaluator(data)
     var resultDetails = Seq(
       new SingleValue("Stages with OOM errors", evaluator.stagesWithOOMError.toString),
@@ -45,9 +45,9 @@ object StagesWithFailedTasksHeuristic extends Heuristic {
     //TODO: refine recommendations
     if (evaluator.severityOOMStages.getValue >= Severity.Normal.getValue)
       resultDetails = resultDetails :+ new SingleValue("OOM errors", "Some tasks have failed due to OOM error. Try increasing spark.executor.memory or decreasing spark.memory.fraction (take a look at unified memory heuristic) or decreasing number of cores.")
-    new StageFailureHeuristicResult(
+    Some(new StageFailureHeuristicResult(
       resultDetails
-    )
+    ))
   }
 
   class Evaluator(data: SparkApplicationData) {

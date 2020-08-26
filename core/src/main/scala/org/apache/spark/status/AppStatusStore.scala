@@ -365,8 +365,12 @@ private[spark] class AppStatusStore(
       activeOnly: Boolean,
       unsortedQuantiles: Array[Double]): Option[ExecutorMetricsDistributions] = {
     val quantiles = unsortedQuantiles.sorted
-    val executors = executorList(activeOnly).flatMap(_.peakMemoryMetrics).toIndexedSeq
-    Some(new ExecutorMetricsDistributions(quantiles, executors))
+    val executorMetrics = executorList(activeOnly).flatMap(_.peakMemoryMetrics).toIndexedSeq
+    if (executorMetrics.nonEmpty) {
+      Some(new ExecutorMetricsDistributions(quantiles, executorMetrics))
+    } else {
+      None
+    }
   }
 
   /**

@@ -17,11 +17,8 @@
 
 package org.apache.spark.status.insight.heuristics
 
-import scala.xml.Node
-
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.heuristics.ConfigurationHeuristicsConstants._
-import org.apache.spark.ui.UIUtils
 import org.apache.spark.util.Utils
 
 /**
@@ -178,15 +175,15 @@ object ConfigurationHeuristic extends Heuristic {
     }
 
     def calculateOverhead(memory: String): Long = {
-      Math.max(SPARK_EXECUTOR_MEMORY_OVERHEAD_MIN, Utils.byteStringAsBytes(memory) / 10)
+      Math.max(SPARK_MEMORY_OVERHEAD_MIN_DEFAULT, Utils.byteStringAsBytes(memory) / 10)
     }
   }
 
-  override def apply(data: SparkApplicationData): HeuristicResult = {
-    new ConfigHeuristicResult(
+  override def apply(data: SparkApplicationData): Option[HeuristicResult] = {
+    Some(new ConfigHeuristicResult(
       evaluators
       .flatMap(_.evaluate(data.appConf))
-      .sortBy(r => r.severity.getValue)(Ordering.Int.reverse))
+      .sortBy(r => r.severity.getValue)(Ordering.Int.reverse)))
   }
 }
 
