@@ -85,19 +85,32 @@ private[v1] class AbstractApplicationResource extends BaseAppResource {
   @GET
   @Path("allTasks")
   def allTasks(@QueryParam("status") statuses: JList[StageStatus],
-               @QueryParam("details") @DefaultValue("true") details: Boolean): Seq[StageData] = {
-    // get all stageIDs
-    val stageIds = withUI(_.store.stageList(statuses))
-    // get all stages with tasks
-    var ret = Seq[StageData]()
-    if (stageIds.nonEmpty) {
-      stageIds.foreach( stageData => withUI {
-        ui =>
-          var oneStageRet = ui.store.stageData(stageData.stageId, details = details)
-          if (oneStageRet.nonEmpty) {
-            ret ++= oneStageRet
-          }
-      } )
+               @QueryParam("details") @DefaultValue("true") details: Boolean,
+               @QueryParam("startStageId") startStageId: Integer,
+               @QueryParam("endStageId") endStageId: Integer,
+               @QueryParam("limit") limit: Integer): Seq[StageData] = {
+    val numStages = Option(limit).map(_.toInt).getOrElse(Integer.MAX_VALUE)
+    val minStageId = Option(startStageId).map(_.toInt).getOrElse(0)
+    val maxStageId = Option(endStageId).map(_.toInt).getOrElse(Integer.MAX_VALUE)
+    if (minStageId > maxStageId) {
+      throw
+        new BadParameterException(s"startStageId should not bigger than endStageId")
+    }
+
+    // get all stage data
+    val allStages = withUI(_.store.stageList(statuses))
+    if (allStages.nonEmpty) {
+      var ret = Seq[StageData]()
+      allStages.filter(stage => (stage.stageId >= minStageId) && (stage.stageId <= maxStageId))
+        .take(numStages)
+        .foreach(stageData =>
+          withUI {
+            ui =>
+              var oneStageRet = ui.store.stageData(stageData.stageId, details = details)
+              if (oneStageRet.nonEmpty) {
+                ret ++= oneStageRet
+              }
+          })
       ret
     } else {
       throw new NotFoundException(s"unknown app stages")

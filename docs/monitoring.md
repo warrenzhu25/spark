@@ -484,6 +484,18 @@ can be identified by their `[attempt-id]`. In the API listed below, when running
     </td>
   </tr>
   <tr>
+    <td><code>/applications/[app-id]/allTasks</code></td>
+    <td>
+      A list of all tasks with stages for the given application.
+      <br><code>?status=[active|complete|pending|failed]</code> list tasks in the [status] stages.
+      <br><code>?startStageId=[startStageId]&endStageId=[endStageId]</code> list tasks in the given stage range (inclusive),
+      can be set separately.
+      <br><code>?limit=[limit]</code> limits the number of stages.
+      <br>Example: <code>?startStageId=10&amp;endStageId=50</code>
+      <br><code>?limit=10</code>
+    </td>
+  </tr>
+  <tr>
     <td><code>/applications/[app-id]/executors</code></td>
     <td>A list of all active executors for the given application.</td>
   </tr>
