@@ -205,18 +205,39 @@ object PushdownLocalAggregate extends Rule[LogicalPlan] with Logging {
   /**
    * Pushdown LocalAggregate through Project
    */
-  private def pushDownLocalAggregateThroughProject(
+  private[preaggregation] def pushDownLocalAggregateThroughProject(
       localAggregate: LocalAggregate,
       retain: Boolean = true): Option[LogicalPlan] = {
+
     if (!localAggregate.child.isInstanceOf[Project]) {
       return None
     }
+
     val project = localAggregate.child.asInstanceOf[Project]
-    if (project.projectList.forall(_.isInstanceOf[AttributeReference])) {
-      // TODO: Handle Aliasing here
+    val attributeSeq = project.projectList.filter(_.isInstanceOf[Alias]).map { p =>
+      (p.toAttribute, p.asInstanceOf[Alias])
+    }
+
+    if (attributeSeq.isEmpty) {
       pushDownLocalAggregate(localAggregate.copy(child = project.child), retain)
     } else {
-      None
+      val attributeMap: AttributeMap[Alias] = AttributeMap(attributeSeq)
+      val groupingExpressions = localAggregate.groupingExpressions.map {
+        _.transformUp {
+          case attribute: Attribute => attributeMap.get(attribute).getOrElse(attribute)
+        }.asInstanceOf[NamedExpression]
+      }
+
+      val aggregateExpression = localAggregate.otherAggregateExpressions.map {
+        _.transformUp {
+          case attribute: Attribute => attributeMap.get(attribute)
+            .map(_.child).getOrElse(attribute)
+        }.asInstanceOf[NamedExpression]
+      }
+
+      pushDownLocalAggregate(localAggregate.copy(child = project.child,
+        groupingExpressions = groupingExpressions,
+        otherAggregateExpressions = aggregateExpression), retain)
     }
   }
 

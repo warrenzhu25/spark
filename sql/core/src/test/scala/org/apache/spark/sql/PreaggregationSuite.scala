@@ -532,6 +532,90 @@ class PreaggregationSuite extends QueryTest with SharedSQLContext {
     assert(isProjectRetainedBetweenLAAndJoin(optimizedPlan))
   }
 
+  test(s"check for pushdown below project node which has aliased output") {
+    val query =
+      s"""
+         | SELECT apple, sum(ball) from
+         | (select $tbl1.col1 as ball, $tbl2.col2 as apple from $tbl1 join $tbl2
+         | on $tbl1.col2=$tbl2.col2) group by apple
+         | """.stripMargin
+    assertPreagg(query)
+  }
+
+  test(s"check for pushdown below multiple aggregate nodes") {
+    val query =
+      s"""
+         |SELECT max(bat) from (select sum(ball) as bat, apple from (
+         | select $tbl1.col1 as ball, $tbl2.col2 as apple from $tbl1 join $tbl2
+         | on $tbl1.col2=$tbl2.col2) group by apple)
+         | """.stripMargin
+    assertPreagg(query)
+  }
+
+  test(s"check for pushdown below project node with complex grouping expression" +
+    s" with grouping key aliased") {
+    val query =
+      s"""
+         | SELECT 2*apple, max(subresult.col1) from (select $tbl1.col1,
+         | 2*$tbl2.col2 as apple from $tbl1 join $tbl2
+         | on $tbl1.col2=$tbl2.col2)subresult group by 2*apple
+         |""".stripMargin
+    assertPreagg(query)
+  }
+
+  test(s"check for pushdown below project node when only aggregate key is in output") {
+    val query =
+      s"""
+         | SELECT max(ball) from (select $tbl1.col1 as ball,
+         | $tbl2.col2 as apple from $tbl1 join $tbl2
+         | on $tbl1.col2=$tbl2.col2) group by apple
+         |""".stripMargin
+    assertPreagg(query)
+  }
+
+  test(s"check for pushdown below project node when count has multiple params") {
+    val query =
+      s"""
+         | SELECT count(subresult.col3, ball) from (select $tbl1.col1 as ball, $tbl1.col3,
+         | $tbl2.col2 as apple from $tbl1 join $tbl2
+         | on $tbl1.col2=$tbl2.col2)subresult group by apple
+         |""".stripMargin
+    assertPreagg(query)
+  }
+
+  test(s"check for pushdown below project with aliased output " +
+    s"and aggregate is done on multiple columns") {
+    val query =
+      s"""
+         | SELECT max(ball+bat) from (select $tbl1.col1 as ball, $tbl1.col3 as bat,
+         | $tbl2.col2 as apple from $tbl1 join $tbl2
+         | on $tbl1.col2=$tbl2.col2) group by apple
+         | """.stripMargin
+    assertPreagg(query)
+  }
+
+  test(s"check for pushdown below project with aliased and casted output") {
+    val query =
+      s"""
+         | SELECT subresult.col2, max(ball) from (select cast($tbl1.col1 + $tbl1.col3
+         | as double) ball, $tbl2.col2 from $tbl1 join $tbl2
+         | on $tbl1.col2=$tbl2.col2)subresult group by subresult.col2
+         |""".stripMargin
+    assertPreagg(query)
+  }
+
+  test(s"check for pushdown below project with casted aliased output " +
+    s"and aggregate is done on multiple columns") {
+    val query =
+      s"""
+         | SELECT max(ball+cast(bat as double)) from (select
+         | cast($tbl1.col1 as double) ball, cast($tbl1.col3 as float) bat,
+         | $tbl2.col2 as apple from $tbl1 join $tbl2
+         | on $tbl1.col2=$tbl2.col2) group by apple
+         |""".stripMargin
+    assertPreagg(query)
+  }
+
   private def assertPreagg(
       query: String,
       additionalConfs: Map[String, String] = Map.empty,

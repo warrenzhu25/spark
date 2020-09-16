@@ -542,6 +542,35 @@ class PushdownLocalAggregateSuite extends PlanTest with StatsEstimationTestBase 
     }
   }
 
+  test("push down local aggregate through project with aliases") {
+    withSQLConf(
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1",
+      SQLConf.PREAGGREGATION_CBO_ENABLED.key -> "false") {
+      val aggregateKey = nameToAttr("t2.value").as("ball").as("bat")
+      val groupKey = nameToAttr("t1.key").as("apple").as("orange")
+
+      val aggregate = t1.join(t2, Inner, Some(nameToAttr("t1.key") === nameToAttr("t2.key")))
+        .select(aggregateKey, groupKey).
+        groupBy(groupKey.toAttribute)(sum(aggregateKey.toAttribute)).
+        analyze.asInstanceOf[Aggregate]
+      val newAggregate =
+        splitAggregateToAggregateAndLocalAggregate(aggregate).get
+
+      val planAfterPushdownOption = pushDownLocalAggregateThroughProject(
+        newAggregate.child.asInstanceOf[LocalAggregate], false)
+      assert(planAfterPushdownOption.isDefined)
+      val plan = planAfterPushdownOption.get
+      assert(checkLocalAggregatePushThroughJoin(plan))
+      val joinNode = plan.children.head.asInstanceOf[Join]
+      val groupingExpression = joinNode.left.asInstanceOf[LocalAggregate]
+        .groupingExpressions.filter(_.isInstanceOf[Alias])
+      val aliasNames = groupingExpression.map(_.name)
+      assert(aliasNames == Seq("orange"))
+      assert(groupingExpression.head.asInstanceOf[Alias].child
+        .asInstanceOf[Attribute].name == "t1.key")
+    }
+  }
+
   private def aggExpn(expression: Expression, aggFunction: String): Expression = {
     aggFunction match {
       case _ if aggFunction == "sum" => sum(expression)
