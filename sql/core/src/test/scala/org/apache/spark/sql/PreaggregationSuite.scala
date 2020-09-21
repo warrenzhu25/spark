@@ -17,7 +17,8 @@
 
 package org.apache.spark.sql
 
-import org.apache.spark.sql.catalyst.plans.{Cross, FullOuter, LeftAnti, LeftOuter, LeftSemi, RightOuter}
+import org.apache.spark.sql.catalyst.optimizer.ms.preaggregation.PushdownLocalAggregate.{TESTING_PUSHDOWN_LEFT_CONF, TESTING_PUSHDOWN_RIGHT_CONF}
+import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.logical.{Join, LocalAggregate, LogicalPlan, Project}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.internal.SQLConf
@@ -499,6 +500,52 @@ class PreaggregationSuite extends QueryTest with SharedSQLContext {
          |""".stripMargin
     val optimizedPlan = assertPreagg(query, additionalConfs = conf, checkLaForLeftJoin = false)
     assert(isProjectRetainedBetweenLAAndJoin(optimizedPlan))
+  }
+
+  /**
+   * Following tests are for cases when empty input comes to Aggregate node
+   */
+  Seq("min", "count", "sum").foreach { agExp =>
+    test(s"agg $agExp with one side pushdown when no incoming data") {
+      val query = s"""
+                     |  SELECT $agExp($tbl1.col1), $agExp($tbl2.col2)
+                     |  from $tbl1 join $tbl2 on $tbl1.col2=$tbl2.col2
+                     |  where $tbl1.col1 = -1 and $tbl2.col1 = -1
+                     |""".stripMargin
+      val conf1 = Map(
+        TESTING_PUSHDOWN_LEFT_CONF -> "true",
+        TESTING_PUSHDOWN_RIGHT_CONF -> "false")
+      assertPreagg(query, conf1, checkLaForRightJoin = false)
+
+      val conf2 = Map(
+        TESTING_PUSHDOWN_LEFT_CONF -> "false",
+        TESTING_PUSHDOWN_RIGHT_CONF -> "true")
+      assertPreagg(query, conf2, checkLaForLeftJoin = false)
+    }
+
+    test(s"agg $agExp with both side pushdown when no incoming data") {
+      val query = s"""
+                     |  SELECT $agExp($tbl1.col1), $agExp($tbl2.col2)
+                     |  from $tbl1 join $tbl2 on $tbl1.col2=$tbl2.col2
+                     |  where $tbl1.col1 = -1 and $tbl2.col1 = -1
+                     |""".stripMargin
+
+      assertPreagg(query)
+    }
+
+    test(s"agg $agExp with both side pushdown when no incoming data " +
+      s"for specific key") {
+      val query = s"""
+                     |  SELECT $agExp($tbl1.col1), $agExp($tbl2.col2)
+                     |  from $tbl1 join $tbl2 on $tbl1.col3=$tbl2.col3
+                     |  where $tbl2.col1 % 10 != 1
+                     |  group by $tbl1.col3""".stripMargin
+
+      // $tbl2.col1 % 10 != 1 is same as $tbl1.col3 != 1
+      // So the pushdown LA on left side will get data of tbl1.col3 = 1
+      // But the join will eliminate such rows and those rows won't be given as input to Aggregate
+      assertPreagg(query)
+    }
   }
 
   test("local aggregate optimization in single subquery expressions should not apply twice") {

@@ -433,7 +433,7 @@ class PushdownLocalAggregateSuite extends PlanTest with StatsEstimationTestBase 
     val newAggregate = splitAggregateToAggregateAndLocalAggregate(aggregate).get
 
     assert(normalizeExprIds(newAggregate).asInstanceOf[Aggregate].aggregateExpressions.head
-      .expr.toString == "(sum(count(t2.value#3)#0L) * cast(2 as bigint))" +
+      .expr.toString == "(coalesce(sum(count(t2.value#3)#0L), 0) * cast(2 as bigint))" +
       " AS (count(t2.value#3) * 2)#0L")
   }
 

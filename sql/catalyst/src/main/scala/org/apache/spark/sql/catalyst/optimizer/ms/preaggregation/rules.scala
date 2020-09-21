@@ -28,6 +28,7 @@ import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.DataType
+import org.apache.spark.util.Utils
 
 object PushdownLocalAggregate extends Rule[LogicalPlan] with Logging {
 
@@ -38,6 +39,10 @@ object PushdownLocalAggregate extends Rule[LogicalPlan] with Logging {
     SQLConf.get.cboBasedPreaggregationEnabled
   private[preaggregation] def preaggregationCboShuffleJoinThreshold =
     SQLConf.get.preaggregationCboShuffleJoinThreshold
+
+  // These configs gets effective only in Spark UT run (when Utils.isTesting() is true)
+  val TESTING_PUSHDOWN_LEFT_CONF = "spark.sql.preaggregation.testing.pushdownLeft"
+  val TESTING_PUSHDOWN_RIGHT_CONF = "spark.sql.preaggregation.testing.pushdownRight"
 
   override def apply(plan: LogicalPlan): LogicalPlan = {
     if (!pushdownAggregateEnabled) {
@@ -515,6 +520,14 @@ object PushdownLocalAggregate extends Rule[LogicalPlan] with Logging {
         shouldPushThroughRight = false
       }
     }
+
+    if (Utils.isTesting) {
+      shouldPushThroughLeft = SQLConf.get.getConfString(
+        TESTING_PUSHDOWN_LEFT_CONF, shouldPushThroughLeft.toString).toBoolean
+      shouldPushThroughRight = SQLConf.get.getConfString(
+        TESTING_PUSHDOWN_RIGHT_CONF, shouldPushThroughRight.toString).toBoolean
+    }
+
     // Create new Join condition
     // Previously join condition might be x*2 = y*3. Now x*2, y*3 are namedexpression
     // in the child plan. So we have to rewrite joinCondition using the same
@@ -757,14 +770,16 @@ object PushdownLocalAggregate extends Rule[LogicalPlan] with Logging {
     expression.transformUp {
       case ag: AggregateExpression if inputToUpperAggregateExpressionMap.contains(ag) =>
         val resultExprFromUnderlyingLocalAggregate = inputToUpperAggregateExpressionMap(ag)
-        val newAgFunction = ag.aggregateFunction match {
+        val newResult = ag.aggregateFunction match {
           case _: Count =>
-            Sum(resultExprFromUnderlyingLocalAggregate)
+            val newAgFunction = Sum(resultExprFromUnderlyingLocalAggregate)
+            Coalesce(Seq(ag.copy(aggregateFunction = newAgFunction), Literal(0L)))
           case o =>
-            o.withNewChildren(Seq(resultExprFromUnderlyingLocalAggregate))
+            val newAgFunction = o.withNewChildren(Seq(resultExprFromUnderlyingLocalAggregate))
               .asInstanceOf[AggregateFunction]
+            ag.copy(aggregateFunction = newAgFunction)
         }
-        castIfNeeded(ag.copy(aggregateFunction = newAgFunction), ag.dataType)
+        castIfNeeded(newResult, ag.dataType)
     }
   }
 
