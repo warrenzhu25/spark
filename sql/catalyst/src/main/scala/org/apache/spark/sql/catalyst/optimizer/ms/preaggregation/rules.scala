@@ -670,8 +670,14 @@ object PushdownLocalAggregate extends Rule[LogicalPlan] with Logging {
       case sum: Sum =>
         val partialCount = castIfNeeded(countFromOtherSide.get, sum.child.dataType)
         Multiply(partialCount, sum.child)
-      case _: Count =>
-        countFromOtherSide.get
+      case c: Count =>
+        val nullableChildren = c.children.filter(_.nullable)
+        if (nullableChildren.isEmpty) {
+          countFromOtherSide.get
+        } else {
+          val outputIfNull = Literal(0L)
+          If(nullableChildren.map(IsNull).reduce(Or), outputIfNull, countFromOtherSide.get)
+        }
       case other =>
         other.children.head
     }

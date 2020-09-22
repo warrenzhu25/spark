@@ -21,6 +21,7 @@ import org.apache.spark.sql.catalyst.optimizer.ms.preaggregation.PushdownLocalAg
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.logical.{Join, LocalAggregate, LogicalPlan, Project}
 import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.functions.expr
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.{SharedSQLContext, SQLTestUtils}
 import org.apache.spark.sql.types.{DataTypes, Decimal, StringType}
@@ -40,20 +41,27 @@ class PreaggregationSuite extends QueryTest with SharedSQLContext {
     import testImplicits._
 
     Seq(tbl1, tbl2, tblWithNoStats1, tblWithNoStats2).foreach { tbl =>
-      sparkContext.parallelize(1 to 1000).toDF("col1")
-        .withColumn("col2", col("col1") % 100)
-        .withColumn("col3", col("col1") % 10)
+      sparkContext.parallelize(1 to 1000).toDF("colBase")
+        .withColumn("col1", expr("case when colBase = 42 then null else colBase end"))
+        .withColumn("col2", expr("case when (colBase % 100) = 52 then null" +
+          " when (colBase % 100) = 84 then null else colBase % 100 end"))
+        .withColumn("col3", expr("case when (colBase % 10) = 3 then null" +
+          " when (colBase % 10) = 4 then null else colBase % 10 end"))
         .write.format("parquet").saveAsTable(tbl)
     }
 
     case class DataWithTypes(col1: String, col2: Float, col3: Decimal, col4: Int, col5: Double)
     val idToStringUDF = spark.udf.register("idToString", (value: Int) => s"id-$value")
     Seq(tblWithTypes1, tblWithTypes2).foreach { tbl =>
-      sparkContext.parallelize(1 to 1000).toDF("col4")
-        .withColumn("col1", idToStringUDF(col("col4")).cast(StringType))
-        .withColumn("col2", col("col4").cast(DataTypes.FloatType) / 1000)
-        .withColumn("col3", col("col4").cast(DataTypes.createDecimalType()) / 1000000)
-        .withColumn("col5", col("col4").cast(DataTypes.DoubleType) / 100)
+      sparkContext.parallelize(1 to 1000).toDF("colBase")
+        .withColumn("col1", idToStringUDF(col("colBase")).cast(StringType))
+        .withColumn("col4", expr("case when (colBase % 100) = 52 then null else colBase end"))
+        .withColumn("col2", expr("case when (colBase % 100) = 62 then null else colBase end")
+          .cast(DataTypes.FloatType) / 1000)
+        .withColumn("col3", expr("case when (colBase % 100) = 72 then null else colBase end")
+          .cast(DataTypes.createDecimalType()) / 100)
+        .withColumn("col5", expr("case when (colBase % 100) = 82 then null else colBase end")
+          .cast(DataTypes.DoubleType) / 100)
         .write.format("parquet").saveAsTable(tbl)
     }
 
@@ -481,25 +489,101 @@ class PreaggregationSuite extends QueryTest with SharedSQLContext {
       assertPreagg(query, conf, checkLaForRightJoin = false)
     }
   }
-  
-  test("retain LA should handle attributes for one side pushdown") {
-    val conf = Map(
-      SQLConf.PREAGGREGATION_CBO_ENABLED.key -> "true",
-      SQLConf.PREAGGREGATION_CBO_SHUFFLE_JOIN_PUSHDOWN_THRESHOLD.key -> "1")
 
-    // Following query will have only right side push down for both the joins,
-    // as the stats for right LA = 1 and stats for left LA = 0.
+  test("count with multiple attributes with pushdown on various sides") {
     val query =
       s"""
-         | select min($tblWithTypes1.col2), 2*$tbl1.col1, 3*$tbl2.col2, 4*$tblWithTypes1.col4
-         | from $tblWithTypes1 join
-         | ($tbl1 join $tbl2 on $tbl1.col1 = $tbl2.col3)
-         | on $tblWithTypes1.col4 = $tbl2.col1
-         | group by 2*$tbl1.col1, 3*$tbl2.col2, 4*$tblWithTypes1.col4
-         |
+         |  SELECT count($tbl1.col1, 2 * $tbl1.col3), $tbl2.col2 from $tbl1 join $tbl2
+         |  on $tbl1.col2=$tbl2.col2 group by $tbl2.col2, 2*$tbl1.col3
          |""".stripMargin
-    val optimizedPlan = assertPreagg(query, additionalConfs = conf, checkLaForLeftJoin = false)
-    assert(isProjectRetainedBetweenLAAndJoin(optimizedPlan))
+    assertPreagg(query)
+
+    val conf1 = Map(
+      TESTING_PUSHDOWN_LEFT_CONF -> "true",
+      TESTING_PUSHDOWN_RIGHT_CONF -> "false")
+    assertPreagg(query, conf1, checkLaForRightJoin = false)
+
+    // col1 and col3 of tbl1 can have null values so those rows
+    // should not be included in the output of count where value for any of these
+    // columns is null and output with preaggregation should match with output without it
+    // when pushdown of LA is done on non aggregate side.
+    val conf2 = Map(
+      TESTING_PUSHDOWN_LEFT_CONF -> "false",
+      TESTING_PUSHDOWN_RIGHT_CONF -> "true")
+    assertPreagg(query, conf2, checkLaForLeftJoin = false)
+  }
+
+  test("count * with pushdown on various sides") {
+    val query =
+      s"""
+         |  SELECT count(*), $tbl2.col2 from $tbl1 join $tbl2
+         |  on $tbl1.col2=$tbl2.col2 group by $tbl2.col2, 2*$tbl1.col3
+         |""".stripMargin
+    assertPreagg(query)
+
+    val conf1 = Map(
+      TESTING_PUSHDOWN_LEFT_CONF -> "true",
+      TESTING_PUSHDOWN_RIGHT_CONF -> "false")
+    assertPreagg(query, conf1, checkLaForRightJoin = false)
+
+    val conf2 = Map(
+      TESTING_PUSHDOWN_LEFT_CONF -> "false",
+      TESTING_PUSHDOWN_RIGHT_CONF -> "true")
+    assertPreagg(query, conf2, checkLaForLeftJoin = false)
+  }
+
+  Seq("min", "count", "sum").foreach { agExp =>
+    test(s"retain LA with $agExp should handle attributes with pushdown on various sides") {
+      // Following query will have only right side push down for both the joins,
+      val query =
+        s"""
+           | select $agExp($tblWithTypes1.col2), $agExp($tbl2.col3), $agExp($tbl1.col2),
+           | $agExp($tblWithTypes1.col2), $agExp($tblWithTypes1.col5), $agExp($tblWithTypes1.col3),
+           | 2*$tbl1.col1, 3*$tbl2.col2, 4*$tblWithTypes1.col4 from $tblWithTypes1 join
+           | ($tbl1 join $tbl2 on $tbl1.col1 = $tbl2.col3)
+           | on $tblWithTypes1.col4 = $tbl2.col1
+           | group by 2*$tbl1.col1, 3*$tbl2.col2, 4*$tblWithTypes1.col4
+           |""".stripMargin
+
+      val optimizedPlan1 = assertPreagg(query)
+      assert(isProjectRetainedBetweenLAAndJoin(optimizedPlan1))
+
+      val conf1 = Map(
+        TESTING_PUSHDOWN_LEFT_CONF -> "false",
+        TESTING_PUSHDOWN_RIGHT_CONF -> "true")
+      val optimizedPlan2 = assertPreagg(query, additionalConfs = conf1, checkLaForLeftJoin = false)
+      assert(isProjectRetainedBetweenLAAndJoin(optimizedPlan2))
+
+      val conf2 = Map(
+        TESTING_PUSHDOWN_LEFT_CONF -> "true",
+        TESTING_PUSHDOWN_RIGHT_CONF -> "false")
+      assertPreagg(query, additionalConfs = conf2, checkLaForRightJoin = false)
+    }
+  }
+
+  Seq("min", "count", "sum").foreach { agExp =>
+    test(s"agg $agExp with pushdown on various sides when incoming data has all null rows") {
+      val query =
+        s"""
+           |  SELECT $agExp($tbl1.col3), $agExp($tbl2.col3), $tbl2.col2
+           |  from $tbl1 join $tbl2 on $tbl1.col1=$tbl2.col1
+           |  where $tbl2.col1 % 100 = 84 group by $tbl2.col2
+           |""".stripMargin
+
+      // $tbl2.col1 % 100 = 84 will return all rows where col2 and col3 is null
+
+      assertPreagg(query)
+
+      val conf1 = Map(
+        TESTING_PUSHDOWN_LEFT_CONF -> "true",
+        TESTING_PUSHDOWN_RIGHT_CONF -> "false")
+      assertPreagg(query, conf1, checkLaForRightJoin = false)
+
+      val conf2 = Map(
+        TESTING_PUSHDOWN_LEFT_CONF -> "false",
+        TESTING_PUSHDOWN_RIGHT_CONF -> "true")
+      assertPreagg(query, conf2, checkLaForLeftJoin = false)
+    }
   }
 
   /**
@@ -771,6 +855,7 @@ class PreaggregationSuite extends QueryTest with SharedSQLContext {
       expectedResult: SparkPlan,
       sort: Boolean = false): Unit = {
     assert(actualResult.executeCollectPublic().nonEmpty)
+    assert(expectedResult.executeCollectPublic().nonEmpty)
     SQLTestUtils.compareAnswers(actualResult.executeCollectPublic(),
       expectedResult.executeCollectPublic(), sort).map { errorMessage =>
       val newErrorMessage = errorMessage
