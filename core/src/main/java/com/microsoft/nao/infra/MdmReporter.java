@@ -18,7 +18,7 @@ public class MdmReporter extends ScheduledReporter {
     private static final String APP_NAME_UNKNOWN = "UnKnown";
 
     private final Mdm mdm;
-    private final String applicationName;
+    private String applicationName;
 
     /**
      * Returns a new {@link Builder} for {@link MdmReporter}.
@@ -124,7 +124,6 @@ public class MdmReporter extends ScheduledReporter {
             MetricFilter filter) {
         super(registry, "mdm-reporter", filter, rateUnit, durationUnit);
         this.mdm = mdm;
-        this.applicationName = getApplicationName();
     }
 
     @Override
@@ -138,14 +137,23 @@ public class MdmReporter extends ScheduledReporter {
     }
 
     private String getApplicationName() {
-        SparkEnv sparkEnv = SparkEnv.get();
+        if (applicationName == null) {
+            SparkEnv sparkEnv = SparkEnv.get();
 
-        if (sparkEnv == null) {
-            logger.warn("SparkEnv is null when get app name");
-            return APP_NAME_UNKNOWN;
+            if (sparkEnv == null) {
+                logger.warn("SparkEnv is null when get app name");
+                return APP_NAME_UNKNOWN;
+            }
+
+            String applicationName = sparkEnv.conf().get("spark.app.name", null);
+            if (applicationName == null) {
+                return APP_NAME_UNKNOWN;
+            }
+
+            this.applicationName = applicationName;
         }
 
-        return sparkEnv.conf().get("spark.app.name", APP_NAME_UNKNOWN);
+        return applicationName;
     }
 
     private void printGauges(SortedMap<String, Gauge> metrics) {
@@ -174,7 +182,7 @@ public class MdmReporter extends ScheduledReporter {
         String executorId = sections[1];
         String metricName = MetricRegistry.name("", Arrays.copyOfRange(sections, 2, sections.length));
 
-        String[] dimensionsValue = {applicationId, applicationName, executorId};
+        String[] dimensionsValue = {applicationId, getApplicationName(), executorId};
         this.mdm.ReportMetric3D(metricName, dimensions, dimensionsValue, value);
     }
 
