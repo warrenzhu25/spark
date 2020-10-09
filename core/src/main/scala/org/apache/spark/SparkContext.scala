@@ -248,6 +248,7 @@ class SparkContext(config: SparkConf) extends Logging {
   def deployMode: String = _conf.get(SUBMIT_DEPLOY_MODE)
   def appName: String = _conf.get("spark.app.name")
   def subCluster: String = _conf.getOption("spark.hadoop.default-subcluster").getOrElse("")
+  def tags: String = _conf.getOption("spark.yarn.tags").getOrElse("")
 
   private[spark] def isEventLogEnabled: Boolean = _conf.get(EVENT_LOG_ENABLED)
   private[spark] def eventLogDir: Option[URI] = _eventLogDir
@@ -397,7 +398,7 @@ class SparkContext(config: SparkConf) extends Logging {
 
     // log out spark.app.name in the Spark driver logs
     logInfo(s"Submitted application: $appName")
-
+    logInfo(s"tags: $tags")
     // System property spark.yarn.app.id must be set if user code ran by AM on a YARN cluster
     if (master == "yarn" && deployMode == "cluster" && !_conf.contains("spark.yarn.app.id")) {
       throw new SparkException("Detected yarn cluster mode, but isn't running on a cluster. " +
@@ -470,7 +471,8 @@ class SparkContext(config: SparkConf) extends Logging {
       if (conf.get(UI_ENABLED)) {
         Some(SparkUI.create(Some(this), _statusStore, _conf,
           _env.securityManager, appName, "", startTime,
-          subCluster = Some(subCluster), queue = Some(conf.get("spark.yarn.queue", "default"))))
+          subCluster = Some(subCluster), queue = Some(conf.get("spark.yarn.queue", "default")),
+          tags = Some(tags)))
       } else {
         // For tests, do not enable the UI
         None
@@ -2455,7 +2457,8 @@ class SparkContext(config: SparkConf) extends Logging {
     // the cluster manager to get an application ID (in case the cluster manager provides one).
     listenerBus.post(SparkListenerApplicationStart(appName, Some(applicationId),
       startTime, sparkUser, applicationAttemptId, schedulerBackend.getDriverLogUrls,
-      schedulerBackend.getDriverAttributes, Some(subCluster), Some(config.get("spark.yarn.queue", "default"))))
+      schedulerBackend.getDriverAttributes, Some(subCluster),
+      Some(config.get("spark.yarn.queue", "default")),Some(tags)))
     _driverLogger.foreach(_.startSync(_hadoopConfiguration))
   }
 

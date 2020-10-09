@@ -132,7 +132,8 @@ private[spark] class AppStatusListener(
       event.subCluster,
       event.queue,
       None,
-      None)
+      None,
+      event.tags)
 
     kvstore.write(new ApplicationInfoWrapper(appInfo))
     kvstore.write(appSummary)
@@ -194,7 +195,8 @@ private[spark] class AppStatusListener(
       appInfo.subCluster,
       appInfo.queue,
       None,
-      None)
+      None,
+      appInfo.tags)
     kvstore.write(new ApplicationInfoWrapper(appInfo))
   }
 

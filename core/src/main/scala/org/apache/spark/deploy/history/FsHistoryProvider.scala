@@ -380,7 +380,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     val ui = SparkUI.create(None, new HistoryAppStatusStore(conf, kvstore), conf, secManager,
       app.info.name, HistoryServer.getAttemptURI(appId, attempt.info.attemptId),
       attempt.info.startTime.getTime(), attempt.info.appSparkVersion, app.info.subCluster,
-      app.info.queue, app.info.finalStatus, app.info.applicationType)
+      app.info.queue, app.info.finalStatus, app.info.applicationType, app.info.tags)
 
     // place the tab in UI based on the display order
     loadPlugins().toSeq.sortBy(_.displayOrder).foreach(_.setupUI(ui))
@@ -724,6 +724,8 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     val appName = new String(xattrs.get("user.appName"))
     val subcluster = new String(xattrs.get("user.subcluster"))
     val applicationType = new String(xattrs.get("user.appType"))
+    val queue = new String(xattrs.get("user.queue"))
+    val tags = new String(xattrs.get("user.tags"))
 
     val attemptId = new String(xattrs.get("user.attemptId"))
     val startTime = new String(xattrs.get("user.startTime")).toLong
@@ -756,7 +758,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       path.toString, 0, Some(0), Some(adminAcls), Some(viewAcls),
       Some(adminAclsGroups), Some(viewAclsGroups))
     val applicationInfo = new ApplicationInfo(appId, appName, None, None, None, None, Nil,
-      Some(subcluster), finalStatus, Some(applicationType))
+      Some(subcluster), Some(queue), finalStatus, Some(applicationType), Some(tags))
     Some(new ApplicationInfoWrapper(applicationInfo, List(attemptInfoWrapper)))
   } catch {
     case _: Throwable =>
@@ -1453,6 +1455,7 @@ private[history] class AppListingListener(
     app.name = event.appName
     app.subCluster = event.subCluster
     app.queue = event.queue
+    app.tags = event.tags
 
     attempt.attemptId = event.appAttemptId
     attempt.startTime = new Date(event.time)
@@ -1529,6 +1532,8 @@ private[history] class AppListingListener(
     app.id = appInfo.info.id
     app.name = appInfo.info.name
     app.subCluster = appInfo.info.subCluster
+    app.queue = appInfo.info.queue
+    app.tags = appInfo.info.tags
 
     app.applicationType = appInfo.info.applicationType
     app.finalStatus = appInfo.info.finalStatus
@@ -1569,6 +1574,7 @@ private[history] class AppListingListener(
     var queue: Option[String] = None
     var finalStatus: Option[String] = None
     var applicationType: Option[String] = None
+    var tags: Option[String] = None
     var coresGranted: Option[Int] = None
     var maxCores: Option[Int] = None
     var coresPerExecutor: Option[Int] = None
@@ -1576,7 +1582,7 @@ private[history] class AppListingListener(
 
     def toView(): ApplicationInfoWrapper = {
       val apiInfo = ApplicationInfo(id, name, coresGranted, maxCores,
-        coresPerExecutor, memoryPerExecutorMB, Nil, subCluster, queue, finalStatus, applicationType)
+        coresPerExecutor, memoryPerExecutorMB, Nil, subCluster, queue, finalStatus, applicationType, tags)
       new ApplicationInfoWrapper(apiInfo, List(attempt.toView()))
     }
 

@@ -44,7 +44,8 @@ case class ApplicationInfo private[spark](
     subCluster: Option[String] = None,
     queue: Option[String] = None,
     finalStatus: Option[String] = None,
-    applicationType: Option[String] = None)
+    applicationType: Option[String] = None,
+    tags: Option[String] = None)
 
 @JsonIgnoreProperties(
   value = Array("startTimeEpoch", "endTimeEpoch", "lastUpdatedEpoch"),
