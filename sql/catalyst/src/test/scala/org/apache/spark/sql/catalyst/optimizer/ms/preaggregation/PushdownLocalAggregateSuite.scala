@@ -438,10 +438,11 @@ class PushdownLocalAggregateSuite extends PlanTest with StatsEstimationTestBase 
   }
 
   test("canBroadcast") {
-    val join = t1.join(t2, Inner, Some(nameToAttr("t1.key") * 2 === nameToAttr("t2.key"))).analyze
-    assert(join.stats.sizeInBytes > conf.autoBroadcastJoinThreshold)
-    assert(!join.stats.hints.broadcast)
-    assert(!canBroadcast(join))
+    withSQLConf(
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1") {
+      val join = t1.join(t2, Inner, Some(nameToAttr("t1.key") * 2 === nameToAttr("t2.key"))).analyze
+      assert(!canBroadcast(Inner, join.asInstanceOf[Join].left, join.asInstanceOf[Join].right))
+    }
   }
 
   test("isDeterministic") {

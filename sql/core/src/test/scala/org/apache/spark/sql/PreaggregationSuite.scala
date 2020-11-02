@@ -147,19 +147,13 @@ class PreaggregationSuite extends QueryTest with SharedSQLContext {
     assertPreagg(query, checkLaForLeftJoin = false, checkLaForRightJoin = false)
   }
 
-  Seq(LeftOuter, RightOuter, FullOuter, Cross, LeftSemi, LeftAnti).foreach { join =>
-    test(s"non inner joins shouldn't trigger optimization (join = $join)") {
-      val query = if (join != LeftSemi && join != LeftAnti) {
+  Seq(LeftOuter, RightOuter, FullOuter, Cross).foreach { join =>
+    test(s"(join = $join) shouldn't trigger optimization") {
+      val query =
         s"""
            | SELECT sum($tbl1.col1), $tbl2.col2 from $tbl1 ${join.sql}
            | join $tbl2 on $tbl1.col2=$tbl2.col2 group by $tbl2.col2
            |""".stripMargin
-      } else {
-        s"""
-           | select sum(col1) from $tbl1 ${join.sql} join $tbl2 on $tbl1.col1 = $tbl2.col2
-           | group by col2
-           |""".stripMargin
-      }
       assertPreagg(query, checkLaForLeftJoin = false, checkLaForRightJoin = false)
     }
   }
@@ -745,6 +739,70 @@ class PreaggregationSuite extends QueryTest with SharedSQLContext {
          | on $tbl1.col2=$tbl2.col2) group by apple
          |""".stripMargin
     assertPreagg(query)
+  }
+
+  test(s"count * with pushdown on various sides with left semi join") {
+    val query =
+      s"""
+         |  SELECT count(*), $tbl1.col2 from $tbl1 left semi join $tbl2
+         |  on $tbl1.col2=$tbl2.col2 group by $tbl1.col2, 2*$tbl1.col3
+         |""".stripMargin
+
+    val conf = Map(
+      TESTING_PUSHDOWN_LEFT_CONF -> "true",
+      TESTING_PUSHDOWN_RIGHT_CONF -> "true")
+    assertPreagg(query, conf)
+
+    val conf1 = Map(
+      TESTING_PUSHDOWN_LEFT_CONF -> "true",
+      TESTING_PUSHDOWN_RIGHT_CONF -> "false")
+    assertPreagg(query, conf1, checkLaForRightJoin = false)
+
+    val conf2 = Map(
+      TESTING_PUSHDOWN_LEFT_CONF -> "false",
+      TESTING_PUSHDOWN_RIGHT_CONF -> "true")
+    assertPreagg(query, conf2, checkLaForLeftJoin = false)
+  }
+
+  Seq("left semi", "left anti").foreach { joinType =>
+    test(s"preaggregation push down below $joinType join having count with multiple attributes") {
+      val conf = Map(
+        SQLConf.PREAGGREGATION_CBO_ENABLED.key -> "true",
+        SQLConf.PREAGGREGATION_CBO_SHUFFLE_JOIN_PUSHDOWN_THRESHOLD.key -> "5")
+      val query =
+        s"""
+           | SELECT count($tbl1.col1, $tbl1.col2), $tbl1.col3 from $tbl1 $joinType join $tbl2
+           | on $tbl1.col2=$tbl2.col2 group by $tbl1.col3
+           |""".stripMargin
+      assertPreagg(query, additionalConfs = conf, checkLaForLeftJoin = false)
+    }
+  }
+
+  Seq("min", "sum", "count").foreach { aggFunc =>
+    Seq("left semi", "left anti").foreach { joinType =>
+      test(s"preaggregation push down below $joinType join with aggregate function $aggFunc") {
+        val query =
+          s"""
+             | SELECT $aggFunc($tbl1.col1), $tbl1.col3 from $tbl1 $joinType join $tbl2
+             | on $tbl1.col1=$tbl2.col2 group by $tbl1.col3
+             |""".stripMargin
+
+        val conf = Map(
+          TESTING_PUSHDOWN_LEFT_CONF -> "true",
+          TESTING_PUSHDOWN_RIGHT_CONF -> "true")
+        assertPreagg(query, conf)
+
+        val conf1 = Map(
+          TESTING_PUSHDOWN_LEFT_CONF -> "true",
+          TESTING_PUSHDOWN_RIGHT_CONF -> "false")
+        assertPreagg(query, conf1, checkLaForRightJoin = false)
+
+        val conf2 = Map(
+          TESTING_PUSHDOWN_LEFT_CONF -> "false",
+          TESTING_PUSHDOWN_RIGHT_CONF -> "true")
+        assertPreagg(query, conf2, checkLaForLeftJoin = false)
+      }
+    }
   }
 
   private def assertPreagg(

@@ -17,13 +17,12 @@
 
 package org.apache.spark.sql.catalyst.optimizer.ms.preaggregation
 
-import org.apache.spark.SparkException
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate._
 import org.apache.spark.sql.catalyst.optimizer.ColumnPruning
 import org.apache.spark.sql.catalyst.planning.ExtractEquiJoinKeys
-import org.apache.spark.sql.catalyst.plans.Inner
+import org.apache.spark.sql.catalyst.plans.{ExistenceJoin, Inner, InnerLike, JoinType, LeftAnti, LeftOuter, LeftSemi, RightOuter}
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.internal.SQLConf
@@ -257,13 +256,15 @@ object PushdownLocalAggregate extends Rule[LogicalPlan] with Logging {
     }
     val join = localAggregate.child.asInstanceOf[Join]
 
-    // Currently we support only Inner Join
-    if (join.joinType != Inner) {
+    // Currently we support only Inner, Left Semi and Left Anti join
+    val supportedJoinTypes = Seq(Inner, LeftSemi, LeftAnti)
+    if (!supportedJoinTypes.contains(join.joinType)) {
+      PreAggregationMetricSource.recordUnsupportedJoinType(join.joinType.sql)
       return None
     }
 
     // Currently we don't do Aggregate pushdown via broadcast join
-    val isBroadcast = canBroadcast(join.right) || canBroadcast(join.left)
+    val isBroadcast = canBroadcast(join.joinType, join.left, join.right)
     if (isBroadcast) {
       logDebug("Not pushing down as one of the side is broadcastable")
       return None
@@ -288,12 +289,16 @@ object PushdownLocalAggregate extends Rule[LogicalPlan] with Logging {
     }
 
     join match {
-      case ExtractEquiJoinKeys(Inner, leftKeys, rightKeys, None, left, right, hint) =>
+      case ExtractEquiJoinKeys(_, leftKeys, rightKeys, None, left, right, hint) =>
         val realAggExprsLeft = getAllAggregateExpressions(aggregateExpressionsLeft)
         val realAggExprsRight = getAllAggregateExpressions(aggregateExpressionsRight)
 
-        val needCountLeft = realAggExprsRight.exists(aggregateFunctionNeedsCountFromOtherSide)
-        val needCountRight = realAggExprsLeft.exists(aggregateFunctionNeedsCountFromOtherSide)
+        // For left semi and anti join only one row comes in output for each matching row
+        // so count from other side is not needed
+        val needCountLeft = realAggExprsRight.exists(
+          aggregateFunctionNeedsCountFromOtherSide) && join.joinType == Inner
+        val needCountRight = realAggExprsLeft.exists(
+          aggregateFunctionNeedsCountFromOtherSide) && join.joinType == Inner
 
         val leftAliasAggregateCount = if (needCountLeft) {
           Some(Alias(Sum(Literal(1)).toAggregateExpression(), "partialCountLeft")())
@@ -551,11 +556,11 @@ object PushdownLocalAggregate extends Rule[LogicalPlan] with Logging {
     val joinHint = join.hint
 
     val newJoin = if (shouldPushThroughLeft && shouldPushThroughRight) {
-      Join(newLeftLocalAggregate, newRightLocalAggregate, Inner, joinCondition, joinHint)
+      Join(newLeftLocalAggregate, newRightLocalAggregate, join.joinType, joinCondition, joinHint)
     } else if (shouldPushThroughLeft) {
-      Join(newLeftLocalAggregate, join.right, Inner, joinCondition, joinHint)
+      Join(newLeftLocalAggregate, join.right, join.joinType, joinCondition, joinHint)
     } else {
-      Join(join.left, newRightLocalAggregate, Inner, joinCondition, joinHint)
+      Join(join.left, newRightLocalAggregate, join.joinType, joinCondition, joinHint)
     }
     (Some(newJoin), shouldPushThroughLeft, shouldPushThroughRight)
   }
@@ -661,22 +666,19 @@ object PushdownLocalAggregate extends Rule[LogicalPlan] with Logging {
   private def resultOfAggExpAfterJoinForNonPushdown(
       aggExp: AggregateExpression,
       countFromOtherSide: Option[Attribute]): Expression = {
-    // Ideally this check should never fail as pushDownLocalAggregateThroughJoin makes sure
-    // that countFromOtherSide is non empty when aggExp is Sum/Count
-    if (aggregateFunctionNeedsCountFromOtherSide(aggExp) && countFromOtherSide.isEmpty) {
-      throw new SparkException("Count from other side should be present")
-    }
+    // countFromOtherSide can be empty when aggExp is Sum/Count if join type is non inner
     val result = aggExp.aggregateFunction match {
-      case sum: Sum =>
+      case sum: Sum if countFromOtherSide.isDefined =>
         val partialCount = castIfNeeded(countFromOtherSide.get, sum.child.dataType)
         Multiply(partialCount, sum.child)
       case c: Count =>
         val nullableChildren = c.children.filter(_.nullable)
+        val nonNullOutput = countFromOtherSide.getOrElse(Literal(1L))
         if (nullableChildren.isEmpty) {
-          countFromOtherSide.get
+          nonNullOutput
         } else {
           val outputIfNull = Literal(0L)
-          If(nullableChildren.map(IsNull).reduce(Or), outputIfNull, countFromOtherSide.get)
+          If(nullableChildren.map(IsNull).reduce(Or), outputIfNull, nonNullOutput)
         }
       case other =>
         other.children.head
@@ -747,20 +749,47 @@ object PushdownLocalAggregate extends Rule[LogicalPlan] with Logging {
     !unsupportedAggregateExpressionsPresent
   }
 
+  // similar to [[SparkStrategies.JoinSelection.canBuildLeft]]
+  private def canBuildLeft(joinType: JoinType): Boolean = joinType match {
+    case _: InnerLike | RightOuter => true
+    case _ => false
+  }
+
+  // similar to [[SparkStrategies.JoinSelection.canBuildRight]]
+  private def canBuildRight(joinType: JoinType): Boolean = joinType match {
+    case _: InnerLike | LeftOuter | LeftSemi | LeftAnti | _: ExistenceJoin => true
+    case _ => false
+  }
+
+  // similar to [[SparkStrategies.JoinSelection.canBroadcast]]
   // checks whether the sizeInBytes of a plan is within autoBroadcastJoinThreshold
   private def canBroadcastBySize(plan: LogicalPlan): Boolean = {
     plan.stats.sizeInBytes >= 0 &&
       plan.stats.sizeInBytes <= SQLConf.get.autoBroadcastJoinThreshold
   }
 
-  // checks whether broadcast hint is present in stats of plan
-  private def canBroadcastByHints(plan: LogicalPlan): Boolean = {
-     plan.stats.hints.broadcast
+  // similar to [[SparkStrategies.JoinSelection.canBroadcastBySizes]]
+  // checks whether left or right plan can be broadcasted using size
+  private def canBroadcastBySizes(joinType: JoinType, left: LogicalPlan,
+      right: LogicalPlan): Boolean = {
+    val buildLeft = canBuildLeft(joinType) && canBroadcastBySize(left)
+    val buildRight = canBuildRight(joinType) && canBroadcastBySize(right)
+    buildLeft || buildRight
+  }
+
+  // similar to [[SparkStrategies.JoinSelection.canBroadcastByHints]]
+  // checks whether broadcast hint is present in stats of left or right plan
+  private def canBroadcastByHints(joinType: JoinType, left: LogicalPlan,
+      right: LogicalPlan): Boolean = {
+    val buildLeft = canBuildLeft(joinType) && left.stats.hints.broadcast
+    val buildRight = canBuildRight(joinType) && right.stats.hints.broadcast
+    buildLeft || buildRight
   }
 
   // checks if the plan can be broadcasted using hints or size
-  private[preaggregation] def canBroadcast(plan: LogicalPlan): Boolean = {
-    canBroadcastByHints(plan) || canBroadcastBySize(plan)
+  private[preaggregation] def canBroadcast(joinType: JoinType, left: LogicalPlan,
+      right: LogicalPlan): Boolean = {
+    canBroadcastByHints(joinType, left, right) || canBroadcastBySizes(joinType, left, right)
   }
 
   /**
