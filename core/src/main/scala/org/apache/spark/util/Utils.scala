@@ -2420,8 +2420,23 @@ private[spark] object Utils extends Logging {
    * overridden by the `SPARK_USER` environment variable.
    */
   def getCurrentUserName(): String = {
-    Option(System.getenv("SPARK_USER"))
-      .getOrElse(UserGroupInformation.getCurrentUser().getShortUserName())
+    getCurrentUgi().getShortUserName()
+  }
+
+  def getCurrentUgi(): UserGroupInformation = {
+    val effectiveUser = System.getenv("SPARK_USER")
+    val currentUgi = UserGroupInformation.getCurrentUser()
+
+    if (effectiveUser == null ||
+      effectiveUser.equals(currentUgi.getUserName())) {
+      return currentUgi
+    } else {
+      val proxyUser = UserGroupInformation.createProxyUser(effectiveUser, currentUgi)
+      // Also clone Hadoop Delegation Token to effectiveUser, as Hadoop RPC client
+      // does not pick the Hadoop Delegation Token from realUser (currentUgi).
+      proxyUser.addCredentials(currentUgi.getCredentials())
+      return proxyUser
+    }
   }
 
   val EMPTY_USER_GROUPS = Set.empty[String]
