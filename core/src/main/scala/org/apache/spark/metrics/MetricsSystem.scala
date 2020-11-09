@@ -28,7 +28,7 @@ import org.eclipse.jetty.servlet.ServletContextHandler
 import org.apache.spark.{SecurityManager, SparkConf}
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config._
-import org.apache.spark.metrics.sink.{MetricsServlet, PrometheusServlet, Sink}
+import org.apache.spark.metrics.sink.{MdmSink, MetricsServlet, PrometheusServlet, Sink}
 import org.apache.spark.metrics.source.{Source, StaticSources}
 import org.apache.spark.util.Utils
 
@@ -191,6 +191,8 @@ private[spark] class MetricsSystem private (
   }
 
   private def registerSinks(): Unit = {
+    registerInternalSink()
+
     val instConfig = metricsConfig.getInstance(instance)
     val sinkConfigs = metricsConfig.subProperties(instConfig, MetricsSystem.SINK_REGEX)
 
@@ -224,6 +226,17 @@ private[spark] class MetricsSystem private (
         }
       }
     }
+  }
+
+  /** Registers an internal MDM sink to track job performance and stability */
+  private def registerInternalSink() {
+    val properties = new Properties()
+    properties.setProperty(MdmSink.MDM_KEY_PERIOD, "5")
+    properties.setProperty(MdmSink.MDM_KEY_UNIT, "MINUTES")
+    properties.setProperty(MdmSink.MDM_KEY_MONITORING_ACCOUNT, "mtp-spark")
+    properties.setProperty(MdmSink.MDM_KEY_METRIC_PATTERN, "^.*\\.driver\\.appStatus\\..*$")
+
+    sinks += new MdmSink(properties, registry, securityMgr)
   }
 }
 

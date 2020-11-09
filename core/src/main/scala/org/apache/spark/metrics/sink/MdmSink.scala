@@ -28,13 +28,7 @@ import org.apache.spark.SecurityManager
 
 class MdmSink(val property: Properties, val registry: MetricRegistry,
               securityMgr: SecurityManager) extends Sink {
-  val MDM_DEFAULT_PERIOD = 1
-  val MDM_DEFAULT_UNIT = "MINUTES"
-
-  val MDM_KEY_MONITORING_ACCOUNT = "monitoringAccount"
-  val MDM_KEY_METRIC_NAMESPACE = "metricNamespace"
-  val MDM_KEY_PERIOD = "period"
-  val MDM_KEY_UNIT = "unit"
+  import MdmSink._
 
   val monitoringAccount = Option(property.getProperty(MDM_KEY_MONITORING_ACCOUNT)) match {
     case Some(s) => s
@@ -76,4 +70,15 @@ class MdmSink(val property: Properties, val registry: MetricRegistry,
   override def report() {
     reporter.report()
   }
+}
+
+object MdmSink {
+  val MDM_DEFAULT_PERIOD = 1
+  val MDM_DEFAULT_UNIT = "MINUTES"
+
+  val MDM_KEY_MONITORING_ACCOUNT = "monitoringAccount"
+  val MDM_KEY_METRIC_NAMESPACE = "metricNamespace"
+  val MDM_KEY_PERIOD = "period"
+  val MDM_KEY_UNIT = "unit"
+  val MDM_KEY_METRIC_PATTERN = "metricPattern"
 }
