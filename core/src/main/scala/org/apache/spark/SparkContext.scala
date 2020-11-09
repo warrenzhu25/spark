@@ -18,7 +18,8 @@
 package org.apache.spark
 
 import java.io._
-import java.net.URI
+import java.net.{JarURLConnection, URI}
+import java.nio.file.Paths
 import java.util.{Arrays, Locale, Properties, ServiceLoader, UUID}
 import java.util.concurrent.{ConcurrentHashMap, ConcurrentMap}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference}
@@ -2714,7 +2715,8 @@ object SparkContext extends Logging {
       if (uriStr.startsWith("jar:file:")) {
         // URI will be of the form "jar:file:/path/foo.jar!/package/cls.class",
         // so pull out the /path/foo.jar
-        Some(uriStr.substring("jar:file:".length, uriStr.indexOf('!')))
+        Some(Paths.get(uri.openConnection().asInstanceOf[JarURLConnection].getJarFileURL.toURI)
+          .toString)
       } else {
         None
       }
