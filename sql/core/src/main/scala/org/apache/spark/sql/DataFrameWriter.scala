@@ -17,14 +17,11 @@
 
 package org.apache.spark.sql
 
-import java.util.concurrent.TimeUnit
-import java.util.{Locale, Properties, UUID}
+import java.util.{Locale, Properties}
 
-import org.apache.hadoop.fs.Path
-import org.apache.hadoop.util.Time
+import scala.collection.JavaConverters._
 
 import org.apache.spark.annotation.Stable
-import scala.collection.JavaConverters._
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.analysis.{EliminateSubqueryAliases, NoSuchTableException, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.catalog._
@@ -39,9 +36,6 @@ import org.apache.spark.sql.execution.command.DDLUtils
 import org.apache.spark.sql.execution.datasources.{CreateTable, DataSource, DataSourceUtils, LogicalRelation}
 import org.apache.spark.sql.execution.datasources.v2._
 import org.apache.spark.sql.internal.SQLConf.PartitionOverwriteMode
-import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2Relation, DataSourceV2Utils, WriteToDataSourceV2}
-import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.pii.{DataType, JdbcMetadataWriter, PIIConf, PIIMetadataWriter}
 import org.apache.spark.sql.sources.BaseRelation
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
@@ -53,12 +47,9 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
  * @since 1.4.0
  */
 @Stable
-final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
+class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
 
-  private val df = ds.toDF()
-
-  // Visible for testing
-  private [sql] var metadataWriter: PIIMetadataWriter = JdbcMetadataWriter
+  private[sql] val df: DataFrame = ds.toDF()
 
   /**
    * Specifies the behavior when data or table already exists. Options include:
@@ -308,7 +299,6 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
         "write files of Hive data source directly.")
     }
 
-    assertPIIDataPath()
     assertNotBucketed("save")
 
     val maybeV2Provider = lookupV2Provider()
@@ -408,8 +398,6 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
     } else {
       saveToV1Source()
     }
-
-    writePIIMetadata()
   }
 
   private def saveToV1Source(): Unit = {
@@ -555,79 +543,6 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
   private def assertNotPartitioned(operation: String): Unit = {
     if (partitioningColumns.isDefined) {
       throw new AnalysisException(s"'$operation' does not support partitioning")
-    }
-  }
-
-  private def assertPIIDataPath(): Unit = {
-    if (!PIIConf.isPIISupported) {
-      return
-    }
-
-    val usePII = PIIConf.isUsePII(df.sparkSession.conf)
-
-    if (!usePII) {
-      return
-    }
-
-    val dataPath = PIIConf.piiDataPath
-
-    if (this.source != "parquet" && this.source != "caspian") {
-      return
-    }
-
-    val pathOpt = this.extraOptions.get("path")
-    if (pathOpt.isEmpty) {
-      return
-    }
-
-    val dataTypeOpt = this.extraOptions.get("dataType")
-    if (dataTypeOpt.isEmpty) {
-      throw new AnalysisException("Option 'dataType' must be provided.")
-    }
-
-    val dataType = toDataType(dataTypeOpt.get)
-
-    val isPIIData = dataType != DataType.NonPersonal
-    val isPIIPath = pathOpt.get.startsWith(dataPath)
-
-    if (isPIIData && !isPIIPath) {
-      throw new AnalysisException(s"PII data can only be saved in $dataPath." +
-        s" Current path is ${pathOpt.get}")
-    }
-  }
-
-  private def writePIIMetadata(): Unit = {
-    if (!PIIConf.isPIISupported) {
-      return
-    }
-
-    val pathOpt = this.extraOptions.get("path")
-    val dataTypeOpt = this.extraOptions.get("dataType")
-
-    if (pathOpt.isEmpty || dataTypeOpt.isEmpty) {
-      return
-    }
-
-    val dataType = toDataType(dataTypeOpt.get)
-
-    if (dataType != DataType.NonPersonal) {
-      metadataWriter.write(pathOpt.get, dataType, mode)
-    }
-
-    if (dataType == DataType.LongTail) {
-      val path = new Path(pathOpt.get)
-      val fileSystem = path.getFileSystem(this.df.sparkSession.sparkContext.hadoopConfiguration)
-      val expiry = Time.now + TimeUnit.DAYS.toMillis(30)
-      fileSystem.setExpiry(path, expiry)
-    }
-  }
-
-  private def toDataType(dataType: String): DataType = {
-    try {
-      DataType.valueOf(dataType)
-    } catch {
-      case _: IllegalArgumentException =>
-        throw new AnalysisException(s"Invalid PII data type '$dataType'.")
     }
   }
 
@@ -789,8 +704,6 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
 
       case _ => createTable(tableIdent)
     }
-
-    writePIIMetadata()
   }
 
   private def createTable(tableIdent: TableIdentifier): Unit = {
@@ -1062,11 +975,11 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
   // Builder pattern config options
   ///////////////////////////////////////////////////////////////////////////////////////
 
-  private var source: String = df.sparkSession.sessionState.conf.defaultDataSourceName
+  private[sql] var source: String = df.sparkSession.sessionState.conf.defaultDataSourceName
 
-  private var mode: SaveMode = SaveMode.ErrorIfExists
+  private[sql] var mode: SaveMode = SaveMode.ErrorIfExists
 
-  private var extraOptions = CaseInsensitiveMap[String](Map.empty)
+  private[sql] var extraOptions = CaseInsensitiveMap[String](Map.empty)
 
   private var partitioningColumns: Option[Seq[String]] = None
 

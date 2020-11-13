@@ -46,6 +46,11 @@ object PIIConf extends Logging {
     .booleanConf
     .createWithDefault(false)
 
+  private val PII_CONTROL_ENV = SQLConf.buildStaticConf("spark.admin.pii.controlEnv")
+    .doc("Control environment")
+    .stringConf
+    .createOptional
+
   private val PII_DATA_PATH = SQLConf.buildStaticConf("spark.admin.pii.path")
     .doc("PII data path")
     .stringConf
@@ -67,7 +72,13 @@ object PIIConf extends Logging {
     .createOptional
 
   private val PII_OPTIONAL_CONFS: Seq[OptionalConfigEntry[String]] =
-    Seq(PII_DATA_PATH, PII_METADATA_DB_HOST, PII_METADATA_DB_NAME, PII_METADATA_DB_USER)
+    Seq(
+      PII_CONTROL_ENV,
+      PII_DATA_PATH,
+      PII_METADATA_DB_HOST,
+      PII_METADATA_DB_NAME,
+      PII_METADATA_DB_USER
+    )
 
   // User config
   private val USE_PII = SQLConf.buildConf("spark.pii.enabled")
@@ -89,27 +100,38 @@ object PIIConf extends Logging {
     supportPII
   }
 
-  private lazy val password: String = {
-    new String(SparkHadoopUtil.get.conf.getPassword("pii_metadata"))
+  def controlEnv: String = {
+    checkPiiSupport()
+    get(PII_CONTROL_ENV).get
   }
 
-  def piiDataPath = {
-    require(get(SUPPORT_PII), "piiDataPath can only be called when spark.admin.pii.support=true,")
+  def piiDataPath: String = {
+    checkPiiSupport()
     get(PII_DATA_PATH).get
   }
 
-  def metadataConnString = {
-    {
-      require(get(SUPPORT_PII), "metadataConnString can only be called when spark.admin.pii.support=true,")
+  def metadataDbUrl: String = {
+    checkPiiSupport()
 
-      val hostName = get(PII_METADATA_DB_HOST).get
-      val dbName = get(PII_METADATA_DB_NAME).get
-      val user = get(PII_METADATA_DB_USER).get
+    val hostName = get(PII_METADATA_DB_HOST).get
+    val dbName = get(PII_METADATA_DB_NAME).get
 
-      s"jdbc:sqlserver://$hostName:1433;database=$dbName;user=$user;" +
-        s"password=$password;encrypt=true;" +
-        s"hostNameInCertificate=*.database.windows.net;loginTimeout=30;"
-    }
+    s"jdbc:sqlserver://$hostName:1433;database=$dbName;encrypt=true;" +
+      s"hostNameInCertificate=*.database.windows.net;loginTimeout=30;"
+  }
+
+  def metadataDbUser: String = {
+    checkPiiSupport()
+    get(PII_METADATA_DB_USER).get
+  }
+
+  def metadataDbPassword: String = {
+    checkPiiSupport()
+    new String(SparkHadoopUtil.get.conf.getPassword("pii_metadata"))
+  }
+
+  private def checkPiiSupport(): Unit = {
+    require(get(SUPPORT_PII), "PII support must be enabled")
   }
 
   def requireConfDefined(entry: OptionalConfigEntry[String]): Unit = {

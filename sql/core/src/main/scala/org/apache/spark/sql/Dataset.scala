@@ -58,6 +58,8 @@ import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2ScanRelation, 
 import org.apache.spark.sql.execution.python.EvaluatePython
 import org.apache.spark.sql.execution.stat.StatFunctions
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.pii.PIIConf.isPIISupported
+import org.apache.spark.sql.pii.PIIDataFrameWriter
 import org.apache.spark.sql.streaming.DataStreamWriter
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.SchemaUtils
@@ -3328,7 +3330,8 @@ class Dataset[T] private[sql](
       logicalPlan.failAnalysis(
         "'write' can not be called on streaming Dataset/DataFrame")
     }
-    new DataFrameWriter[T](this)
+    if (isPIISupported) PIIDataFrameWriter(this)
+    else new DataFrameWriter[T](this)
   }
 
   /**

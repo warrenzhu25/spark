@@ -17,39 +17,29 @@
 
 package org.apache.spark.sql
 
-import java.util.Locale
-import java.util.Properties
+import java.util.{Locale, Properties}
 
 import scala.collection.JavaConverters._
 
 import com.fasterxml.jackson.databind.ObjectMapper
-import org.apache.spark.Partition
 
+import org.apache.spark.Partition
 import org.apache.spark.annotation.Stable
 import org.apache.spark.api.java.JavaRDD
 import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.catalyst.csv.CSVHeaderChecker
-import org.apache.spark.sql.catalyst.csv.CSVOptions
-import org.apache.spark.sql.catalyst.csv.UnivocityParser
+import org.apache.spark.sql.catalyst.csv.{CSVHeaderChecker, CSVOptions, UnivocityParser}
 import org.apache.spark.sql.catalyst.expressions.ExprUtils
-import org.apache.spark.sql.catalyst.json.CreateJacksonParser
-import org.apache.spark.sql.catalyst.json.JSONOptions
-import org.apache.spark.sql.catalyst.json.JacksonParser
-import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
-import org.apache.spark.sql.catalyst.util.FailureSafeParser
-import org.apache.spark.sql.connector.catalog.CatalogV2Util
-import org.apache.spark.sql.connector.catalog.SupportsCatalogOptions
-import org.apache.spark.sql.connector.catalog.SupportsRead
+import org.apache.spark.sql.catalyst.json.{CreateJacksonParser, JacksonParser, JSONOptions}
+import org.apache.spark.sql.catalyst.util.{CaseInsensitiveMap, FailureSafeParser}
+import org.apache.spark.sql.connector.catalog.{CatalogV2Util, SupportsCatalogOptions, SupportsRead}
 import org.apache.spark.sql.connector.catalog.TableCapability._
 import org.apache.spark.sql.execution.command.DDLUtils
 import org.apache.spark.sql.execution.datasources.DataSource
 import org.apache.spark.sql.execution.datasources.csv._
 import org.apache.spark.sql.execution.datasources.jdbc._
 import org.apache.spark.sql.execution.datasources.json.TextInputJsonDataSource
-import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
-import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Utils
-import org.apache.spark.sql.pii.PIIConf
+import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2Relation, DataSourceV2Utils}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.unsafe.types.UTF8String
@@ -61,7 +51,7 @@ import org.apache.spark.unsafe.types.UTF8String
  * @since 1.4.0
  */
 @Stable
-class DataFrameReader private[sql](sparkSession: SparkSession) extends Logging {
+class DataFrameReader private[sql](private[sql] val sparkSession: SparkSession) extends Logging {
 
   /**
    * Specifies the input data source format.
@@ -255,8 +245,6 @@ class DataFrameReader private[sql](sparkSession: SparkSession) extends Logging {
         "read files of Hive data source directly.")
     }
 
-    assertPIIDataPath(paths)
-
     DataSource.lookupDataSourceV2(source, sparkSession.sessionState.conf).map { provider =>
       val catalogManager = sparkSession.sessionState.catalogManager
       val sessionOptions = DataSourceV2Utils.extractSessionConfigs(
@@ -296,20 +284,6 @@ class DataFrameReader private[sql](sparkSession: SparkSession) extends Logging {
         case _ => loadV1Source(paths: _*)
       }
     }.getOrElse(loadV1Source(paths: _*))
-  }
-
-  private def assertPIIDataPath(paths: Seq[String]): Unit = {
-    if (!PIIConf.isPIISupported) {
-      return
-    }
-
-    val dataPath = PIIConf.piiDataPath
-
-    val usePII = PIIConf.isUsePII(sparkSession.conf)
-    if (!usePII && paths.exists(_.startsWith(dataPath))) {
-      throw new AnalysisException(s"PII data under $dataPath can only be read " +
-        s"when spark.pii.enabled=true")
-    }
   }
 
   private def loadV1Source(paths: String*) = {
@@ -923,6 +897,6 @@ class DataFrameReader private[sql](sparkSession: SparkSession) extends Logging {
 
   private var userSpecifiedSchema: Option[StructType] = None
 
-  private var extraOptions = CaseInsensitiveMap[String](Map.empty)
+  private[sql] var extraOptions = CaseInsensitiveMap[String](Map.empty)
 
 }

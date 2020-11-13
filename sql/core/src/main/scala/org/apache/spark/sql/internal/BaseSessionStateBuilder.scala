@@ -179,6 +179,7 @@ abstract class BaseSessionStateBuilder(
         ResolveEncodersInScalaAgg +:
         new ResolveSessionCatalog(
           catalogManager, conf, catalog.isTempView, catalog.isTempFunction) +:
+        new DataFrameRelationResolutionRule(session) +:
         customResolutionRules
 
     override val postHocResolutionRules: Seq[Rule[LogicalPlan]] =

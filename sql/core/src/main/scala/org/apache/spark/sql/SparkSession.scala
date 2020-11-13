@@ -44,6 +44,8 @@ import org.apache.spark.sql.execution.command.ExternalCommandExecutor
 import org.apache.spark.sql.execution.datasources.{DataSource, LogicalRelation}
 import org.apache.spark.sql.internal._
 import org.apache.spark.sql.internal.StaticSQLConf.CATALOG_IMPLEMENTATION
+import org.apache.spark.sql.pii.PIIConf.isPIISupported
+import org.apache.spark.sql.pii.PIIDataFrameReader
 import org.apache.spark.sql.sources.BaseRelation
 import org.apache.spark.sql.streaming._
 import org.apache.spark.sql.types.{DataType, StructType}
@@ -644,7 +646,9 @@ class SparkSession private(
    *
    * @since 2.0.0
    */
-  def read: DataFrameReader = new DataFrameReader(self)
+  def read: DataFrameReader =
+    if (isPIISupported) PIIDataFrameReader(self)
+    else new DataFrameReader(self)
 
   /**
    * Returns a `DataStreamReader` that can be used to read streaming data in as a `DataFrame`.
