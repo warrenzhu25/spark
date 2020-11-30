@@ -53,6 +53,7 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
   var driverExtraLibraryPath: String = null
   var driverExtraJavaOptions: String = null
   var queue: String = null
+  var priority: String = null
   var numExecutors: String = null
   var files: String = null
   var archives: String = null
@@ -213,7 +214,7 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
       .orNull
     dynamicAllocationEnabled =
       sparkProperties.get(DYN_ALLOCATION_ENABLED.key).exists("true".equalsIgnoreCase)
-
+    priority = Option(priority).orElse(sparkProperties.get("spark.yarn.priority")).orNull
     // Global defaults. These should be keep to minimum to avoid confusing behavior.
     master = Option(master).getOrElse("local[*]")
 
@@ -313,6 +314,7 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
     |  driverExtraJavaOptions  $driverExtraJavaOptions
     |  supervise               $supervise
     |  queue                   $queue
+    |  priority                $priority
     |  numExecutors            $numExecutors
     |  files                   $files
     |  pyFiles                 $pyFiles
@@ -403,6 +405,9 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
 
       case QUEUE =>
         queue = value
+
+      case PRIORITY =>
+        priority = value
 
       case FILES =>
         files = Utils.resolveURIs(value)
@@ -574,6 +579,7 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
         |
         | Spark on YARN only:
         |  --queue QUEUE_NAME          The YARN queue to submit to (Default: "default").
+        |  --priority PRIORITY         The priority of your YARN application (Default: Cluster/Queue priority).
         |  --archives ARCHIVES         Comma separated list of archives to be extracted into the
         |                              working directory of each executor.
       """.stripMargin

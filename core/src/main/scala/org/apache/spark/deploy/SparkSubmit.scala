@@ -592,6 +592,7 @@ private[spark] class SparkSubmit extends Logging {
         mergeFn = Some(mergeFileLists(_, _))),
       OptionAssigner(args.archives, YARN, ALL_DEPLOY_MODES, confKey = "spark.yarn.dist.archives",
         mergeFn = Some(mergeFileLists(_, _))),
+      OptionAssigner(args.priority, YARN, ALL_DEPLOY_MODES, confKey = "spark.yarn.priority"),
 
       // Other options
       OptionAssigner(args.numExecutors, YARN | KUBERNETES, ALL_DEPLOY_MODES,
