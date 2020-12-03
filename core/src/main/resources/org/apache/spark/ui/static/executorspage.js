@@ -703,6 +703,10 @@ $(document).ready(function () {
                     "<div id='resource_prof_id' class='resource-prof-id-checkbox-div'><input type='checkbox' class='toggle-vis' data-sum-col-idx='' data-exec-col-idx='14'> Resource Profile Id</div>" +
                     "</div>");
 
+                var peakSummarySelector = "#exec-peak-summary";
+                $("#executorPeakMetricsSummary").append($(peakSummarySelector));
+                $(peakSummarySelector).show();
+
                 reselectCheckboxesBasedOnTaskTableState();
 
                 $("#additionalMetrics").click(function() {

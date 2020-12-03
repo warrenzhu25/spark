@@ -24,6 +24,7 @@ import scala.collection.mutable.HashMap
 
 import org.apache.spark.{JobExecutionStatus, SparkConf}
 import org.apache.spark.status.api.v1
+import org.apache.spark.status.api.v1.ExecutorPeakMetricsDistributions
 import org.apache.spark.storage.FallbackStorage.FALLBACK_BLOCK_MANAGER_ID
 import org.apache.spark.ui.scope._
 import org.apache.spark.util.Utils
@@ -400,6 +401,18 @@ private[spark] class AppStatusStore(
       }
 
     Some(computedQuantiles)
+  }
+
+  /**
+   * Calculates a summary of the executor metrics for executors, returning the
+   * requested quantiles for the recorded metrics.
+   */
+  def executorMetricSummary(
+      activeOnly: Boolean,
+      unsortedQuantiles: Array[Double]): Option[ExecutorPeakMetricsDistributions] = {
+    val quantiles = unsortedQuantiles.sorted
+    val executors = executorList(activeOnly).flatMap(_.peakMemoryMetrics).toIndexedSeq
+    Some(new ExecutorPeakMetricsDistributions(quantiles, executors))
   }
 
   /**
