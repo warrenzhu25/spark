@@ -28,7 +28,7 @@ import com.microsoft.magnetar.pii.metadata.{
   MetadataRepository
 }
 import com.microsoft.magnetar.pii.metadata.DataType.NonPersonal
-import org.apache.commons.dbcp.BasicDataSource
+import org.apache.commons.dbcp2.BasicDataSource
 import org.apache.hadoop.fs.Path
 
 import org.apache.spark.internal.Logging
