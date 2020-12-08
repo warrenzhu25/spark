@@ -134,6 +134,9 @@ private[yarn] class ExecutorRunnable(
     // Extra options for the JVM
     val javaOpts = ListBuffer[String]()
 
+    // Add ActiveProcessorCount for executor cores
+    javaOpts += s"-XX:ActiveProcessorCount=$executorCores"
+
     // Set the JVM memory
     val executorMemoryString = executorMemory + "m"
     javaOpts += "-Xmx" + executorMemoryString

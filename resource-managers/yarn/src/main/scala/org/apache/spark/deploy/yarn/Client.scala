@@ -890,6 +890,9 @@ private[spark] class Client(
 
     val javaOpts = ListBuffer[String]()
 
+    // Add ActiveProcessorCount for AM cores
+    javaOpts += s"-XX:ActiveProcessorCount=$amCores"
+
     // Set the environment variable through a command prefix
     // to append to the existing value of the variable
     var prefixEnv: Option[String] = None
