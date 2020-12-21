@@ -32,8 +32,8 @@ class ConfigurationHeuristicSuite extends SparkFunSuite {
     val sparkConf = Map[String, String]()
     val result = CompressedOopsEvaluator.evaluate(sparkConf)
     assert(result.nonEmpty)
-    assert(result.head.isInstanceOf[SingleValue])
-    val singleValue = result.head.asInstanceOf[SingleValue]
+    assert(result.head.isInstanceOf[AnalysisRecord])
+    val singleValue = result.head.asInstanceOf[AnalysisRecord]
     assert(singleValue.name == SPARK_EXECUTOR_OPTIONS)
     assert(singleValue.value == "")
     assert(singleValue.suggested == CompressedOopsEvaluator.ENABLE_COMPRESSED_OOPS)
@@ -43,8 +43,8 @@ class ConfigurationHeuristicSuite extends SparkFunSuite {
     val sparkConf = Map[String, String]()
     val result = ParallelGcThreadEvaluator.evaluate(sparkConf)
     assert(result.nonEmpty)
-    assert(result.head.isInstanceOf[SingleValue])
-    val singleValue = result.head.asInstanceOf[SingleValue]
+    assert(result.head.isInstanceOf[AnalysisRecord])
+    val singleValue = result.head.asInstanceOf[AnalysisRecord]
     assert(singleValue.name == SPARK_EXECUTOR_OPTIONS)
     assert(singleValue.value == "")
     assert(singleValue.suggested == ParallelGcThreadEvaluator.getParallelGCThreadsOption(1))
@@ -61,8 +61,8 @@ class ConfigurationHeuristicSuite extends SparkFunSuite {
     val sparkConf = Map(SPARK_DYNAMIC_ALLOCATION_ENABLED -> "true")
     val result = ShuffleServiceEvaluator.evaluate(sparkConf)
     assert(result.nonEmpty)
-    assert(result.head.isInstanceOf[SingleValue])
-    val singleValue = result.head.asInstanceOf[SingleValue]
+    assert(result.head.isInstanceOf[AnalysisRecord])
+    val singleValue = result.head.asInstanceOf[AnalysisRecord]
     assert(singleValue.name == SPARK_SHUFFLE_SERVICE_ENABLED)
     assert(singleValue.value == "false")
     assert(singleValue.suggested == "true")
@@ -72,8 +72,8 @@ class ConfigurationHeuristicSuite extends SparkFunSuite {
     val sparkConf = Map[String, String]()
     val result = ExecutorCoreEvaluator.evaluate(sparkConf)
     assert(result.nonEmpty)
-    assert(result.head.isInstanceOf[SingleValue])
-    val singleValue = result.head.asInstanceOf[SingleValue]
+    assert(result.head.isInstanceOf[AnalysisRecord])
+    val singleValue = result.head.asInstanceOf[AnalysisRecord]
     assert(singleValue.name == SPARK_EXECUTOR_CORES)
     assert(singleValue.value == "1")
     assert(singleValue.suggested == ExecutorCoreEvaluator.SUGGESTED_EXECUTOR_CORES)
@@ -84,8 +84,8 @@ class ConfigurationHeuristicSuite extends SparkFunSuite {
       SPARK_OFF_HEAP_SIZE -> "1g")
     val result = ExecutorMemoryOverheadEvaluator.evaluate(sparkConf)
     assert(result.nonEmpty)
-    assert(result.head.isInstanceOf[SingleValue])
-    val singleValue = result.head.asInstanceOf[SingleValue]
+    assert(result.head.isInstanceOf[AnalysisRecord])
+    val singleValue = result.head.asInstanceOf[AnalysisRecord]
     assert(singleValue.name == SPARK_EXECUTOR_MEMORY_OVERHEAD)
     assert(singleValue.value == "384m")
     assert(singleValue.suggested == "1408m")

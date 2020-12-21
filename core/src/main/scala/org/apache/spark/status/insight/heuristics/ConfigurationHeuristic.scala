@@ -40,10 +40,10 @@ object ConfigurationHeuristic extends Heuristic {
   )
 
   object KyroSerializerEvaluator extends ConfigEvaluator {
-    override def evaluate(appConf: Map[String, String]): Seq[AnalysisResult] = {
+    override def evaluate(appConf: Map[String, String]): Seq[AnalysisRecord] = {
       val sparkSerializer = getProperty(appConf, SPARK_SERIALIZER)
       if(sparkSerializer.isEmpty) {
-        Seq(SingleValue(
+        Seq(AnalysisRecord(
           SPARK_SERIALIZER,
           "",
           "Kryo is significantly faster and more compact." +
@@ -58,13 +58,13 @@ object ConfigurationHeuristic extends Heuristic {
   }
 
   object ShuffleServiceEvaluator extends ConfigEvaluator {
-    override def evaluate(appConf: Map[String, String]): Seq[AnalysisResult] = {
+    override def evaluate(appConf: Map[String, String]): Seq[AnalysisRecord] = {
       val dynamicAllocationEnabled = getProperty(appConf, SPARK_DYNAMIC_ALLOCATION_ENABLED)
         .getOrElse("false").toBoolean
       val shuffleServiceEnabled = getProperty(appConf, SPARK_SHUFFLE_SERVICE_ENABLED)
         .getOrElse("false").toBoolean
       if(dynamicAllocationEnabled && !shuffleServiceEnabled) {
-        Seq(SingleValue(
+        Seq(AnalysisRecord(
           SPARK_SHUFFLE_SERVICE_ENABLED,
           "false",
           "Spark shuffle service is not enabled when dynamic allocation is enabled.",
@@ -79,12 +79,12 @@ object ConfigurationHeuristic extends Heuristic {
     private val MIN_EXECUTOR_CORES = 2
     private val MAX_EXECUTOR_CORES = 5
     val SUGGESTED_EXECUTOR_CORES = "4"
-    override def evaluate(appConf: Map[String, String]): Seq[AnalysisResult] = {
+    override def evaluate(appConf: Map[String, String]): Seq[AnalysisRecord] = {
       val executorCores = getProperty(appConf, SPARK_EXECUTOR_CORES)
         .map(_.toInt)
         .getOrElse(SPARK_EXECUTOR_CORES_DEFAULT)
       if(executorCores < MIN_EXECUTOR_CORES || executorCores >= MAX_EXECUTOR_CORES) {
-        Seq(SingleValue(
+        Seq(AnalysisRecord(
           SPARK_EXECUTOR_CORES,
           executorCores.toString,
           "Spark executor cores should be between 2 and 5. " +
@@ -100,13 +100,13 @@ object ConfigurationHeuristic extends Heuristic {
   object CompressedOopsEvaluator extends ConfigEvaluator {
     val COMPRESSED_OOPS_THRESHOLD = 32
     val ENABLE_COMPRESSED_OOPS = "-XX:+UseCompressedOops"
-    override def evaluate(appConf: Map[String, String]): Seq[AnalysisResult] = {
+    override def evaluate(appConf: Map[String, String]): Seq[AnalysisRecord] = {
       val executorMemory = getProperty(appConf, SPARK_EXECUTOR_MEMORY)
         .getOrElse(SPARK_EXECUTOR_MEMORY_DEFAULT)
       val executorJavaOptions = getProperty(appConf, SPARK_EXECUTOR_OPTIONS).getOrElse("")
       if(Utils.byteStringAsGb(executorMemory) < COMPRESSED_OOPS_THRESHOLD &&
         !executorJavaOptions.contains(ENABLE_COMPRESSED_OOPS)) {
-        Seq(SingleValue(
+        Seq(AnalysisRecord(
           SPARK_EXECUTOR_OPTIONS,
           "",
           "When executor memory is smaller than 32g, " +
@@ -120,7 +120,7 @@ object ConfigurationHeuristic extends Heuristic {
 
   object ParallelGcThreadEvaluator extends ConfigEvaluator {
     val PARALLEL_GC_THREADS = "-XX:ParallelGCThreads="
-    override def evaluate(appConf: Map[String, String]): Seq[AnalysisResult] = {
+    override def evaluate(appConf: Map[String, String]): Seq[AnalysisRecord] = {
       val executorCore = getProperty(appConf, SPARK_EXECUTOR_CORES)
         .map(_.toInt)
         .getOrElse(SPARK_EXECUTOR_CORES_DEFAULT)
@@ -129,7 +129,7 @@ object ConfigurationHeuristic extends Heuristic {
         .map(s => s.substring(PARALLEL_GC_THREADS.length))
 
       if(parallelGCThreads.isEmpty || parallelGCThreads.get.toInt != executorCore) {
-        Seq(SingleValue(
+        Seq(AnalysisRecord(
           SPARK_EXECUTOR_OPTIONS,
           parallelGCThreads.getOrElse(""),
           "ParallelGCThreads should be equal to executor cores. " +
@@ -149,7 +149,7 @@ object ConfigurationHeuristic extends Heuristic {
   }
 
   object ExecutorMemoryOverheadEvaluator extends ConfigEvaluator {
-    override def evaluate(appConf: Map[String, String]): Seq[AnalysisResult] = {
+    override def evaluate(appConf: Map[String, String]): Seq[AnalysisRecord] = {
       val offheapEnabled = getProperty(appConf, SPARK_OFF_HEAP_ENABLED)
         .getOrElse("false")
         .toBoolean
@@ -163,7 +163,7 @@ object ConfigurationHeuristic extends Heuristic {
 
       val targetOverhead = offHeapSize + calculateOverhead(memory)
       if(offheapEnabled && (targetOverhead > Utils.byteStringAsBytes(memoryOverhead))) {
-        Seq(SingleValue(
+        Seq(AnalysisRecord(
           SPARK_EXECUTOR_MEMORY_OVERHEAD,
           Utils.byteStringAsMb(memoryOverhead) + "m",
           "When executor memory off heap is enabled, " +
@@ -179,20 +179,19 @@ object ConfigurationHeuristic extends Heuristic {
     }
   }
 
-  override def apply(data: SparkApplicationData): Option[HeuristicResult] = {
-    Some(new ConfigHeuristicResult(
-      evaluators
+  override def analysis(data: SparkApplicationData): Seq[AnalysisResult] = {
+
+    Seq(AnalysisResult(evaluators
       .flatMap(_.evaluate(data.appConf))
       .sortBy(r => r.severity.getValue)(Ordering.Int.reverse)))
   }
-}
 
-class ConfigHeuristicResult(results: Seq[AnalysisResult])
-  extends HeuristicResult("Config Insights", results) {
+  override val name = "Config Insights"
+
 }
 
 trait ConfigEvaluator {
-  def evaluate(appConf: Map[String, String]): Seq[AnalysisResult]
+  def evaluate(appConf: Map[String, String]): Seq[AnalysisRecord]
   protected def getProperty(appConf: Map[String, String], key: String): Option[String] =
     appConf.get(key)
 }

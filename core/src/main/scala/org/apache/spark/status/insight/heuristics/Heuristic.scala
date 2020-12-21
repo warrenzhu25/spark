@@ -19,5 +19,16 @@ package org.apache.spark.status.insight.heuristics
 import org.apache.spark.status.insight.SparkApplicationData
 
 trait Heuristic {
-  def apply(data: SparkApplicationData): Option[HeuristicResult]
+  def apply(data: SparkApplicationData): Option[HeuristicResult] = {
+    val results = analysis(data)
+    if (results.nonEmpty) {
+      Some(HeuristicResult(name, results))
+    } else {
+      None
+    }
+  }
+
+  def name: String
+
+  def analysis(data: SparkApplicationData): Seq[AnalysisResult]
 }

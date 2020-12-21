@@ -129,14 +129,14 @@ object DriverHeuristic extends Heuristic{
     extends HeuristicResult("Driver Insights", results) {
   }
 
-  override def apply(data: SparkApplicationData): Option[HeuristicResult] = {
+  override def analysis(data: SparkApplicationData): Seq[AnalysisResult] = {
     val evaluator = new Evaluator(data)
 
     def formatProperty(property: Option[String]): String =
       property.getOrElse("Not presented. Using default.")
 
     var resultDetails = Seq(
-      new SingleValue(
+      new AnalysisRecord(
         SPARK_DRIVER_MEMORY_KEY,
         formatProperty(evaluator.driverMemoryBytes.map(MemoryFormatUtils.bytesToString))
       ),
@@ -144,35 +144,35 @@ object DriverHeuristic extends Heuristic{
       //      new HeuristicResultDetails(
       //        "Ratio of time spent in GC to total time", evaluator.ratio.toString
       //      ),
-      new SingleValue(
+      new AnalysisRecord(
         SPARK_DRIVER_CORES_KEY,
         formatProperty(evaluator.driverCores.map(_.toString))
       ),
-      new SingleValue(
+      new AnalysisRecord(
         SPARK_YARN_DRIVER_MEMORY_OVERHEAD,
         evaluator.sparkYarnDriverMemoryOverhead
       ),
-      new SingleValue(DRIVER_PEAK_JVM_USED_MEMORY_HEURISTIC_NAME, MemoryFormatUtils.bytesToString(evaluator.maxDriverPeakJvmUsedMemory))
+      new AnalysisRecord(DRIVER_PEAK_JVM_USED_MEMORY_HEURISTIC_NAME, MemoryFormatUtils.bytesToString(evaluator.maxDriverPeakJvmUsedMemory))
     )
     if(evaluator.severityJvmUsedMemory != Severity.NONE) {
-      resultDetails = resultDetails :+ new SingleValue("Driver Peak JVM used Memory", "The allocated memory for the driver (in " + SPARK_DRIVER_MEMORY_KEY + ") is much more than the peak JVM used memory by the driver.")
-      resultDetails = resultDetails :+ new SingleValue(SUGGESTED_SPARK_DRIVER_MEMORY_HEURISTIC_NAME, MemoryFormatUtils.roundOffMemoryStringToNextInteger(MemoryFormatUtils.bytesToString(((1 + BUFFER_FRACTION) * (evaluator.maxDriverPeakJvmUsedMemory + reservedMemory)).toLong)))
+      resultDetails = resultDetails :+ new AnalysisRecord("Driver Peak JVM used Memory", "The allocated memory for the driver (in " + SPARK_DRIVER_MEMORY_KEY + ") is much more than the peak JVM used memory by the driver.")
+      resultDetails = resultDetails :+ new AnalysisRecord(SUGGESTED_SPARK_DRIVER_MEMORY_HEURISTIC_NAME, MemoryFormatUtils.roundOffMemoryStringToNextInteger(MemoryFormatUtils.bytesToString(((1 + BUFFER_FRACTION) * (evaluator.maxDriverPeakJvmUsedMemory + reservedMemory)).toLong)))
     }
     if (evaluator.severityGc != Severity.NONE) {
-      resultDetails = resultDetails :+ new SingleValue("Gc ratio high", "The driver is spending too much time on GC. We recommend increasing the driver memory.")
+      resultDetails = resultDetails :+ new AnalysisRecord("Gc ratio high", "The driver is spending too much time on GC. We recommend increasing the driver memory.")
     }
     if(evaluator.severityDriverCores != Severity.NONE) {
-      resultDetails = resultDetails :+ new SingleValue("Driver Cores", "Please do not specify excessive number of driver cores. Change it in the field : " + SPARK_DRIVER_CORES_KEY)
+      resultDetails = resultDetails :+ new AnalysisRecord("Driver Cores", "Please do not specify excessive number of driver cores. Change it in the field : " + SPARK_DRIVER_CORES_KEY)
     }
     if(evaluator.severityDriverMemoryOverhead != Severity.NONE) {
-      resultDetails = resultDetails :+ new SingleValue("Driver Overhead Memory", "Please do not specify excessive amount of overhead memory for Driver. Change it in the field " + SPARK_YARN_DRIVER_MEMORY_OVERHEAD)
+      resultDetails = resultDetails :+ new AnalysisRecord("Driver Overhead Memory", "Please do not specify excessive amount of overhead memory for Driver. Change it in the field " + SPARK_YARN_DRIVER_MEMORY_OVERHEAD)
     }
     if(evaluator.severityDriverMemory != Severity.NONE) {
-      resultDetails = resultDetails :+ new SingleValue("Spark Driver Memory", "Please do not specify excessive amount of memory for Driver. Change it in the field " + SPARK_DRIVER_MEMORY_KEY)
+      resultDetails = resultDetails :+ new AnalysisRecord("Spark Driver Memory", "Please do not specify excessive amount of memory for Driver. Change it in the field " + SPARK_DRIVER_MEMORY_KEY)
     }
 
-    Some(new DriverHeuristicResult(
-      resultDetails
-    ))
+    Seq(AnalysisResult(resultDetails))
   }
+
+  override def name: String = "Driver Insights"
 }

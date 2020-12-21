@@ -23,11 +23,18 @@ import scala.collection.JavaConverters._
 import scala.xml.Node
 
 import org.apache.spark.JobExecutionStatus
+
 import org.apache.spark.status.AppStatusStore
+import org.apache.spark.status.api.v1.FailureSummary
+import org.apache.spark.status.api.v1.StageData
 import org.apache.spark.status.api.v1.StageStatus
 import org.apache.spark.status.insight.SparkApplicationData
 import org.apache.spark.status.insight.heuristics._
-import org.apache.spark.ui.{SparkUI, SparkUITab, UIUtils, WebUIPage}
+import org.apache.spark.ui.SparkUI
+import org.apache.spark.ui.SparkUITab
+import org.apache.spark.ui.UIUtils
+import org.apache.spark.ui.WebUIPage
+import org.apache.spark.ui.jobs.ApiHelper.errorMessageCell
 
 class InsightsTab(parent: SparkUI, store: AppStatusStore) extends SparkUITab(parent, "insights") {
 
@@ -49,20 +56,72 @@ private[ui] class InsightsPage(
     ConfigurationParametersHeuristic,
     DriverHeuristic,
     MemoryUsageHeuristic,
-    StagesHeuristic,
+    StageSkewHeuristic,
     StagesWithFailedTasksHeuristic
   )
 
   def render(request: HttpServletRequest): Seq[Node] = {
+
     val content =
       <span>
-        {insightsTable}
+        {insightsTable(request)}
+        {failureSummary(request)}
       </span>
 
     UIUtils.headerSparkPage(request, "Insights", content, parent, useDataTables = true)
   }
 
-  private def insightsTable() = {
+  private def failureSummary(request: HttpServletRequest) = {
+    val failedStages: Seq[StageData] = appData()
+      .stageData
+      .filter(_.status.equals(StageStatus.FAILED))
+
+    {if (failedStages.nonEmpty) {
+      <span class="collapse-aggregated-failureSummaries collapse-table"
+            onClick="collapseTable('collapse-aggregated-failureSummaries',
+            'aggregated-exceptionSummaries')">
+        <h4>
+          <span class="collapse-table-arrow arrow-open"></span>
+          <a>Stage Failure Summary</a>
+        </h4>
+      </span> ++
+      failedStages.map(s =>
+        <h5>
+          {stageNameLink(request, s)}
+        </h5>
+        <div class="aggregated-exceptionSummaries collapsible-table">
+          {failureSummaryTable(store.failureSummary(s.stageId, s.attemptId))}
+        </div>
+      )
+    } else Seq.empty}
+  }
+
+  private def stageNameLink(request: HttpServletRequest, s: StageData) = {
+    val basePathUri = UIUtils.prependBaseUri(request, parent.basePath)
+    val nameLinkUri = s"$basePathUri/stages/stage/?id=${s.stageId}&attempt=${s.attemptId}"
+    <a href={nameLinkUri} class="name-link">
+      {s.description.get} {s.numFailedTasks}/{s.numTasks} tasks
+    </a>
+  }
+
+  def failureSummaryTable(failureSummary: Seq[FailureSummary]): Seq[Node] = {
+    val propertyHeader = Seq("Exception", "Message", "Count", "Details")
+    val headerClasses = Seq("sorttable_alpha", "sorttable_alpha")
+    UIUtils.listingTable(propertyHeader, failureSummaryRow,
+      failureSummary,
+      headerClasses = headerClasses)
+  }
+
+  def failureSummaryRow(e: FailureSummary): Seq[Node] = {
+    <tr>
+      <td>{e.exceptionFailure.failureType}</td>
+      <td>{e.exceptionFailure.message}</td>
+      <td>{e.count}</td>
+      {errorMessageCell(e.exceptionFailure.stackTrace)}
+    </tr>
+  }
+
+  private def insightsTable(request: HttpServletRequest) = {
     heuristic.flatMap(_.apply(appData())).map(r =>
     <span class="collapse-aggregated-classpathEntries collapse-table"
           onClick="collapseTable('collapse-aggregated-classpathEntries',
@@ -73,7 +132,7 @@ private[ui] class InsightsPage(
       </h4>
     </span>
       <div class="aggregated-classpathEntries collapsible-table">
-        {r.toTable}
+        {r.toHTML(request)}
       </div>
     )
   }
@@ -81,6 +140,7 @@ private[ui] class InsightsPage(
   private def appData(): SparkApplicationData = {
 
     SparkApplicationData(
+      store,
       appId,
       appConf = store.environmentInfo().sparkProperties.map(a => a._1 -> a._2).toMap,
       appInfo = store.applicationInfo(),

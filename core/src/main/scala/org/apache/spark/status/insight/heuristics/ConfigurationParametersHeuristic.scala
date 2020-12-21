@@ -387,49 +387,48 @@ object ConfigurationParametersHeuristic extends Heuristic {
      s"${Math.ceil(value).toInt}${unit}"
    }
 
-   override def apply(data: SparkApplicationData): Option[HeuristicResult] = {
+   override def analysis(data: SparkApplicationData): Seq[AnalysisResult] = {
 
      val evaluator = new Evaluator(data)
 
      // add current configuration parameter values, and recommended parameter values to the result.
      var resultDetails = ArrayBuffer(
-       SingleValue(SPARK_EXECUTOR_MEMORY,
+       AnalysisRecord(SPARK_EXECUTOR_MEMORY,
          bytesToString(evaluator.sparkExecutorMemory),
          suggested = bytesToString(evaluator.recommendedExecutorMemory)),
-       SingleValue(SPARK_DRIVER_MEMORY,
+       AnalysisRecord(SPARK_DRIVER_MEMORY,
          bytesToString(evaluator.sparkDriverMemory),
          suggested = bytesToString(evaluator.recommendedDriverMemory)),
-       SingleValue(SPARK_EXECUTOR_CORES,
+       AnalysisRecord(SPARK_EXECUTOR_CORES,
          evaluator.sparkExecutorCores.toString,
          suggested = evaluator.recommendedExecutorCores.toString),
-       SingleValue(SPARK_DRIVER_CORES,
+       AnalysisRecord(SPARK_DRIVER_CORES,
          evaluator.sparkDriverCores.toString,
          suggested = evaluator.recommendedDriverCores.toString),
-       SingleValue(SPARK_MEMORY_FRACTION,
+       AnalysisRecord(SPARK_MEMORY_FRACTION,
          evaluator.sparkMemoryFraction.toString,
          suggested = evaluator.recommendedMemoryFraction.toString))
 
      evaluator.sparkExecutorInstances.foreach { numExecutors =>
-       resultDetails += SingleValue(SPARK_EXECUTOR_INSTANCES, numExecutors.toString,
+       resultDetails += AnalysisRecord(SPARK_EXECUTOR_INSTANCES, numExecutors.toString,
        suggested = evaluator.recommendedExecutorInstances.get.toString)
      }
      evaluator.sparkExecutorMemoryOverhead.foreach { memOverhead =>
-       resultDetails += SingleValue(SPARK_EXECUTOR_MEMORY_OVERHEAD,
+       resultDetails += AnalysisRecord(SPARK_EXECUTOR_MEMORY_OVERHEAD,
          bytesToString(memOverhead),
          suggested = evaluator.recommendedExecutorMemoryOverhead.get.toString
        )
      }
      evaluator.sparkDriverMemoryOverhead.foreach { memOverhead =>
-       resultDetails += SingleValue(SPARK_DRIVER_MEMORY_OVERHEAD,
+       resultDetails += AnalysisRecord(SPARK_DRIVER_MEMORY_OVERHEAD,
          bytesToString(memOverhead),
          suggested = evaluator.recommendedDriverMemoryOverhead.get.toString
        )
      }
 
-     Some(new ConfigParamsHeuristicResult(resultDetails))
+     Seq(AnalysisResult(resultDetails))
    }
- }
 
-class ConfigParamsHeuristicResult(results: Seq[AnalysisResult])
-  extends HeuristicResult("Config Params Insights", results) {
+  override def name: String = "Config Params Insights"
+
 }

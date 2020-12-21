@@ -34,21 +34,21 @@ object StagesWithFailedTasksHeuristic extends Heuristic {
   val ratioThreshold: Double = 2
   val increaseMemoryBy: String = "1G"
 
-  override def apply(data: SparkApplicationData): Option[HeuristicResult] = {
+  override def analysis(data: SparkApplicationData): Seq[AnalysisResult] = {
     val evaluator = new Evaluator(data)
     var resultDetails = Seq(
-      new SingleValue("Stages with OOM errors", evaluator.stagesWithOOMError.toString),
-      new SingleValue("Stages with Overhead memory errors", evaluator.stagesWithOverheadError.toString)
+      new AnalysisRecord("Stages with OOM errors", evaluator.stagesWithOOMError.toString),
+      new AnalysisRecord("Stages with Overhead memory errors", evaluator.stagesWithOverheadError.toString)
     )
     if (evaluator.severityOverheadStages.getValue >= Severity.Normal.getValue)
-      resultDetails = resultDetails :+ new SingleValue("Overhead memory errors", "Some tasks have failed due to overhead memory error. Please try increasing spark.yarn.executor.memoryOverhead by " + increaseMemoryBy +" in spark.yarn.executor.memoryOverhead")
+      resultDetails = resultDetails :+ new AnalysisRecord("Overhead memory errors", "Some tasks have failed due to overhead memory error. Please try increasing spark.yarn.executor.memoryOverhead by " + increaseMemoryBy +" in spark.yarn.executor.memoryOverhead")
     //TODO: refine recommendations
     if (evaluator.severityOOMStages.getValue >= Severity.Normal.getValue)
-      resultDetails = resultDetails :+ new SingleValue("OOM errors", "Some tasks have failed due to OOM error. Try increasing spark.executor.memory or decreasing spark.memory.fraction (take a look at unified memory heuristic) or decreasing number of cores.")
-    Some(new StageFailureHeuristicResult(
-      resultDetails
-    ))
+      resultDetails = resultDetails :+ new AnalysisRecord("OOM errors", "Some tasks have failed due to OOM error. Try increasing spark.executor.memory or decreasing spark.memory.fraction (take a look at unified memory heuristic) or decreasing number of cores.")
+    Seq(AnalysisResult(resultDetails))
   }
+
+  override def name: String = "Stage Failure Insights"
 
   class Evaluator(data: SparkApplicationData) {
     lazy val stagesWithFailedTasks: Seq[StageData] = data.stagesWithFailedTasks
@@ -138,8 +138,4 @@ object StagesWithFailedTasksHeuristic extends Heuristic {
 
   }
 
-}
-
-class StageFailureHeuristicResult(results: Seq[AnalysisResult])
-  extends HeuristicResult("Stage Failure Insights", results) {
 }

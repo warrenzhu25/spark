@@ -16,38 +16,23 @@
  */
 package org.apache.spark.status.insight.heuristics
 
-import scala.xml.{Elem, Node}
+import javax.servlet.http.HttpServletRequest
+
+import scala.xml.Node
 
 import org.apache.spark.ui.UIUtils
 
-trait AnalysisResult {
-  def severity: Severity
-  def header: Seq[String]
-  def row: Seq[Node]
-}
+case class AnalysisRecord(
+    name: String,
+    value: String,
+    description: String = "",
+    suggested: String = "",
+    severity: Severity = Severity.Normal) {
 
-abstract class HeuristicResult(val name: String, results: Seq[AnalysisResult]) {
-
-  def toTable: Seq[Node] = {
-    assert(results.nonEmpty)
-    UIUtils.listingTable(results.head.header,
-      (r: AnalysisResult) => r.row,
-      results,
-      fixedWidth = true)
-  }
-}
-
-case class SingleValue(name: String,
-                       value: String,
-                       description: String = "",
-                       suggested: String = "",
-                       override val severity: Severity = Severity.Normal
-                       ) extends AnalysisResult {
-
-  override val header: Seq[String] =
+  val header: Seq[String] =
     Seq("Name", "Value", "Suggested", "Description", "Severity")
 
-  override val row: Seq[Node] = {
+  def toHTML(request: HttpServletRequest): Seq[Node] = {
     <tr>
       <td>{name}</td>
       <td>{value}</td>
@@ -62,24 +47,38 @@ case class SingleValue(name: String,
   }
 }
 
-case class MultipleValues(name: String,
-                          values: Seq[String],
-                          description: Option[String] = None,
-                          override val severity: Severity = Severity.Normal
-                         ) extends AnalysisResult {
-  override val header: Seq[String] =
-    Seq("Name", "Value", "Description", "Severity")
+case class AnalysisResult(
+    records: Seq[AnalysisRecord],
+    name: Option[String] = None,
+    description: Option[String] = None,
+    severity: Severity = Severity.Normal) {
+  val header: Seq[String] =
+    records.head.header
 
-  override val row: Elem = {
-    <tr>
-      <td>{name}</td>
-      <td>{values.mkString("\n")}</td>
-      <td>{description}</td>
-      <td>
-        <span data-toggle="tooltip" title={severity.getTooltip}>
-          {severity}
-        </span>
-      </td>
-    </tr>
+  def toHTML(request: HttpServletRequest): Seq[Node] = {
+    assert(records.nonEmpty)
+    UIUtils.listingTable(
+      records.head.header,
+      (r: AnalysisRecord) => r.toHTML(request),
+      records,
+      fixedWidth = true)
+  }
+
+}
+
+case class HeuristicResult(name: String, results: Seq[AnalysisResult]) {
+
+  def toHTML(request: HttpServletRequest): Seq[Node] = {
+    <span class="collapse-aggregated-classpathEntries collapse-table"
+          onClick="collapseTable('collapse-aggregated-classpathEntries',
+            'aggregated-classpathEntries')">
+      <h4>
+        <span class="collapse-table-arrow arrow-open"></span>
+        <a>{name}</a>
+      </h4>
+    </span>
+        <div class="aggregated-classpathEntries collapsible-table">
+          {results.map(r => r.toHTML(request))}
+        </div>
   }
 }

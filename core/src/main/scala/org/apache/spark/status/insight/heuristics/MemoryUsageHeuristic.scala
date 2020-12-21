@@ -14,69 +14,68 @@
 
 package org.apache.spark.status.insight.heuristics
 
+import javax.servlet.http.HttpServletRequest
+
+import scala.xml.Node
+
 import org.apache.spark.executor.ExecutorMetricsDistributions
 import org.apache.spark.metrics.ExecutorMetricType
 import org.apache.spark.status.insight.SparkApplicationData
-import org.apache.spark.status.insight.heuristics.ConfigurationHeuristic.ExecutorMemoryOverheadEvaluator.getProperty
 import org.apache.spark.status.insight.heuristics.ConfigurationHeuristicsConstants._
-import org.apache.spark.util.Utils
 import org.apache.spark.util.Utils._
-
-import scala.xml.Node
 
 /**
  * A heuristic based on executor peak memory metrics
  */
 object MemoryUsageHeuristic extends Heuristic {
 
-  override def apply(data: SparkApplicationData): Option[HeuristicResult] = {
-    data.executorMetricsDistributions.flatMap(m => analysis(data.appConf, m))
+  override def analysis(data: SparkApplicationData): Seq[AnalysisResult] = {
+    data.executorMetricsDistributions.flatMap(m => analysis(data.appConf, m)).toSeq
   }
 
   def analysis(conf : Map[String, String],
-               executorMetrics: ExecutorMetricsDistributions): Option[HeuristicResult] = {
+               executorMetrics: ExecutorMetricsDistributions): Option[AnalysisResult] = {
     val results =
-      ExecutorMetricType.metricToOffset.map { case (metric, _) =>
-        val usage = executorMetrics
-          .getMetricDistribution(metric)
-          .map(_.toLong)
-          .map(bytesToString)
+      ExecutorMetricType.metricToOffset
+        .filter(m => m._1.contains("Memory"))
+        .filter(m => !m._1.contains("Process"))
+        .map { case (metric, _) =>
+          val usage = executorMetrics
+            .getMetricDistribution(metric)
+            .map(_.toLong)
+            .map(bytesToString)
 
-        new UsageValue(
-          name = metric,
-          value = bytesToString(Resources.get(metric).calculate(conf)),
-          usage = usage
-        )
-      }
-      .toSeq
-      .sortBy(v => v.name)
+          new UsageRecord(
+            name = metric,
+            value = bytesToString(Resources.get(metric).calculate(conf)),
+            usage = usage)
+        }
+        .toSeq
 
     if (results.nonEmpty) {
-      Some(new MemoryUsageHeuristicResult(results))
+      Some(AnalysisResult(results))
     } else {
       None
     }
   }
+
+  override def name: String = "Memory Usage Insights"
 }
 
-class MemoryUsageHeuristicResult(results: Seq[AnalysisResult])
-  extends HeuristicResult("Memory Usage Insights", results) {
-}
-
-class UsageValue(name: String,
-                 value: String,
-                 usage: IndexedSeq[String],
-                 description: String = "",
-                 suggested: String = "",
-                 severity: Severity = Severity.Normal)
-  extends SingleValue(name, value, description, suggested, severity) {
+class UsageRecord(name: String,
+                  value: String,
+                  usage: IndexedSeq[String],
+                  description: String = "",
+                  suggested: String = "",
+                  severity: Severity = Severity.Normal)
+  extends AnalysisRecord(name, value, description, suggested, severity) {
 
   override val header: Seq[String] =
     Seq("Name", "Value", "Usage (Median / Max)", "Suggested", "Description", "Severity")
 
-  override val row: Seq[Node] = {
+  override def toHTML(request: HttpServletRequest): Seq[Node] = {
     <tr>
-      <td>{name}</td>
+      <td>{name.split("(?=[A-Z])")}</td>
       <td>{value}</td>
       <td>{usage(0)} / {usage(1)}</td>
       <td>{description}</td>

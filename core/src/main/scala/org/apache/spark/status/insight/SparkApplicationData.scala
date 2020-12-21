@@ -19,8 +19,10 @@ package org.apache.spark.status.insight
 
 import org.apache.spark.executor.ExecutorMetricsDistributions
 import org.apache.spark.status.api.v1.{ApplicationInfo, ExecutorSummary, JobData, StageData}
+import org.apache.spark.status.AppStatusStore
 
 case class SparkApplicationData(
+  store: AppStatusStore,
   appId: String,
   appConf: Map[String, String],
   appInfo: ApplicationInfo,
@@ -28,4 +30,17 @@ case class SparkApplicationData(
   stageData: Seq[StageData],
   executorSummaries: Seq[ExecutorSummary],
   executorMetricsDistributions: Option[ExecutorMetricsDistributions],
-  stagesWithFailedTasks: Seq[StageData] = Seq.empty)
+  stagesWithFailedTasks: Seq[StageData] = Seq.empty){
+
+  lazy val stageDataWithSummaries: Seq[StageData] = {
+    stageData
+      .sortBy(_.executorRunTime)
+      .reverse
+      .map(_.stageId)
+      .take(10)
+      .flatMap(s => store.stageData(s, true))
+
+  }
+}
+
+

@@ -593,7 +593,7 @@ private[spark] class AppStatusListener(
           Some(new v1.FailureReason(e.className, e.description, e.toErrorString))
         case e: ExecutorLostFailure =>
           Some(new v1.FailureReason(e.getClass.getSimpleName,
-            e.reason.getOrElse(""), e.toErrorString))
+            e.reason.getOrElse("").split('\n')(0), e.toErrorString))
         case e: FetchFailed =>
           parseErrorMessage(e.message)
             .map(f => new v1.FailureReason(e.getClass.getSimpleName, f.message, f.stackTrace))
