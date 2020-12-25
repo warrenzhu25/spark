@@ -337,7 +337,7 @@ public class InMemoryStore implements KVStore {
     }
   }
 
-  private static class InMemoryView<T> extends KVStoreView<T> {
+  static class InMemoryView<T> extends KVStoreView<T> {
     private static final InMemoryView<?> EMPTY_VIEW =
       new InMemoryView<>(new ConcurrentHashMap<>(), null, "", new ConcurrentHashMap<>());
 
