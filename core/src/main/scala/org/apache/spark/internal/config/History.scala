@@ -68,13 +68,6 @@ private[spark] object History {
     .stringConf
     .createOptional
 
-  val MONGO_STORE_CONN_STRING = ConfigBuilder("spark.history.store.mongo.connString")
-    .doc("Local directory where to cache application history information. By default this is " +
-      "not set, meaning all history information will be kept in memory.")
-    .version("2.3.0")
-    .stringConf
-    .createOptional
-
   val MAX_LOCAL_DISK_USAGE = ConfigBuilder("spark.history.store.maxDiskUsage")
     .version("2.3.0")
     .bytesConf(ByteUnit.BYTE)

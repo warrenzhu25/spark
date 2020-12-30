@@ -133,41 +133,33 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   private val pendingReplayTasksCount = new java.util.concurrent.atomic.AtomicInteger(0)
 
   private val storePath = conf.get(LOCAL_STORE_DIR).map(new File(_))
-  private val mongoConnString = conf.get(MONGO_STORE_CONN_STRING)
   private val fastInProgressParsing = conf.get(FAST_IN_PROGRESS_PARSING)
 
   // Visible for testing.
-  private[history] val listing: KVStore = createListStore
+  private[history] val listing: KVStore = storePath.map { path =>
+    val dbPath = Files.createDirectories(new File(path, "listing.ldb").toPath()).toFile()
+    Utils.chmod700(dbPath)
 
-  private def createListStore = {
-    mongoConnString.map { connStr =>
-      new MongodbStore(connStr)
-    }.getOrElse(
-    storePath.map { path =>
-      val dbPath = Files.createDirectories(new File(path, "listing.ldb").toPath()).toFile()
-      Utils.chmod700(dbPath)
+    val metadata = new FsHistoryProviderMetadata(CURRENT_LISTING_VERSION,
+      AppStatusStore.CURRENT_VERSION, logDir.toString())
 
-      val metadata = new FsHistoryProviderMetadata(CURRENT_LISTING_VERSION,
-        AppStatusStore.CURRENT_VERSION, logDir.toString())
-
-      try {
+    try {
+      open(dbPath, metadata)
+    } catch {
+      // If there's an error, remove the listing database and any existing UI database
+      // from the store directory, since it's extremely likely that they'll all contain
+      // incompatible information.
+      case _: UnsupportedStoreVersionException | _: MetadataMismatchException =>
+        logInfo("Detected incompatible DB versions, deleting...")
+        path.listFiles().foreach(Utils.deleteRecursively)
         open(dbPath, metadata)
-      } catch {
-        // If there's an error, remove the listing database and any existing UI database
-        // from the store directory, since it's extremely likely that they'll all contain
-        // incompatible information.
-        case _: UnsupportedStoreVersionException | _: MetadataMismatchException =>
-          logInfo("Detected incompatible DB versions, deleting...")
-          path.listFiles().foreach(Utils.deleteRecursively)
-          open(dbPath, metadata)
-        case dbExc: NativeDB.DBException =>
-          // Get rid of the corrupted listing.ldb and re-create it.
-          logWarning(s"Failed to load disk store $dbPath :", dbExc)
-          Utils.deleteRecursively(dbPath)
-          open(dbPath, metadata)
-      }
-    }.getOrElse(new InMemoryStore()))
-  }
+      case dbExc: NativeDB.DBException =>
+        // Get rid of the corrupted listing.ldb and re-create it.
+        logWarning(s"Failed to load disk store $dbPath :", dbExc)
+        Utils.deleteRecursively(dbPath)
+        open(dbPath, metadata)
+    }
+  }.getOrElse(new InMemoryStore())
 
   private val diskManager = storePath.map { path =>
     new HistoryServerDiskManager(conf, path, listing, clock)
@@ -373,16 +365,12 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     secManager.setViewAclsGroups(stringToSeq(attempt.viewAclsGroups.getOrElse("")))
 
     val kvstore = try {
-      if (mongoConnString.nonEmpty) {
-         new MongodbStore(mongoConnString.get)
-      } else {
-        diskManager match {
-          case Some(sm) =>
-            loadDiskStore(sm, appId, attempt)
+      diskManager match {
+        case Some(sm) =>
+          loadDiskStore(sm, appId, attempt)
 
-          case _ =>
-            createInMemoryStore(attempt)
-        }
+        case _ =>
+          createInMemoryStore(attempt)
       }
     } catch {
       case _: FileNotFoundException =>
@@ -483,7 +471,83 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
         .filter { entry => !isBlacklisted(entry.getPath) }
         .filter { entry => !isProcessing(entry.getPath) }
         .flatMap { entry => EventLogFileReader(fs, entry) }
-        .filter { reader => checkListUpdated(reader, newLastScanTime) }
+        .filter { reader =>
+          try {
+            val info = listing.read(classOf[LogInfo], reader.rootPath.toString())
+
+            if (info.appId.isDefined) {
+              // If the SHS view has a valid application, update the time the file was last seen so
+              // that the entry is not deleted from the SHS listing. Also update the file size, in
+              // case the code below decides we don't need to parse the log.
+              listing.write(info.copy(lastProcessed = newLastScanTime,
+                fileSize = reader.fileSizeForLastIndex,
+                lastIndex = reader.lastIndex,
+                isComplete = reader.completed))
+            }
+
+            if (shouldReloadLog(info, reader)) {
+              if (reader.completed) {
+                true
+              }
+              // ignore fastInProgressParsing when rolling event log is enabled on the log path,
+              // to ensure proceeding compaction even fastInProgressParsing is turned on.
+              else if (info.appId.isDefined && reader.lastIndex.isEmpty && fastInProgressParsing) {
+                // When fast in-progress parsing is on, we don't need to re-parse when the
+                // size changes, but we do need to invalidate any existing UIs.
+                // Also, we need to update the `lastUpdated time` to display the updated time in
+                // the HistoryUI and to avoid cleaning the inprogress app while running.
+                val appInfo = listing.read(classOf[ApplicationInfoWrapper], info.appId.get)
+
+                val attemptList = appInfo.attempts.map { attempt =>
+                  if (attempt.info.attemptId == info.attemptId) {
+                    new AttemptInfoWrapper(
+                      attempt.info.copy(lastUpdated = new Date(newLastScanTime)),
+                      attempt.logPath,
+                      attempt.fileSize,
+                      attempt.lastIndex,
+                      attempt.adminAcls,
+                      attempt.viewAcls,
+                      attempt.adminAclsGroups,
+                      attempt.viewAclsGroups)
+                  } else {
+                    attempt
+                  }
+                }
+
+                val updatedAppInfo = new ApplicationInfoWrapper(appInfo.info, attemptList)
+                listing.write(updatedAppInfo)
+
+                invalidateUI(info.appId.get, info.attemptId)
+                false
+              } else {
+                true
+              }
+            } else {
+              false
+            }
+          } catch {
+            case _: NoSuchElementException =>
+              // If the file is currently not being tracked by the SHS, add an entry for it and try
+              // to parse it. This will allow the cleaner code to detect the file as stale later on
+              // if it was not possible to parse it.
+              try {
+                listing.write(LogInfo(reader.rootPath.toString(), newLastScanTime,
+                  LogType.EventLogs, None, None, reader.fileSizeForLastIndex, reader.lastIndex,
+                  None, reader.completed))
+                if (USE_EXTENDED_ATTRIBUTE) {
+                  reader.fileSizeForLastIndex >= 0
+                } else
+                {
+                  reader.fileSizeForLastIndex > 0
+                }
+              } catch {
+                case _: FileNotFoundException => false
+              }
+
+            case _: FileNotFoundException =>
+              false
+          }
+        }
         .sortWith { case (entry1, entry2) =>
           entry1.modificationTime > entry2.modificationTime
         }
@@ -520,83 +584,6 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     } catch {
       case e: Exception => logError("Exception in checking for event log updates", e)
     }
-  }
-
-  private def checkListUpdated(reader: EventLogFileReader, newLastScanTime: Long): Boolean = {
-      try {
-        val info = listing.read(classOf[LogInfo], reader.rootPath.toString())
-
-        if (info.appId.isDefined) {
-          // If the SHS view has a valid application, update the time the file was last seen so
-          // that the entry is not deleted from the SHS listing. Also update the file size, in
-          // case the code below decides we don't need to parse the log.
-          listing.write(info.copy(lastProcessed = newLastScanTime,
-            fileSize = reader.fileSizeForLastIndex,
-            lastIndex = reader.lastIndex,
-            isComplete = reader.completed))
-        }
-
-        if (shouldReloadLog(info, reader)) {
-          if (reader.completed) {
-            true
-          }
-          // ignore fastInProgressParsing when rolling event log is enabled on the log path,
-          // to ensure proceeding compaction even fastInProgressParsing is turned on.
-          else if (info.appId.isDefined && reader.lastIndex.isEmpty && fastInProgressParsing) {
-            // When fast in-progress parsing is on, we don't need to re-parse when the
-            // size changes, but we do need to invalidate any existing UIs.
-            // Also, we need to update the `lastUpdated time` to display the updated time in
-            // the HistoryUI and to avoid cleaning the inprogress app while running.
-            val appInfo = listing.read(classOf[ApplicationInfoWrapper], info.appId.get)
-
-            val attemptList = appInfo.attempts.map { attempt =>
-              if (attempt.info.attemptId == info.attemptId) {
-                new AttemptInfoWrapper(
-                  attempt.info.copy(lastUpdated = new Date(newLastScanTime)),
-                  attempt.logPath,
-                  attempt.fileSize,
-                  attempt.lastIndex,
-                  attempt.adminAcls,
-                  attempt.viewAcls,
-                  attempt.adminAclsGroups,
-                  attempt.viewAclsGroups)
-              } else {
-                attempt
-              }
-            }
-
-            val updatedAppInfo = new ApplicationInfoWrapper(appInfo.info, attemptList)
-            listing.write(updatedAppInfo)
-
-            invalidateUI(info.appId.get, info.attemptId)
-            false
-          } else {
-            true
-          }
-        } else {
-          false
-        }
-      } catch {
-        case _: NoSuchElementException =>
-          // If the file is currently not being tracked by the SHS, add an entry for it and try
-          // to parse it. This will allow the cleaner code to detect the file as stale later on
-          // if it was not possible to parse it.
-          try {
-            listing.write(LogInfo(reader.rootPath.toString(), newLastScanTime,
-              LogType.EventLogs, None, None, reader.fileSizeForLastIndex, reader.lastIndex,
-              None, reader.completed))
-            if (USE_EXTENDED_ATTRIBUTE) {
-              reader.fileSizeForLastIndex >= 0
-            } else {
-              reader.fileSizeForLastIndex > 0
-            }
-          } catch {
-            case _: FileNotFoundException => false
-          }
-
-        case _: FileNotFoundException =>
-          false
-      }
   }
 
   private[history] def shouldReloadLog(info: LogInfo, reader: EventLogFileReader): Boolean = {
@@ -982,7 +969,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
 
     log.appId.foreach { appId =>
       val app = listing.read(classOf[ApplicationInfoWrapper], appId)
-      if (app.oldestAttempt <= maxTime) {
+      if (app.oldestAttempt() <= maxTime) {
         val (remaining, toDelete) = app.attempts.partition { attempt =>
           attempt.info.lastUpdated.getTime() >= maxTime
         }
@@ -1329,32 +1316,6 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     store
   }
 
-  private def createMongoStore(attempt: AttemptInfoWrapper, connStr: String): KVStore = {
-    var retried = false
-    var store: KVStore = null
-    while (store == null) {
-      try {
-        val s = new MongodbStore(connStr)
-        val reader = EventLogFileReader(fs, new Path(logDir, attempt.logPath),
-          attempt.lastIndex)
-        rebuildAppStore(s, reader, attempt.info.lastUpdated.getTime())
-        store = s
-      } catch {
-        case _: IOException if !retried =>
-          // compaction may touch the file(s) which app rebuild wants to read
-          // compaction wouldn't run in short interval, so try again...
-          logWarning(s"Exception occurred while rebuilding log path ${attempt.logPath} - " +
-            "trying again...")
-          retried = true
-
-        case e: Exception =>
-          throw e
-      }
-    }
-
-    store
-  }
-
   private def loadPlugins(): Iterable[AppHistoryServerPlugin] = {
     ServiceLoader.load(classOf[AppHistoryServerPlugin], Utils.getContextOrSparkClassLoader).asScala
   }
@@ -1460,19 +1421,17 @@ private[history] class AttemptInfoWrapper(
     val viewAclsGroups: Option[String])
 
 private[history] class ApplicationInfoWrapper(
-    var info: ApplicationInfo,
+    val info: ApplicationInfo,
     val attempts: List[AttemptInfoWrapper]) {
 
-  info = info.copy(attempts = attempts.map(_.info))
+  @JsonIgnore @KVIndexParam
+  def id: String = info.id
 
-  @KVIndexParam
-  val id: String = info.id
+  @JsonIgnore @KVIndexParam("endTime")
+  def endTime(): Long = attempts.head.info.endTime.getTime()
 
-  @KVIndexParam("endTime")
-  val endTime: Long = attempts.head.info.endTime.getTime()
-
-  @KVIndexParam("oldestAttempt")
-  val oldestAttempt: Long = attempts.map(_.info.lastUpdated.getTime()).min
+  @JsonIgnore @KVIndexParam("oldestAttempt")
+  def oldestAttempt(): Long = attempts.map(_.info.lastUpdated.getTime()).min
 
   def toApplicationInfo(): ApplicationInfo = info.copy(attempts = attempts.map(_.info))
 

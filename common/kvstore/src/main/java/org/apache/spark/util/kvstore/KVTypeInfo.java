@@ -36,13 +36,11 @@ public class KVTypeInfo {
   private final Class<?> type;
   private final Map<String, KVIndex> indices;
   private final Map<String, Accessor> accessors;
-  private final Map<String, String> fieldsByIndex;
 
   public KVTypeInfo(Class<?> type) {
     this.type = type;
     this.accessors = new HashMap<>();
     this.indices = new HashMap<>();
-    this.fieldsByIndex = new HashMap<>();
 
     for (Field f : type.getDeclaredFields()) {
       KVIndex idx = f.getAnnotation(KVIndex.class);
@@ -52,7 +50,6 @@ public class KVTypeInfo {
         indices.put(idx.value(), idx);
         f.setAccessible(true);
         accessors.put(idx.value(), new FieldAccessor(f));
-        fieldsByIndex.put(idx.value(), f.getName());
       }
     }
 
@@ -66,7 +63,6 @@ public class KVTypeInfo {
         indices.put(idx.value(), idx);
         m.setAccessible(true);
         accessors.put(idx.value(), new MethodAccessor(m));
-        fieldsByIndex.put(idx.value(), m.getName());
       }
     }
 
@@ -112,12 +108,6 @@ public class KVTypeInfo {
     Accessor a = accessors.get(indexName);
     Preconditions.checkArgument(a != null, "No index %s.", indexName);
     return a;
-  }
-
-  String getFieldOrMethodName(String indexName) {
-    String n = fieldsByIndex.get(indexName);
-    Preconditions.checkArgument(n != null, "No index %s.", indexName);
-    return n;
   }
 
   Accessor getParentAccessor(String indexName) {
