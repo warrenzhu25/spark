@@ -17,11 +17,17 @@
 
 package org.apache.spark.deploy.history
 
-import java.io.{File, FileNotFoundException, IOException}
+import java.io.File
+import java.io.FileNotFoundException
+import java.io.IOException
 import java.lang.{Long => JLong}
 import java.nio.file.Files
-import java.util.{Date, NoSuchElementException, ServiceLoader}
-import java.util.concurrent.{ConcurrentHashMap, ExecutorService, Future, TimeUnit}
+import java.util.Date
+import java.util.NoSuchElementException
+import java.util.ServiceLoader
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.TimeUnit
 import java.util.zip.ZipOutputStream
 
 import scala.collection.JavaConverters._
@@ -31,17 +37,17 @@ import scala.xml.Node
 
 import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize
-import org.apache.hadoop.fs.{FileStatus, FileSystem, Path}
+import org.apache.hadoop.fs.FileStatus
+import org.apache.hadoop.fs.FileSystem
+import org.apache.hadoop.fs.Path
 import org.apache.hadoop.hdfs.DistributedFileSystem
-import com.google.common.io.ByteStreams
-import com.google.common.util.concurrent.MoreExecutors
-import org.apache.hadoop.fs.{FileStatus, FileSystem, Path, XAttrSetFlag}
-import org.apache.hadoop.hdfs.{DFSInputStream, DistributedFileSystem}
 import org.apache.hadoop.hdfs.protocol.HdfsConstants
 import org.apache.hadoop.security.AccessControlException
+import org.apache.spark.SecurityManager
+import org.apache.spark.SparkConf
+import org.apache.spark.SparkException
 import org.fusesource.leveldbjni.internal.NativeDB
 
-import org.apache.spark.{SecurityManager, SparkConf, SparkException}
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config._
@@ -53,9 +59,13 @@ import org.apache.spark.scheduler._
 import org.apache.spark.scheduler.ReplayListenerBus._
 import org.apache.spark.status._
 import org.apache.spark.status.KVUtils._
-import org.apache.spark.status.api.v1.{ApplicationAttemptInfo, ApplicationInfo}
+import org.apache.spark.status.api.v1.ApplicationAttemptInfo
+import org.apache.spark.status.api.v1.ApplicationInfo
 import org.apache.spark.ui.SparkUI
-import org.apache.spark.util.{Clock, SystemClock, ThreadUtils, Utils}
+import org.apache.spark.util.Clock
+import org.apache.spark.util.SystemClock
+import org.apache.spark.util.ThreadUtils
+import org.apache.spark.util.Utils
 import org.apache.spark.util.kvstore._
 
 /**
@@ -376,8 +386,13 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       case _: FileNotFoundException =>
         return None
     }
+
+    // KVstore is not ready, retry later
+    if (kvstore.isEmpty) {
+      return None
+    }
     
-    val ui = SparkUI.create(None, new HistoryAppStatusStore(conf, kvstore), conf, secManager,
+    val ui = SparkUI.create(None, new HistoryAppStatusStore(conf, kvstore.get), conf, secManager,
       app.info.name, HistoryServer.getAttemptURI(appId, attempt.info.attemptId),
       attempt.info.startTime.getTime(), attempt.info.appSparkVersion, app.info.subCluster,
       app.info.queue, app.info.finalStatus, app.info.applicationType, app.info.tags)
@@ -1242,14 +1257,14 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   private def loadDiskStore(
       dm: HistoryServerDiskManager,
       appId: String,
-      attempt: AttemptInfoWrapper): KVStore = {
+      attempt: AttemptInfoWrapper): Option[KVStore] = {
     val metadata = new AppStatusStoreMetadata(AppStatusStore.CURRENT_VERSION)
 
     // First check if the store already exists and try to open it. If that fails, then get rid of
     // the existing data.
     dm.openStore(appId, attempt.info.attemptId).foreach { path =>
       try {
-        return KVUtils.open(path, metadata)
+        return Some(KVUtils.open(path, metadata))
       } catch {
         case e: Exception =>
           logInfo(s"Failed to open existing store for $appId/${attempt.info.attemptId}.", e)
@@ -1257,40 +1272,86 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       }
     }
 
-    // At this point the disk data either does not exist or was deleted because it failed to
-    // load, so the event log needs to be replayed.
+    def replayEventLog: Unit = {
+      // At this point the disk data either does not exist or was deleted because it failed to
+      // load, so the event log needs to be replayed.
+      if (updateReplaying(appId, attempt.info.attemptId, true)) {
+        return
+      }
 
-    var retried = false
-    var newStorePath: File = null
-    while (newStorePath == null) {
-      val reader = EventLogFileReader(fs, new Path(logDir, attempt.logPath),
-        attempt.lastIndex)
-      val isCompressed = reader.compressionCodec.isDefined
-      logInfo(s"Leasing disk manager space for app $appId / ${attempt.info.attemptId}...")
-      val lease = dm.lease(reader.totalSize, isCompressed)
-      try {
-        Utils.tryWithResource(KVUtils.open(lease.tmpPath, metadata)) { store =>
-          rebuildAppStore(store, reader, attempt.info.lastUpdated.getTime())
+      var retried = false
+      var newStorePath: File = null
+      while (newStorePath == null) {
+        val reader = EventLogFileReader(fs, new Path(logDir, attempt.logPath),
+          attempt.lastIndex)
+        val isCompressed = reader.compressionCodec.isDefined
+        logInfo(s"Leasing disk manager space for app $appId / ${attempt.info.attemptId}...")
+        val lease = dm.lease(reader.totalSize, isCompressed)
+        try {
+          Utils.tryWithResource(KVUtils.open(lease.tmpPath, metadata)) { store =>
+            rebuildAppStore(store, reader, attempt.info.lastUpdated.getTime())
+          }
+          newStorePath = lease.commit(appId, attempt.info.attemptId)
+          updateReplaying(appId, attempt.info.attemptId, false)
+        } catch {
+          case _: IOException if !retried =>
+            // compaction may touch the file(s) which app rebuild wants to read
+            // compaction wouldn't run in short interval, so try again...
+            logWarning(s"Exception occurred while rebuilding app $appId - trying again...")
+            lease.rollback()
+            updateReplaying(appId, attempt.info.attemptId, false)
+            retried = true
+
+          case e: Exception =>
+            lease.rollback()
+            updateReplaying(appId, attempt.info.attemptId, false)
+            throw e
         }
-        newStorePath = lease.commit(appId, attempt.info.attemptId)
-      } catch {
-        case _: IOException if !retried =>
-          // compaction may touch the file(s) which app rebuild wants to read
-          // compaction wouldn't run in short interval, so try again...
-          logWarning(s"Exception occurred while rebuilding app $appId - trying again...")
-          lease.rollback()
-          retried = true
-
-        case e: Exception =>
-          lease.rollback()
-          throw e
       }
     }
 
-    KVUtils.open(newStorePath, metadata)
+    replayExecutor.submit(new Runnable() {
+      override def run(): Unit = replayEventLog
+    })
+
+    None
   }
 
-  private def createInMemoryStore(attempt: AttemptInfoWrapper): KVStore = {
+  private def updateReplaying(
+      appId: String,
+      attemptId: Option[String],
+      replaying: Boolean): Boolean = this.synchronized {
+    val app = load(appId)
+    val attempt = app.attempts.find(a => a.info.attemptId == attemptId).get
+
+    if (attempt.info.replaying == replaying) {
+      return replaying
+    }
+
+    val newAttempts = app.attempts.map { attempt =>
+      if (attempt.info.attemptId == attemptId) {
+        new AttemptInfoWrapper(
+          attempt.info.copy(replaying = replaying),
+          attempt.logPath,
+          attempt.fileSize,
+          attempt.lastIndex,
+          attempt.adminAcls,
+          attempt.viewAcls,
+          attempt.adminAclsGroups,
+          attempt.viewAclsGroups)
+      } else {
+        attempt
+      }
+    }
+    val newAppInfo = new ApplicationInfoWrapper(
+      app.info,
+      newAttempts)
+    listing.write(newAppInfo)
+
+    attempt.info.replaying
+  }
+
+  private def createInMemoryStore(attempt: AttemptInfoWrapper): Option[KVStore] = {
     var retried = false
     var store: KVStore = null
     while (store == null) {
@@ -1313,7 +1374,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       }
     }
 
-    store
+    Some(store)
   }
 
   private def loadPlugins(): Iterable[AppHistoryServerPlugin] = {
