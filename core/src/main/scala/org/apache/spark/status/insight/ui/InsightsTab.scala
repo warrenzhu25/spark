@@ -61,10 +61,10 @@ private[ui] class InsightsPage(
   )
 
   def render(request: HttpServletRequest): Seq[Node] = {
-
+    val basePathUri = UIUtils.prependBaseUri(request, parent.basePath)
     val content =
       <span>
-        {insightsTable(request)}
+        {insightsTable(basePathUri)}
         {failureSummary(request)}
       </span>
 
@@ -121,20 +121,8 @@ private[ui] class InsightsPage(
     </tr>
   }
 
-  private def insightsTable(request: HttpServletRequest) = {
-    heuristic.flatMap(_.apply(appData())).map(r =>
-    <span class="collapse-aggregated-classpathEntries collapse-table"
-          onClick="collapseTable('collapse-aggregated-classpathEntries',
-            'aggregated-classpathEntries')">
-      <h4>
-        <span class="collapse-table-arrow arrow-open"></span>
-        <a>{r.name}</a>
-      </h4>
-    </span>
-      <div class="aggregated-classpathEntries collapsible-table">
-        {r.toHTML(request)}
-      </div>
-    )
+  private def insightsTable(basePathUri: String) = {
+    heuristic.flatMap(_.apply(appData())).map(r => r.toHTML(basePathUri))
   }
 
   private def appData(): SparkApplicationData = {

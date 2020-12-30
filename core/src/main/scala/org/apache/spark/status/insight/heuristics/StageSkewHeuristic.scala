@@ -14,28 +14,41 @@
 
 package org.apache.spark.status.insight.heuristics
 
-import javax.servlet.http.HttpServletRequest
-
 import scala.xml.Node
 
-import org.apache.spark.executor.ExecutorMetricsDistributions
-import org.apache.spark.executor.TaskMetrics
-import org.apache.spark.metrics.ExecutorMetricType
 import org.apache.spark.status.api.v1.StageData
 import org.apache.spark.status.api.v1.TaskMetricDistributions
 import org.apache.spark.status.insight.SparkApplicationData
-import org.apache.spark.status.insight.heuristics.ConfigurationHeuristicsConstants._
 import org.apache.spark.util.Utils._
 
 /**
  * A heuristic based on executor peak memory metrics
  */
 object StageSkewHeuristic extends Heuristic {
-  val SKEW_THRESHOLD = 0.2
+  val SKEW_THRESHOLD = 0.3
 
-  val taskMetrics: Map[String, (TaskMetricDistributions) => IndexedSeq[Double]] = Map(
-    "executorRunTime" -> (d => d.executorCpuTime)
-  )
+  val taskMetrics: Map[String, TaskMetricDistributions => IndexedSeq[Double]] = Map(
+    "executorRunTime" -> (d => d.executorRunTime),
+    "executorCpuTime"-> (d => d.executorCpuTime),
+    "jvmGcTime"-> (d => d.jvmGcTime),
+    "peakExecutionMemory"-> (d => d.peakExecutionMemory),
+    "memoryBytesSpilled"-> (d => d.memoryBytesSpilled),
+    "diskBytesSpilled"-> (d => d.diskBytesSpilled),
+    "bytesRead"-> (d => d.inputMetrics.bytesRead),
+    "recordsRead"-> (d => d.inputMetrics.recordsRead),
+    "bytesWritten"-> (d => d.outputMetrics.bytesWritten),
+    "recordsWritten"-> (d => d.outputMetrics.recordsWritten),
+    "shuffleReadBytes"-> (d => d.shuffleReadMetrics.readBytes),
+    "shuffleReadRecords"-> (d => d.shuffleReadMetrics.readRecords),
+    "shuffleRemoteBlocksFetched"-> (d => d.shuffleReadMetrics.remoteBlocksFetched),
+    "shuffleLocalBlocksFetched"-> (d => d.shuffleReadMetrics.localBlocksFetched),
+    "shuffleFetchWaitTime"-> (d => d.shuffleReadMetrics.fetchWaitTime),
+    "shuffleRemoteBytesRead"-> (d => d.shuffleReadMetrics.remoteBytesRead),
+    "shuffleRemoteBytesReadToDisk"-> (d => d.shuffleReadMetrics.remoteBytesReadToDisk),
+    "shuffleTotalBlocksFetched"-> (d => d.shuffleReadMetrics.totalBlocksFetched),
+    "shuffleWriteBytes"-> (d => d.shuffleWriteMetrics.writeBytes),
+    "shuffleWriteRecords"-> (d => d.shuffleWriteMetrics.writeRecords),
+    "shuffleWriteTime"-> (d => d.shuffleWriteMetrics.writeTime))
 
   override def analysis(data: SparkApplicationData): Seq[AnalysisResult] = {
     data.stageDataWithSummaries.flatMap(m => analysis(data.appConf, m))
@@ -48,18 +61,19 @@ object StageSkewHeuristic extends Heuristic {
     val metricDistributions = stageData.taskSummary.get
     val records =
       taskMetrics
+
         .mapValues(f => f.apply(metricDistributions))
-        .filter{ case (_, d) => d(0) > d(1) * SKEW_THRESHOLD}
+        .filter{ case (_, d) => d(2) < d(4) * SKEW_THRESHOLD}
         .map { case (name, metrics) =>
           new StageSkewRecord(
-            name = name,
+            name = name.capitalize,
             value = "",
             distributions = metrics.map(v => metricToString(name, v)))
         }
         .toSeq
 
     if (records.nonEmpty) {
-      Some(AnalysisResult(records))
+      Some(AnalysisResult(records, stageNameLink(stageData, _: String)))
     } else {
       None
     }
@@ -68,11 +82,18 @@ object StageSkewHeuristic extends Heuristic {
   def metricToString(name: String, value: Double): String = {
     if (name.contains("Time")) {
       timeStringAsSeconds(value.toLong + "ms") + "s"
-    } else if (name.contains("Size")) {
+    } else if (name.contains("Size") || name.contains("Bytes")) {
       bytesToString(value.toLong)
     } else {
       value.toLong.toString
     }
+  }
+
+  private def stageNameLink(s: StageData, basePathUri: String): Seq[Node] = {
+    val nameLinkUri = s"$basePathUri/stages/stage/?id=${s.stageId}&attempt=${s.attemptId}"
+    <a href={nameLinkUri} class="name-link">
+      {s.description.get} {s.numCompleteTasks}/{s.numTasks} tasks
+    </a>
   }
 }
 
@@ -87,11 +108,11 @@ class StageSkewRecord(name: String,
   override val header: Seq[String] =
     Seq("Name", "Value", "Usage (Median / Max)", "Suggested", "Description", "Severity")
 
-  override def toHTML(request: HttpServletRequest): Seq[Node] = {
+  override def toHTML(basePathUri: String): Seq[Node] = {
     <tr>
       <td>{name.split("(?=[A-Z])")}</td>
       <td>{value}</td>
-      <td>{distributions(0)} / {distributions(1)}</td>
+      <td>{distributions(2)} / {distributions(4)}</td>
       <td>{description}</td>
       <td>{suggested}</td>
       <td>

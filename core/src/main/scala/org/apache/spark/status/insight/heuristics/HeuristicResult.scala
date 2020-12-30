@@ -32,7 +32,7 @@ case class AnalysisRecord(
   val header: Seq[String] =
     Seq("Name", "Value", "Suggested", "Description", "Severity")
 
-  def toHTML(request: HttpServletRequest): Seq[Node] = {
+  def toHTML(basePathUri: String): Seq[Node] = {
     <tr>
       <td>{name}</td>
       <td>{value}</td>
@@ -49,17 +49,17 @@ case class AnalysisRecord(
 
 case class AnalysisResult(
     records: Seq[AnalysisRecord],
-    name: Option[String] = None,
-    description: Option[String] = None,
+    title: String => Seq[Node] = (_ => Seq.empty),
     severity: Severity = Severity.Normal) {
   val header: Seq[String] =
     records.head.header
 
-  def toHTML(request: HttpServletRequest): Seq[Node] = {
+  def toHTML(basePathUri: String): Seq[Node] = {
     assert(records.nonEmpty)
+    title.apply(basePathUri) ++
     UIUtils.listingTable(
-      records.head.header,
-      (r: AnalysisRecord) => r.toHTML(request),
+      header,
+      (r: AnalysisRecord) => r.toHTML(basePathUri),
       records,
       fixedWidth = true)
   }
@@ -68,7 +68,7 @@ case class AnalysisResult(
 
 case class HeuristicResult(name: String, results: Seq[AnalysisResult]) {
 
-  def toHTML(request: HttpServletRequest): Seq[Node] = {
+  def toHTML(basePathUri: String): Seq[Node] = {
     <span class="collapse-aggregated-classpathEntries collapse-table"
           onClick="collapseTable('collapse-aggregated-classpathEntries',
             'aggregated-classpathEntries')">
@@ -78,7 +78,7 @@ case class HeuristicResult(name: String, results: Seq[AnalysisResult]) {
       </h4>
     </span>
         <div class="aggregated-classpathEntries collapsible-table">
-          {results.map(r => r.toHTML(request))}
+          {results.map(r => r.toHTML(basePathUri))}
         </div>
   }
 }

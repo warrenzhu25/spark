@@ -36,6 +36,7 @@ private[spark] class AppStatusStore(
     val store: KVStore,
     val listener: Option[AppStatusListener] = None) {
   private val EXCEPTION_SUMMARY_LIMIT = 10
+  private val DEFAULT_QUANTILES = Seq(0.05,0.25,0.5,0.75,0.95)
 
   def applicationInfo(): v1.ApplicationInfo = {
     try {
@@ -365,7 +366,10 @@ private[spark] class AppStatusStore(
       activeOnly: Boolean,
       unsortedQuantiles: Array[Double]): Option[ExecutorMetricsDistributions] = {
     val quantiles = unsortedQuantiles.sorted
-    val executorMetrics = executorList(activeOnly).flatMap(_.peakMemoryMetrics).toIndexedSeq
+    val executorMetrics = executorList(activeOnly)
+      .filter(e => e.peakMemoryMetrics != null)
+      .flatMap(_.peakMemoryMetrics)
+      .toIndexedSeq
     if (executorMetrics.nonEmpty) {
       Some(new ExecutorMetricsDistributions(quantiles, executorMetrics))
     } else {
@@ -537,6 +541,58 @@ private[spark] class AppStatusStore(
       tasks = Some(tasks),
       executorSummary = Some(executorSummary(stage.stageId, stage.attemptId)),
       killedTasksSummary = stage.killedTasksSummary)
+  }
+
+  def stageWithTaskSummaries(stage: v1.StageData): v1.StageData = {
+    new v1.StageData(
+      status = stage.status,
+      stageId = stage.stageId,
+      attemptId = stage.attemptId,
+      numTasks = stage.numTasks,
+      numActiveTasks = stage.numActiveTasks,
+      numCompleteTasks = stage.numCompleteTasks,
+      numFailedTasks = stage.numFailedTasks,
+      numKilledTasks = stage.numKilledTasks,
+      numCompletedIndices = stage.numCompletedIndices,
+      submissionTime = stage.submissionTime,
+      firstTaskLaunchedTime = stage.firstTaskLaunchedTime,
+      completionTime = stage.completionTime,
+      failureReason = stage.failureReason,
+      executorDeserializeTime = stage.executorDeserializeTime,
+      executorDeserializeCpuTime = stage.executorDeserializeCpuTime,
+      executorRunTime = stage.executorRunTime,
+      executorCpuTime = stage.executorCpuTime,
+      resultSize = stage.resultSize,
+      jvmGcTime = stage.jvmGcTime,
+      resultSerializationTime = stage.resultSerializationTime,
+      memoryBytesSpilled = stage.memoryBytesSpilled,
+      diskBytesSpilled = stage.diskBytesSpilled,
+      peakExecutionMemory = stage.peakExecutionMemory,
+      inputBytes = stage.inputBytes,
+      inputRecords = stage.inputRecords,
+      outputBytes = stage.outputBytes,
+      outputRecords = stage.outputRecords,
+      shuffleRemoteBlocksFetched = stage.shuffleRemoteBlocksFetched,
+      shuffleLocalBlocksFetched = stage.shuffleLocalBlocksFetched,
+      shuffleFetchWaitTime = stage.shuffleFetchWaitTime,
+      shuffleRemoteBytesRead = stage.shuffleRemoteBytesRead,
+      shuffleRemoteBytesReadToDisk = stage.shuffleRemoteBytesReadToDisk,
+      shuffleLocalBytesRead = stage.shuffleLocalBytesRead,
+      shuffleReadBytes = stage.shuffleReadBytes,
+      shuffleReadRecords = stage.shuffleReadRecords,
+      shuffleWriteBytes = stage.shuffleWriteBytes,
+      shuffleWriteTime = stage.shuffleWriteTime,
+      shuffleWriteRecords = stage.shuffleWriteRecords,
+      name = stage.name,
+      description = stage.description,
+      details = stage.details,
+      schedulingPool = stage.schedulingPool,
+      rddIds = stage.rddIds,
+      accumulatorUpdates = stage.accumulatorUpdates,
+      tasks = None,
+      executorSummary = Some(executorSummary(stage.stageId, stage.attemptId)),
+      killedTasksSummary = stage.killedTasksSummary,
+      taskSummary = taskSummary(stage.stageId, stage.attemptId, DEFAULT_QUANTILES.toArray))
   }
 
   def rdd(rddId: Int): v1.RDDStorageInfo = {

@@ -73,7 +73,7 @@ class UsageRecord(name: String,
   override val header: Seq[String] =
     Seq("Name", "Value", "Usage (Median / Max)", "Suggested", "Description", "Severity")
 
-  override def toHTML(request: HttpServletRequest): Seq[Node] = {
+  override def toHTML(basePathUri: String): Seq[Node] = {
     <tr>
       <td>{name.split("(?=[A-Z])")}</td>
       <td>{value}</td>

@@ -36,10 +36,8 @@ case class SparkApplicationData(
     stageData
       .sortBy(_.executorRunTime)
       .reverse
-      .map(_.stageId)
       .take(10)
-      .flatMap(s => store.stageData(s, true))
-
+      .map(s => store.stageWithTaskSummaries(s))
   }
 }
 
