@@ -23,6 +23,8 @@ import java.nio.channels.ReadableByteChannel
 import scala.concurrent.Future
 
 import org.apache.spark.{SecurityManager, SparkConf}
+
+import org.apache.spark.metrics.MetricsSystem
 import org.apache.spark.rpc.netty.NettyRpcEnvFactory
 import org.apache.spark.util.RpcUtils
 
@@ -147,6 +149,8 @@ private[spark] abstract class RpcEnv(conf: SparkConf) {
    * @param uri URI with location of the file.
    */
   def openChannel(uri: String): ReadableByteChannel
+
+  def registerMetricsSystem(metricsSystem: MetricsSystem): Unit
 }
 
 /**
