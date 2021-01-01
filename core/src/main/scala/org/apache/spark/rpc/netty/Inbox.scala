@@ -21,7 +21,11 @@ import javax.annotation.concurrent.GuardedBy
 
 import scala.util.control.NonFatal
 
+import com.codahale.metrics.Gauge
+import com.codahale.metrics.Metric
+import com.codahale.metrics.MetricSet
 import org.apache.spark.SparkException
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.rpc.{RpcAddress, RpcEndpoint, ThreadSafeRpcEndpoint}
 
@@ -233,4 +237,12 @@ private[netty] class Inbox(val endpointName: String, val endpoint: RpcEndpoint)
       inbox.numActiveThreads
     }
   }
+  def getMetrics(): Map[String, Metric] = {
+    val size = new Gauge[Int] {
+      override def getValue: Int = inbox.synchronized { messages.size() }
+    }
+
+    Map(s"$endpointName.inbox.queue.size" -> size)
+  }
+
 }

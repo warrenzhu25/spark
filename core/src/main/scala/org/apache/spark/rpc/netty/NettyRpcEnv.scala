@@ -30,6 +30,8 @@ import scala.util.{DynamicVariable, Failure, Success, Try}
 import scala.util.control.NonFatal
 
 import org.apache.spark.{SecurityManager, SparkConf, SparkContext}
+import org.apache.spark.SparkEnv
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.EXECUTOR_ID
 import org.apache.spark.internal.config.Network._
@@ -62,8 +64,8 @@ private[netty] class NettyRpcEnv(
 
   private val streamManager = new NettyStreamManager(this)
 
-  private val transportContext = new TransportContext(transportConf,
-    new NettyRpcHandler(dispatcher, this, streamManager))
+  private val rpcHandler = new NettyRpcHandler(dispatcher, this, streamManager)
+  private val transportContext = new TransportContext(transportConf, rpcHandler)
 
   private def createClientBootstraps(): java.util.List[TransportClientBootstrap] = {
     if (securityManager.isAuthenticationEnabled()) {
@@ -125,6 +127,7 @@ private[netty] class NettyRpcEnv(
     server = transportContext.createServer(bindAddress, port, bootstraps)
     dispatcher.registerRpcEndpoint(
       RpcEndpointVerifier.NAME, new RpcEndpointVerifier(this, dispatcher))
+    SparkEnv.get.metricsSystem.registerSource(new RpcSource(rpcHandler, dispatcher))
   }
 
   @Nullable
@@ -756,4 +759,6 @@ private[netty] class NettyRpcHandler(
       // See java.net.Socket.getRemoteSocketAddress
     }
   }
+
+  override def getNumActiveConnections: Int = remoteAddresses.size()
 }
