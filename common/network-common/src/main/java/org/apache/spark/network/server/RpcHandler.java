@@ -129,4 +129,6 @@ public abstract class RpcHandler {
 
   }
 
+  public abstract int getNumActiveConnections();
+
 }

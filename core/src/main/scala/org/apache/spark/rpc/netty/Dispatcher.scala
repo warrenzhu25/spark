@@ -24,7 +24,11 @@ import scala.collection.JavaConverters._
 import scala.concurrent.Promise
 import scala.util.control.NonFatal
 
+import com.codahale.metrics.Metric
+import com.codahale.metrics.MetricSet
+import java.util
 import org.apache.spark.SparkException
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.network.client.RpcResponseCallback
 import org.apache.spark.rpc._
@@ -208,4 +212,9 @@ private[netty] class Dispatcher(nettyEnv: NettyRpcEnv, numUsableCores: Int) exte
   def verify(name: String): Boolean = {
     endpoints.containsKey(name)
   }
+
+  def getAllMetrics(): Map[String, Metric] = {
+    endpoints.asScala.values.flatMap(m => m.getMetrics()).toMap
+  }
+
 }

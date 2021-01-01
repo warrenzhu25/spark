@@ -1293,6 +1293,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
           }
           newStorePath = lease.commit(appId, attempt.info.attemptId)
           updateReplaying(appId, attempt.info.attemptId, false)
+          logInfo(s"Event log replay finished for app $appId / ${attempt.info.attemptId}")
         } catch {
           case _: IOException if !retried =>
             // compaction may touch the file(s) which app rebuild wants to read
