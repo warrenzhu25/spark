@@ -408,6 +408,8 @@ object SparkEnv extends Logging {
       ms
     }
 
+    rpcEnv.registerMetricsSystem(metricsSystem)
+
     val outputCommitCoordinator = mockOutputCommitCoordinator.getOrElse {
       new OutputCommitCoordinator(conf, isDriver)
     }

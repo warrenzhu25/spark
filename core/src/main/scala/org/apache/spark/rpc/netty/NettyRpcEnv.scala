@@ -35,6 +35,7 @@ import org.apache.spark.SparkEnv
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.EXECUTOR_ID
 import org.apache.spark.internal.config.Network._
+import org.apache.spark.metrics.MetricsSystem
 import org.apache.spark.network.TransportContext
 import org.apache.spark.network.client._
 import org.apache.spark.network.crypto.{AuthClientBootstrap, AuthServerBootstrap}
@@ -459,6 +460,10 @@ private[netty] class NettyRpcEnv(
       sink.close()
     }
 
+  }
+
+  override def registerMetricsSystem(metricsSystem: MetricsSystem): Unit = {
+    metricsSystem.registerSource(new RpcSource(rpcHandler, dispatcher))
   }
 }
 
