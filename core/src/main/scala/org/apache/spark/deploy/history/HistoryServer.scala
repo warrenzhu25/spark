@@ -72,6 +72,9 @@ class HistoryServer(
 
       res.setContentType("text/html;charset=utf-8")
 
+      val start_time = System.currentTimeMillis()
+      val uri = req.getPathInfo
+
       // Parse the URI created by getAttemptURI(). It contains an app ID and an optional
       // attempt ID (separated by a slash).
       val parts = Option(req.getPathInfo()).getOrElse("").split("/")
@@ -104,6 +107,8 @@ class HistoryServer(
         UIUtils.basicSparkPage(req, msg, "Not Found").foreach { n =>
           res.getWriter().write(n.toString)
         }
+        val end_time = System.currentTimeMillis()
+        logInfo(s"request: ${uri}, response time:${end_time - start_time}ms")
         return
       }
 
@@ -197,7 +202,11 @@ class HistoryServer(
    * @return List of all known applications.
    */
   def getApplicationList(): Iterator[ApplicationInfo] = {
-    provider.getListing()
+    val start_time = System.currentTimeMillis()
+    val result = provider.getListing()
+    val end_time = System.currentTimeMillis()
+    logInfo(s"request: get Application List -- reponse time: ${end_time - start_time}ms")
+    result
   }
 
   def getEventLogsUnderProcess(): Int = {
