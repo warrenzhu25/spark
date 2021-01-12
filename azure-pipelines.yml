@@ -1,0 +1,68 @@
+trigger:
+  branches:
+    include:
+    - refs/heads/v3.0.1-mt-release
+    - refs/heads/v3.0.1-mt
+
+jobs:
+  - job: BuildPublishSpark
+    displayName: Build And Publish Spark
+    timeoutInMinutes: 0
+
+    pool:
+      vmImage: 'windows-latest'
+
+    steps:
+      - checkout: self
+
+      - task: ComponentGovernanceComponentDetection@0
+        displayName: Component Detection
+
+      - task: DownloadBuildArtifacts@0
+        displayName: '[ENV] Download Maven settings'
+        inputs:
+          buildType: specific
+          project: b9b38275-a912-4222-a7b7-0b8b968719c0
+          pipeline: 7421
+          buildVersionToDownload: latestFromBranch
+          artifactName: settings
+          downloadPath: '$(Build.SourcesDirectory)'
+
+      - task: MavenAuthenticate@0
+        displayName: '[ENV] Maven Authenticate'
+        inputs:
+          artifactsFeeds: MultiTenancy-Test3
+
+      - task: AddBuildTag@1
+        displayName: '[ENV] Add build tag $(Build.SourceVersion)'
+        inputs:
+          tag: $(Build.SourceVersion)
+
+      - task: Bash@3
+        displayName: '[BUILD] Spark'
+        inputs:
+          targetType: 'filePath'
+          filePath: dev/make-distribution.sh
+          arguments: -Pyarn -Phive -Phadoop-provided -Phadoop-2.9.2-MT -Dcheckstyle.skip=true -s settings\\settings.xml
+
+      - task: CopyFiles@2
+        displayName: '[COPY] dist to staging dir'
+        inputs:
+          sourceFolder: dist
+          contents: |
+            **
+            !jars/hadoop-*.jar
+          targetFolder: '$(Build.ArtifactStagingDirectory)'
+
+      - task: CopyFiles@2
+        displayName: '[COPY] external shuffle jar to share'
+        inputs:
+          contents: dist/yarn/*.jar
+          targetFolder: '$(Build.ArtifactStagingDirectory)\share'
+          flattenFolders: true
+
+      - task: PublishBuildArtifacts@1
+        displayName: '[PUBLISH] Spark Artifact'
+        inputs:
+          pathToPublish: '$(Build.ArtifactStagingDirectory)'
+          artifactName: Spark
