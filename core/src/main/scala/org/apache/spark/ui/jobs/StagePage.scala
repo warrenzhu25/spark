@@ -21,17 +21,17 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets.UTF_8
 import java.util.Date
 import java.util.concurrent.TimeUnit
+
 import javax.servlet.http.HttpServletRequest
 
 import scala.collection.mutable.{HashMap, HashSet}
-import scala.xml.{Node, Unparsed}
-
+import scala.xml.{Node, NodeBuffer, Unparsed}
 import org.apache.commons.text.StringEscapeUtils
-
 import org.apache.spark.internal.config.UI._
 import org.apache.spark.scheduler.TaskLocality
 import org.apache.spark.status._
 import org.apache.spark.status.api.v1._
+import org.apache.spark.status.insight.heuristics.{DiagnosisResult, FailureDiagnosis}
 import org.apache.spark.ui._
 import org.apache.spark.util.Utils
 
@@ -461,7 +461,8 @@ private[ui] class StagePage(parent: StagesTab, store: AppStatusStore) extends We
   }
 
   def failureSummaryTable(failureSummary: Seq[FailureSummary]): Seq[Node] = {
-    val propertyHeader = Seq("Exception", "Message", "Count", "Details", "Diagnosis")
+    val propertyHeader = Seq("Exception", "Message", "Count", "Details", "Diagnosis",
+      "IsRootCause", "Suggestion")
     val headerClasses = Seq("sorttable_alpha", "sorttable_alpha")
     UIUtils.listingTable(propertyHeader, failureSummaryRow,
       failureSummary,
@@ -474,7 +475,7 @@ private[ui] class StagePage(parent: StagesTab, store: AppStatusStore) extends We
       <td>{e.exceptionFailure.message}</td>
       <td>{e.count}</td>
       {errorMessageCell(e.exceptionFailure.stackTrace)}
-      <td>{diagnosisCell(FailureDiagnosis.analysis(e.exceptionFailure))}</td>
+      {diagnosisRow(FailureDiagnosis.analysis(e.exceptionFailure))}
     </tr>
   }
 }
@@ -856,20 +857,41 @@ private[spark] object ApiHelper {
     <td>{errorSummary}{details}</td>
   }
 
-  def diagnosisCell(diagnosisResult: Option[DiagnosisResult]): Seq[Node] = {
+  def diagnosisRow(diagnosisResult: Option[DiagnosisResult]): Seq[Node] = {
     diagnosisResult match {
       case Some(d) =>
-        <p>{d.desc}</p> ++
-        {paragraphCell(d.rootCause)} ++
-        {paragraphCell(d.configs)}
-      case _ => Seq.empty[Node]
+        <td>{d.desc}</td>
+          <td>{d.rootCause}</td>
+          <td>{configsCell(d.suggestedConfigs)}{copyToClipboardButton(d.suggestedConfigs)}</td>
+      case _ =>
+        <td></td>
+          <td></td>
+          <td></td>
     }
   }
 
-  def paragraphCell(content: Option[String]): Seq[Node] = {
-    content match {
-      case Some(s) => <p>{s}</p>
-      case _ => Seq.empty[Node]
-    }
+  def configsCell(configs: Map[String, String]): Seq[Node] = {
+    configs
+      .map(_.productIterator.mkString("="))
+      .map(s => <p>{s}</p>)
+      .toSeq
+  }
+
+  def copyToClipboardButton(configs: Map[String, String]): Seq[Node] = {
+    <button
+      type="button"
+      class="btn btn-default btn-copy js-tooltip js-copy"
+      data-toggle="tooltip"
+      data-placement="bottom"
+      data-copy={toSparkSubmitConf(configs)}
+      title="Copy to clipboard">Copy spark-submit conf
+    </button>
+  }
+
+  def toSparkSubmitConf(configs: Map[String, String]): String = {
+    configs
+      .map(_.productIterator.mkString("="))
+      .map(s => s"--conf $s")
+      .mkString(" ")
   }
 }

@@ -14,7 +14,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.status.api.v1
+package org.apache.spark.status.insight.heuristics
+
+import org.apache.spark.status.api.v1.FailureReason
 
 object FailureDiagnosis {
 
@@ -39,11 +41,11 @@ case class DiagnosisResult(
   desc: String,
   suggestedConfigs: Map[String, String] = Map.empty,
   isRootCause: Option[Boolean] = None) {
-  def rootCause: Option[String] = {
+  def rootCause: String = {
     isRootCause match {
-      case Some(true) => Some("This is root cause.")
-      case Some(false) => Some("This is not root cause.")
-      case _ => None
+      case Some(true) => "Yes"
+      case Some(false) => "No"
+      case _ => "Unknown"
     }
   }
 
@@ -133,16 +135,20 @@ object ConnectionFailureRule extends DiagnosisRule("IOException") {
     }
 }
 object MemoryExceededRule extends DiagnosisRule("ExecutorLostFailure") {
-  private val pattern = raw"^Container killed by YARN for exceeding memory limits.*".r
+  private val pattern = raw"^Container killed by YARN for exceeding (physical )?memory limits.*".r
   private val result =
     """
       |Caused by too few memoryOverhead of executor allocated.
       |Please increase spark.executor.memoryOverhead.
       |""".stripMargin
+  private val suggestedConfigs = Map(
+    "spark.shuffle.io.connectionTimeout" -> "240s",
+    "spark.shuffle.io.maxRetries" -> "10"
+  )
 
   override def apply(failureReason: FailureReason): Option[DiagnosisResult] =
     failureReason.message match {
-      case pattern(_*) => Some(DiagnosisResult(result, Map.empty, Some(true)))
+      case pattern(_*) => Some(DiagnosisResult(result, suggestedConfigs, Some(true)))
       case _ => None
     }
 }
