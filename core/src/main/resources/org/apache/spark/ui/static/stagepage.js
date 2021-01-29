@@ -288,6 +288,17 @@ function getStageAttemptId() {
   return stgAttemptId;
 }
 
+function copyToClipboard (text, elem) {
+    var dummy = document.createElement("textarea");
+    document.body.appendChild(dummy);
+    dummy.value = text;
+    dummy.select();
+    var successful = document.execCommand('copy');
+    var msg = successful ? 'Copied!' : 'Copy failed';
+    elem.attr('data-original-title', msg).tooltip('show');
+    document.body.removeChild(dummy);
+}
+
 var taskSummaryMetricsTableArray = [];
 var taskSummaryMetricsTableCurrentStateArray = [];
 var taskSummaryMetricsDataTable;
@@ -351,6 +362,11 @@ $(document).ready(function () {
                 "in this task. For SQL jobs, this only tracks all unsafe operators, broadcast joins, and " +
                 "external sort.");
     $('[data-toggle="tooltip"]').tooltip();
+    $('.js-tooltip').tooltip();
+    $('.js-copy').click(function() {
+        var text = $(this).attr('data-copy');
+        copyToClipboard(text, $(this));
+    });
     var tasksSummary = $("#parent-container");
     getStandAloneAppId(function (appId) {
         // rendering the UI page
