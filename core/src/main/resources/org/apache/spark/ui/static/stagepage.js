@@ -162,29 +162,29 @@ function displayRowsForSummaryMetricsTable(row, type, columnIndex) {
       str = formatBytes(row.data.bytesWritten[columnIndex], type) + " / " +
         row.data.recordsWritten[columnIndex];
       return str;
- 
+
     case 'shuffleReadMetrics':
       str = formatBytes(row.data.readBytes[columnIndex], type) + " / " +
         row.data.readRecords[columnIndex];
       return str;
- 
+
     case 'shuffleReadFetchWaitTime':
       str = formatDuration(row.data.fetchWaitTime[columnIndex]);
       return str;
- 
+
     case 'shuffleRemoteReads':
       str = formatBytes(row.data.remoteBytesRead[columnIndex], type);
       return str;
- 
+
     case 'shuffleWriteMetrics':
       str = formatBytes(row.data.writeBytes[columnIndex], type) + " / " +
         row.data.writeRecords[columnIndex];
       return str;
- 
+
     case 'shuffleWriteTime':
       str = formatDuration(row.data.writeTime[columnIndex] / 1000000.0);
       return str;
- 
+
     default:
       return (row.columnKey == 'peakExecutionMemory' || row.columnKey == 'memoryBytesSpilled'
         || row.columnKey == 'diskBytesSpilled') ? formatBytes(
@@ -313,6 +313,17 @@ function getStageAttemptId() {
   return stgAttemptId;
 }
 
+function copyToClipboard (text, elem) {
+    var dummy = document.createElement("textarea");
+    document.body.appendChild(dummy);
+    dummy.value = text;
+    dummy.select();
+    var successful = document.execCommand('copy');
+    var msg = successful ? 'Copied!' : 'Copy failed';
+    elem.attr('data-original-title', msg).tooltip('show');
+    document.body.removeChild(dummy);
+}
+
 var taskSummaryMetricsTableArray = [];
 var taskSummaryMetricsTableCurrentStateArray = [];
 var taskSummaryMetricsDataTable;
@@ -401,7 +412,7 @@ $(document).ready(function () {
       var endPoint = stageEndPoint(appId);
       var stageAttemptId = getStageAttemptId();
       $.getJSON(endPoint + "/" + stageAttemptId, function(response, _ignored_status, _ignored_jqXHR) {
-  
+
         var responseBody = response;
         var dataToShow = {};
         dataToShow.showInputData = responseBody.inputBytes > 0 || responseBody.inputRecords > 0 ;
@@ -410,7 +421,7 @@ $(document).ready(function () {
         dataToShow.showShuffleWriteData = responseBody.shuffleWriteBytes > 0;
         dataToShow.showBytesSpilledData =
           (responseBody.diskBytesSpilled > 0 || responseBody.memoryBytesSpilled > 0);
-  
+
         var columnIndicesToRemove = [];
         if (!dataToShow.showShuffleReadData) {
           $('#shuffle_read_fetch_wait_time').remove();
@@ -418,19 +429,19 @@ $(document).ready(function () {
           columnIndicesToRemove.push(2);
           columnIndicesToRemove.push(3);
         }
-  
+
         if (!dataToShow.showShuffleWriteData) {
           $('#shuffle_write_time').remove();
           columnIndicesToRemove.push(7);
         }
-  
+
         if (columnIndicesToRemove.length > 0) {
           columnIndicesToRemove.sort(function(a, b) { return b - a; });
           columnIndicesToRemove.forEach(function(idx) {
             optionalColumns.splice(idx, 1);
           });
         }
-  
+
         // prepare data for executor summary table
         var stageExecutorSummaryInfoKeys = Object.keys(responseBody.executorSummary);
         $.getJSON(createRESTEndPointForExecutorsPage(appId),
@@ -439,7 +450,7 @@ $(document).ready(function () {
             executorSummaryResponse.forEach(function (executorDetail) {
               executorDetailsMap[executorDetail.id] = executorDetail;
             });
-  
+
             var executorSummaryTable = [];
             stageExecutorSummaryInfoKeys.forEach(function (columnKeyIndex) {
               var executorSummary = responseBody.executorSummary[columnKeyIndex];
@@ -447,7 +458,7 @@ $(document).ready(function () {
               executorSummary.id = columnKeyIndex;
               executorSummary.executorLogs = {};
               executorSummary.hostPort = "CANNOT FIND ADDRESS";
-  
+
               if (executorDetail) {
                 if (executorDetail["executorLogs"]) {
                   responseBody.executorSummary[columnKeyIndex].executorLogs =
@@ -619,7 +630,7 @@ $(document).ready(function () {
             executorSummaryTableSelector =
               $("#summary-executor-table").DataTable(executorSummaryConf);
             $('#parent-container [data-toggle="tooltip"]').tooltip();
-  
+
             executorSummaryTableSelector.column(9).visible(dataToShow.showInputData);
             if (dataToShow.showInputData) {
               $('#executor-summary-input').attr("data-toggle", "tooltip")
@@ -687,7 +698,7 @@ $(document).ready(function () {
         // prepare data for accumulatorUpdates
         var accumulatorTable = responseBody.accumulatorUpdates.filter(accumUpdate =>
           !(accumUpdate.name).toString().includes("internal."));
-  
+
         var quantiles = "0,0.25,0.5,0.75,1.0";
         $.getJSON(endPoint + "/" + stageAttemptId + "/taskSummary?quantiles=" + quantiles,
           function(taskMetricsResponse, _ignored_status, _ignored_jqXHR) {

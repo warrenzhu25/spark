@@ -21,6 +21,7 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets.UTF_8
 import java.util.Date
 import java.util.concurrent.TimeUnit
+
 import javax.servlet.http.HttpServletRequest
 
 import scala.collection.mutable.{HashMap, HashSet}
@@ -868,7 +869,7 @@ private[spark] object ApiHelper {
       case Some(d) =>
         <td>{d.desc}</td>
           <td>{d.rootCause}</td>
-          <td>{configsCell(d.suggestedConfigs)}</td>
+          <td>{configsCell(d.suggestedConfigs)}{copyToClipboardButton(d.suggestedConfigs)}</td>
       case _ =>
         <td></td>
           <td></td>
@@ -881,5 +882,23 @@ private[spark] object ApiHelper {
       .map(_.productIterator.mkString("="))
       .map(s => <p>{s}</p>)
       .toSeq
+  }
+
+  def copyToClipboardButton(configs: Map[String, String]): Seq[Node] = {
+    <button
+      type="button"
+      class="btn btn-default btn-copy js-tooltip js-copy"
+      data-toggle="tooltip"
+      data-placement="bottom"
+      data-copy={toSparkSubmitConf(configs)}
+      title="Copy to clipboard">Copy spark-submit conf
+    </button>
+  }
+
+  def toSparkSubmitConf(configs: Map[String, String]): String = {
+    configs
+      .map(_.productIterator.mkString("="))
+      .map(s => s"--conf $s")
+      .mkString(" ")
   }
 }
