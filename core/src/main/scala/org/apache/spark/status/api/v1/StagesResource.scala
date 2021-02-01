@@ -16,16 +16,20 @@
  */
 package org.apache.spark.status.api.v1
 
-import java.util.{HashMap, List => JList, Locale}
+import java.util.{HashMap, Locale, List => JList}
+
+import io.micrometer.core.instrument.{Metrics, Tags}
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import javax.ws.rs._
 import javax.ws.rs.core.{Context, MediaType, MultivaluedMap, UriInfo}
-
 import org.apache.spark.ui.UIUtils
 import org.apache.spark.ui.jobs.ApiHelper._
 import org.apache.spark.util.Utils
 
 @Produces(Array(MediaType.APPLICATION_JSON))
 private[v1] class StagesResource extends BaseAppResource {
+
+  initMetrics()
 
   @GET
   def stageList(@QueryParam("status") statuses: JList[StageStatus]): Seq[StageData] = {
@@ -151,6 +155,19 @@ private[v1] class StagesResource extends BaseAppResource {
       ret.put("recordsFiltered", filteredRecords)
       ret
     }
+  }
+
+  @POST
+  @Path("{stageId: \\d+}/{stageAttemptId: \\d+}/diagnosis")
+  def failureSuggestionCopied(
+    @PathParam("stageId") stageId: Int,
+    @PathParam("stageAttemptId") stageAttemptId: Int,
+    @QueryParam("type") diagnosisType: String): Unit = {
+    Metrics.counter("failure.suggestions", Tags.of("type", diagnosisType)).increment()
+  }
+
+  private def initMetrics() = {
+    Metrics.addRegistry(new SimpleMeterRegistry())
   }
 
   // Performs pagination on the server side
