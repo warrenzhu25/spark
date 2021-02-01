@@ -869,7 +869,7 @@ private[spark] object ApiHelper {
       case Some(d) =>
         <td>{d.desc}</td>
           <td>{d.rootCause}</td>
-          <td>{configsCell(d.suggestedConfigs)}{copyToClipboardButton(d.suggestedConfigs)}</td>
+          <td>{configsCell(d.suggestedConfigs)}{copyToClipboardButton(d)}</td>
       case _ =>
         <td></td>
           <td></td>
@@ -884,13 +884,14 @@ private[spark] object ApiHelper {
       .toSeq
   }
 
-  def copyToClipboardButton(configs: Map[String, String]): Seq[Node] = {
+  def copyToClipboardButton(diagnosisResult: DiagnosisResult): Seq[Node] = {
     <button
       type="button"
       class="btn btn-default btn-copy js-tooltip js-copy"
       data-toggle="tooltip"
       data-placement="bottom"
-      data-copy={toSparkSubmitConf(configs)}
+      data-copy={toSparkSubmitConf(diagnosisResult.suggestedConfigs)}
+      diagnosis-type={diagnosisResult.diagnosisType}
       title="Copy to clipboard">Copy spark-submit conf
     </button>
   }

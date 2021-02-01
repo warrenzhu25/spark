@@ -40,6 +40,7 @@ object FailureDiagnosis {
 }
 
 case class DiagnosisResult(
+  diagnosisType: String,
   desc: String,
   suggestedConfigs: Map[String, String] = Map.empty,
   isRootCause: Option[Boolean] = None) {
@@ -63,7 +64,7 @@ case class DiagnosisResult(
 }
 
 abstract class DiagnosisRule (val failureType: String) {
-
+  def name(): String = getClass.getSimpleName.dropRight(5)
   def isRootCause: Option[Boolean] = None
   def suggestedConfigs: Map[String, String] = Map.empty
   def result: String
@@ -71,6 +72,7 @@ abstract class DiagnosisRule (val failureType: String) {
   def apply(failureReason: FailureReason): Option[DiagnosisResult] =
     if (matched(failureReason: FailureReason)) {
       Some(DiagnosisResult(
+        name(),
         result,
         suggestedConfigs,
         isRootCause))

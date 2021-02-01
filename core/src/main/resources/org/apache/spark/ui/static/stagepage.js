@@ -409,9 +409,9 @@ $(document).ready(function () {
         }
       });
 
-      var endPoint = stageEndPoint(appId);
-      var stageAttemptId = getStageAttemptId();
-      $.getJSON(endPoint + "/" + stageAttemptId, function(response, _ignored_status, _ignored_jqXHR) {
+        var endPoint = stageEndPoint(appId);
+        var stageAttemptId = getStageAttemptId();
+        $.getJSON(endPoint + "/" + stageAttemptId, function(response, status, jqXHR) {
 
         var responseBody = response;
         var dataToShow = {};
