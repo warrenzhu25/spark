@@ -38,6 +38,7 @@ object FailureDiagnosis {
 }
 
 case class DiagnosisResult(
+  diagnosisType: String,
   desc: String,
   suggestedConfigs: Map[String, String] = Map.empty,
   isRootCause: Option[Boolean] = None) {
@@ -63,6 +64,8 @@ case class DiagnosisResult(
 abstract class DiagnosisRule (val failureType: String) {
 
   def apply(failureReason: FailureReason): Option[DiagnosisResult]
+
+  def name(): String = getClass.getSimpleName.dropRight(5)
 }
 
 object TaskRetryRule extends DiagnosisRule("ContinuousTaskRetryException") {
@@ -77,6 +80,7 @@ object TaskRetryRule extends DiagnosisRule("ContinuousTaskRetryException") {
 
   override def apply(failureReason: FailureReason): Option[DiagnosisResult] =
     Some(DiagnosisResult(
+      name(),
       result,
       suggestedConfigs,
       Some(false)
@@ -97,7 +101,7 @@ object HeartbeatTimeoutRule extends DiagnosisRule("ExecutorLostFailure") {
 
   override def apply(failureReason: FailureReason): Option[DiagnosisResult] =
     failureReason.message match {
-      case pattern(_*) => Some(DiagnosisResult(result, suggestedConfigs, Some(true)))
+      case pattern(_*) => Some(DiagnosisResult(name(), result, suggestedConfigs, Some(true)))
       case _ => None
     }
 
@@ -111,7 +115,7 @@ object MetadataMissRule extends DiagnosisRule("MetadataFetchFailedException") {
       |""".stripMargin
   override def apply(failureReason: FailureReason): Option[DiagnosisResult] =
     failureReason.message match {
-      case pattern(_*) => Some(DiagnosisResult(result, Map.empty, Some(false)))
+      case pattern(_*) => Some(DiagnosisResult(name(), result, Map.empty, Some(false)))
       case _ => None
     }
 }
@@ -130,7 +134,7 @@ object ConnectionFailureRule extends DiagnosisRule("IOException") {
 
   override def apply(failureReason: FailureReason): Option[DiagnosisResult] =
     failureReason.message match {
-      case pattern(_*) => Some(DiagnosisResult(result, suggestedConfigs, Some(false)))
+      case pattern(_*) => Some(DiagnosisResult(name(), result, suggestedConfigs, Some(false)))
       case _ => None
     }
 }
@@ -148,7 +152,7 @@ object MemoryExceededRule extends DiagnosisRule("ExecutorLostFailure") {
 
   override def apply(failureReason: FailureReason): Option[DiagnosisResult] =
     failureReason.message match {
-      case pattern(_*) => Some(DiagnosisResult(result, suggestedConfigs, Some(true)))
+      case pattern(_*) => Some(DiagnosisResult(name(), result, suggestedConfigs, Some(true)))
       case _ => None
     }
 }
@@ -168,7 +172,7 @@ object OOMErrorRule extends DiagnosisRule("ExecutorLostFailure") {
 
   override def apply(failureReason: FailureReason): Option[DiagnosisResult] =
     failureReason.message match {
-      case pattern(_*) => Some(DiagnosisResult(result, suggestedConfigs, Some(true)))
+      case pattern(_*) => Some(DiagnosisResult(name(), result, suggestedConfigs, Some(true)))
       case _ => None
     }
 }
