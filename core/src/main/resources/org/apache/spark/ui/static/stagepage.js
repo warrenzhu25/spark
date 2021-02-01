@@ -363,10 +363,7 @@ $(document).ready(function () {
                 "external sort.");
     $('[data-toggle="tooltip"]').tooltip();
     $('.js-tooltip').tooltip();
-    $('.js-copy').click(function() {
-        var text = $(this).attr('data-copy');
-        copyToClipboard(text, $(this));
-    });
+
     var tasksSummary = $("#parent-container");
     getStandAloneAppId(function (appId) {
         // rendering the UI page
@@ -391,6 +388,12 @@ $(document).ready(function () {
 
         var endPoint = stageEndPoint(appId);
         var stageAttemptId = getStageAttemptId();
+        $('.js-copy').click(function() {
+            var text = $(this).attr('data-copy');
+            var type = $(this).attr('diagnosis-type');
+            copyToClipboard(text, $(this));
+            $.post(endPoint + "/" + stageAttemptId + "/diagnosis?type=" + type)
+        });
         $.getJSON(endPoint + "/" + stageAttemptId, function(response, status, jqXHR) {
 
             var responseBody = response;
