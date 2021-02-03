@@ -135,7 +135,7 @@ private[spark] class EventLoggingListener(
   }
 
   override def onEnvironmentUpdate(event: SparkListenerEnvironmentUpdate): Unit = {
-    logEvent(redactEvent(event), enableXAttr = setExtendedAttribute)
+    logEvent(redactEvent(sparkConf, event), enableXAttr = setExtendedAttribute)
   }
 
   // Events that trigger a flush
@@ -262,8 +262,15 @@ private[spark] class EventLoggingListener(
   def stop(): Unit = {
     logWriter.stop()
   }
+}
+
+private[spark] object EventLoggingListener extends Logging {
+  val DEFAULT_LOG_DIR = "/tmp/spark-events"
+  // Dummy stage key used by driver in executor metrics updates
+  val DRIVER_STAGE_KEY = (-1, -1)
 
   private[spark] def redactEvent(
+      sparkConf: SparkConf,
       event: SparkListenerEnvironmentUpdate): SparkListenerEnvironmentUpdate = {
     // environmentDetails maps a string descriptor to a set of properties
     // Similar to:
@@ -279,11 +286,4 @@ private[spark] class EventLoggingListener(
     }
     SparkListenerEnvironmentUpdate(redactedProps)
   }
-
-}
-
-private[spark] object EventLoggingListener extends Logging {
-  val DEFAULT_LOG_DIR = "/tmp/spark-events"
-  // Dummy stage key used by driver in executor metrics updates
-  val DRIVER_STAGE_KEY = (-1, -1)
 }
