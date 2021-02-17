@@ -18,20 +18,17 @@ jobs:
       - task: ComponentGovernanceComponentDetection@0
         displayName: Component Detection
 
-      - task: DownloadBuildArtifacts@0
-        displayName: '[ENV] Download Maven settings'
-        inputs:
-          buildType: specific
-          project: b9b38275-a912-4222-a7b7-0b8b968719c0
-          pipeline: 7421
-          buildVersionToDownload: latestFromBranch
-          artifactName: settings
-          downloadPath: '$(Build.SourcesDirectory)'
-
       - task: MavenAuthenticate@0
         displayName: '[ENV] Maven Authenticate'
         inputs:
           artifactsFeeds: MultiTenancy-Test3
+
+      - task: CopyFiles@2
+        displayName: '[ENV] Copy Maven settings.xml'
+        inputs:
+          sourceFolder: 'C:\Users\VssAdministrator\.m2\'
+          contents: settings.xml
+          targetFolder: '$(Build.SourcesDirectory)'
 
       - task: AddBuildTag@1
         displayName: '[ENV] Add build tag $(Build.SourceVersion)'
@@ -43,7 +40,7 @@ jobs:
         inputs:
           targetType: 'filePath'
           filePath: dev/make-distribution.sh
-          arguments: -Pyarn -Phive -Phadoop-provided -Phadoop-2.9.2-MT -Dcheckstyle.skip=true -s settings\\settings.xml
+          arguments: -Pyarn -Phive -Phadoop-provided -Phadoop-2.9.2-MT -Dcheckstyle.skip=true -s settings.xml
 
       - task: CopyFiles@2
         displayName: '[COPY] dist to staging dir'
