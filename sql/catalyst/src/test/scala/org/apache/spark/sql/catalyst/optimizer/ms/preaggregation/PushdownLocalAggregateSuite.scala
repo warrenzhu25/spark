@@ -74,7 +74,7 @@ class PushdownLocalAggregateSuite extends PlanTest with StatsEstimationTestBase 
 
   private def checkLocalAggregatePushThroughJoin(plan: LogicalPlan): Boolean = {
     val joins = plan.collect {
-      case j@Join(_, _, _, _) => j
+      case j@Join(_, _, _, _, _) => j
     }
     joins.forall(isChildNodeLocalAggregate(_))
   }
@@ -97,7 +97,7 @@ class PushdownLocalAggregateSuite extends PlanTest with StatsEstimationTestBase 
 
   private def isPushThroughJoinLeftSide(optimizedPlan: LogicalPlan): Boolean = {
     val joins = optimizedPlan.collect {
-      case j@Join(_, _, _, _) => j
+      case j@Join(_, _, _, _, _) => j
     }
     joins.exists(join => (join.left.isInstanceOf[LocalAggregate]
       && !join.right.isInstanceOf[LocalAggregate]))
@@ -105,7 +105,7 @@ class PushdownLocalAggregateSuite extends PlanTest with StatsEstimationTestBase 
 
   private def isPushThroughJoinRightSide(optimizedPlan: LogicalPlan): Boolean = {
     val joins = optimizedPlan.collect {
-      case j@Join(_, _, _, _) => j
+      case j@Join(_, _, _, _, _) => j
     }
     joins.exists(join => (!join.left.isInstanceOf[LocalAggregate]
       && join.right.isInstanceOf[LocalAggregate]))
@@ -441,7 +441,7 @@ class PushdownLocalAggregateSuite extends PlanTest with StatsEstimationTestBase 
     withSQLConf(
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1") {
       val join = t1.join(t2, Inner, Some(nameToAttr("t1.key") * 2 === nameToAttr("t2.key"))).analyze
-      assert(!canBroadcast(Inner, join.asInstanceOf[Join].left, join.asInstanceOf[Join].right))
+      assert(!canBroadcast(Inner, join.asInstanceOf[Join].left, join.asInstanceOf[Join].right, join.asInstanceOf[Join].hint))
     }
   }
 

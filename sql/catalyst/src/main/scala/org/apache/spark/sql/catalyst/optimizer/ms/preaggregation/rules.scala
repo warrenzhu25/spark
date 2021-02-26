@@ -259,12 +259,11 @@ object PushdownLocalAggregate extends Rule[LogicalPlan] with Logging {
     // Currently we support only Inner, Left Semi and Left Anti join
     val supportedJoinTypes = Seq(Inner, LeftSemi, LeftAnti)
     if (!supportedJoinTypes.contains(join.joinType)) {
-      PreAggregationMetricSource.recordUnsupportedJoinType(join.joinType.sql)
       return None
     }
 
     // Currently we don't do Aggregate pushdown via broadcast join
-    val isBroadcast = canBroadcast(join.joinType, join.left, join.right)
+    val isBroadcast = canBroadcast(join.joinType, join.left, join.right, join.hint)
     if (isBroadcast) {
       logDebug("Not pushing down as one of the side is broadcastable")
       return None
@@ -780,16 +779,18 @@ object PushdownLocalAggregate extends Rule[LogicalPlan] with Logging {
   // similar to [[SparkStrategies.JoinSelection.canBroadcastByHints]]
   // checks whether broadcast hint is present in stats of left or right plan
   private def canBroadcastByHints(joinType: JoinType, left: LogicalPlan,
-      right: LogicalPlan): Boolean = {
-    val buildLeft = canBuildLeft(joinType) && left.stats.hints.broadcast
-    val buildRight = canBuildRight(joinType) && right.stats.hints.broadcast
+      right: LogicalPlan, hint: JoinHint): Boolean = {
+    val buildLeft = canBuildLeft(joinType) &&
+      hint.leftHint.exists(_.strategy.exists(_.displayName == "broadcast"))
+    val buildRight = canBuildRight(joinType) &&
+      hint.rightHint.exists(_.strategy.exists(_.displayName == "broadcast"))
     buildLeft || buildRight
   }
 
   // checks if the plan can be broadcasted using hints or size
   private[preaggregation] def canBroadcast(joinType: JoinType, left: LogicalPlan,
-      right: LogicalPlan): Boolean = {
-    canBroadcastByHints(joinType, left, right) || canBroadcastBySizes(joinType, left, right)
+      right: LogicalPlan, hint: JoinHint): Boolean = {
+    canBroadcastByHints(joinType, left, right, hint) || canBroadcastBySizes(joinType, left, right)
   }
 
   /**
