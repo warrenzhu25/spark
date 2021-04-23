@@ -23,10 +23,16 @@ import java.util.{List => JList}
 import scala.collection.JavaConverters._
 import scala.collection.mutable.HashMap
 
+<<<<<<< HEAD
 import org.apache.spark.{JobExecutionStatus, SparkConf, SparkContext}
 import org.apache.spark.internal.config.History.HybridStoreDiskBackend
 import org.apache.spark.internal.config.Status.LIVE_UI_LOCAL_STORE_DIR
+=======
+import org.apache.spark.{JobExecutionStatus, SparkConf}
+
+>>>>>>> 7c97943bc1 (Add spark insight config suggestions)
 import org.apache.spark.status.api.v1
+import org.apache.spark.status.api.v1.ExecutorPeakMetricsDistributions
 import org.apache.spark.storage.FallbackStorage.FALLBACK_BLOCK_MANAGER_ID
 import org.apache.spark.ui.scope._
 import org.apache.spark.util.Utils
@@ -455,6 +461,25 @@ private[spark] class AppStatusStore(
       }
 
     Some(computedQuantiles)
+  }
+
+  /**
+   * Calculates a summary of the executor metrics for executors, returning the
+   * requested quantiles for the recorded metrics.
+   */
+  def executorMetricSummary(
+      activeOnly: Boolean,
+      unsortedQuantiles: Array[Double]): Option[ExecutorPeakMetricsDistributions] = {
+    val quantiles = unsortedQuantiles.sorted
+    val executorMetrics = executorList(activeOnly)
+      .filter(e => e.peakMemoryMetrics != null)
+      .flatMap(_.peakMemoryMetrics)
+      .toIndexedSeq
+    if (executorMetrics.nonEmpty) {
+      Some(new ExecutorPeakMetricsDistributions(quantiles, executorMetrics))
+    } else {
+      None
+    }
   }
 
   /**
