@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.status.insight.heuristics
+package org.apache.spark.insight.heuristics
 
 import org.apache.spark.status.api.v1.FailureReason
 

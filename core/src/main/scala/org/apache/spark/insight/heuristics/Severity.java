@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.status.insight.heuristics;
+package org.apache.spark.insight.heuristics;
 
 public enum Severity {
     Critical(3, "Must fix. Job would fail or has severe performance issue"),

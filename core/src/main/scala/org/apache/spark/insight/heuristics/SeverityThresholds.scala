@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package org.apache.spark.status.insight.heuristics
+package org.apache.spark.insight.heuristics
 
 /**
  * A convenience case class for containing severity thresholds and calculating severity.

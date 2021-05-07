@@ -30,7 +30,7 @@ import org.apache.spark.internal.config.UI._
 import org.apache.spark.scheduler._
 import org.apache.spark.status.AppStatusStore
 import org.apache.spark.status.api.v1._
-import org.apache.spark.status.insight.ui.InsightsTab
+import org.apache.spark.insight.ui.InsightsTab
 import org.apache.spark.ui.JettyUtils._
 import org.apache.spark.ui.env.EnvironmentTab
 import org.apache.spark.ui.exec.ExecutorsTab

@@ -21,18 +21,18 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets.UTF_8
 import java.util.Date
 import java.util.concurrent.TimeUnit
-
 import javax.servlet.http.HttpServletRequest
 
 import scala.collection.mutable.{HashMap, HashSet}
 import scala.xml.{Node, Unparsed}
 
 import org.apache.commons.text.StringEscapeUtils
+
 import org.apache.spark.internal.config.UI._
+import org.apache.spark.insight.ui.InsightUIUtils.failureSummaryTable
 import org.apache.spark.scheduler.TaskLocality
 import org.apache.spark.status._
 import org.apache.spark.status.api.v1._
-import org.apache.spark.status.insight.heuristics.{DiagnosisResult, FailureDiagnosis}
 import org.apache.spark.ui._
 import org.apache.spark.util.Utils
 
@@ -469,24 +469,6 @@ private[ui] class StagePage(parent: StagesTab, store: AppStatusStore) extends We
     </script>
   }
 
-  def failureSummaryTable(failureSummary: Seq[FailureSummary]): Seq[Node] = {
-    val propertyHeader = Seq("Exception", "Message", "Count", "Details", "Diagnosis",
-      "IsRootCause", "Suggestion")
-    val headerClasses = Seq("sorttable_alpha", "sorttable_alpha")
-    UIUtils.listingTable(propertyHeader, failureSummaryRow,
-      failureSummary,
-      headerClasses = headerClasses)
-  }
-
-  def failureSummaryRow(e: FailureSummary): Seq[Node] = {
-    <tr>
-      <td>{e.exceptionFailure.failureType}</td>
-      <td>{e.exceptionFailure.message}</td>
-      <td>{e.count}</td>
-      {errorMessageCell(e.exceptionFailure.stackTrace)}
-      {diagnosisRow(FailureDiagnosis.analysis(e.exceptionFailure))}
-    </tr>
-  }
 }
 
 private[ui] class TaskDataSource(
@@ -862,48 +844,5 @@ private[spark] object ApiHelper {
       })
     val details = UIUtils.detailsUINode(isMultiline, error)
     <td>{errorSummary}{details}</td>
-  }
-
-  def diagnosisRow(diagnosisResult: Option[DiagnosisResult]): Seq[Node] = {
-    diagnosisResult match {
-      case Some(d) =>
-        <td>{d.desc}</td>
-          <td>{d.rootCause}</td>
-          <td>{configsCell(d)}</td>
-      case _ =>
-        <td></td>
-          <td></td>
-          <td></td>
-    }
-  }
-
-  def configsCell(diagnosisResult: DiagnosisResult): Seq[Node] = {
-    if (diagnosisResult.suggestedConfigs.nonEmpty) {
-      diagnosisResult.suggestedConfigs
-        .map(_.productIterator.mkString("="))
-        .map(s => <p>{s}</p>)
-        .toSeq ++ copyToClipboardButton(diagnosisResult)
-    } else {
-      Seq.empty
-    }
-  }
-
-  def copyToClipboardButton(diagnosisResult: DiagnosisResult): Seq[Node] = {
-    <button
-      type="button"
-      class="btn btn-default btn-copy js-tooltip js-copy"
-      data-toggle="tooltip"
-      data-placement="bottom"
-      data-copy={toSparkSubmitConf(diagnosisResult.suggestedConfigs)}
-      diagnosis-type={diagnosisResult.diagnosisType}
-      title="Copy to clipboard">Copy spark-submit conf
-    </button>
-  }
-
-  def toSparkSubmitConf(configs: Map[String, String]): String = {
-    configs
-      .map(_.productIterator.mkString("="))
-      .map(s => s"--conf $s")
-      .mkString(" ")
   }
 }
