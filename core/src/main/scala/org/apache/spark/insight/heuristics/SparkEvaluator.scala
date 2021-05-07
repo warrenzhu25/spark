@@ -14,21 +14,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.status.insight.heuristics
+package org.apache.spark.insight.heuristics
 
-import org.apache.spark.status.insight.SparkApplicationData
+import org.apache.spark.insight.SparkApplicationData
 
-trait Heuristic {
-  def apply(data: SparkApplicationData): Option[HeuristicResult] = {
-    val results = analysis(data)
-    if (results.nonEmpty) {
-      Some(HeuristicResult(name, results))
-    } else {
-      None
-    }
-  }
-
-  def name: String
-
-  def analysis(data: SparkApplicationData): Seq[AnalysisResult]
+trait SparkEvaluator {
+  def evaluate(sparkAppData: SparkApplicationData): Seq[AnalysisResult]
+  protected def getProperty(sparkAppData: SparkApplicationData, key: String): Option[String] =
+    sparkAppData.appConf.get(key)
 }

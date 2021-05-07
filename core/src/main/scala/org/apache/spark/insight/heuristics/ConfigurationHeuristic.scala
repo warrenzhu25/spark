@@ -15,10 +15,10 @@
  * limitations under the License.
  */
 
-package org.apache.spark.status.insight.heuristics
+package org.apache.spark.insight.heuristics
 
-import org.apache.spark.status.insight.SparkApplicationData
-import org.apache.spark.status.insight.heuristics.ConfigurationHeuristicsConstants._
+import org.apache.spark.insight.SparkApplicationData
+import org.apache.spark.insight.heuristics.ConfigurationHeuristicsConstants._
 import org.apache.spark.util.Utils
 
 /**

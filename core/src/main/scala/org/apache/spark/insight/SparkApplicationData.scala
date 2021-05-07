@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package org.apache.spark.status.insight
+package org.apache.spark.insight
 
 import org.apache.spark.status.AppStatusStore
 import org.apache.spark.status.api.v1.{ApplicationInfo, ExecutorSummary, JobData, StageData}

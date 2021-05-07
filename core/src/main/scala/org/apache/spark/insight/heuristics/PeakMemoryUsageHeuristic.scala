@@ -12,14 +12,14 @@
  * the License.
  */
 
-package org.apache.spark.status.insight.heuristics
+package org.apache.spark.insight.heuristics
 
 import scala.xml.Node
 
 import org.apache.spark.metrics.ExecutorMetricType
 import org.apache.spark.status.api.v1.ExecutorPeakMetricsDistributions
-import org.apache.spark.status.insight.SparkApplicationData
-import org.apache.spark.status.insight.heuristics.ConfigurationHeuristicsConstants._
+import org.apache.spark.insight.SparkApplicationData
+import org.apache.spark.insight.heuristics.ConfigurationHeuristicsConstants._
 import org.apache.spark.util.Utils._
 
 /**

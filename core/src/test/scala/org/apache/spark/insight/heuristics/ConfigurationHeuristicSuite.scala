@@ -14,11 +14,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.status.insight.heuristics
+package org.apache.spark.insight.heuristics
 
 import org.apache.spark.SparkFunSuite
-import org.apache.spark.status.insight.heuristics.ConfigurationHeuristic._
-import org.apache.spark.status.insight.heuristics.ConfigurationHeuristicsConstants._
+import org.apache.spark.insight.heuristics.ConfigurationHeuristic._
+import org.apache.spark.insight.heuristics.ConfigurationHeuristicsConstants._
 
 class ConfigurationHeuristicSuite extends SparkFunSuite {
 

@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package org.apache.spark.status.insight.ui
+package org.apache.spark.insight.ui
 
 import javax.servlet.http.HttpServletRequest
 
@@ -23,17 +23,17 @@ import scala.collection.JavaConverters._
 import scala.xml.Node
 
 import org.apache.spark.JobExecutionStatus
+
 import org.apache.spark.status.AppStatusStore
-import org.apache.spark.status.api.v1.FailureSummary
 import org.apache.spark.status.api.v1.StageData
 import org.apache.spark.status.api.v1.StageStatus
-import org.apache.spark.status.insight.SparkApplicationData
-import org.apache.spark.status.insight.heuristics._
+import org.apache.spark.insight.SparkApplicationData
+import org.apache.spark.insight.heuristics._
+import org.apache.spark.insight.ui.InsightUIUtils.failureSummaryTable
 import org.apache.spark.ui.SparkUI
 import org.apache.spark.ui.SparkUITab
 import org.apache.spark.ui.UIUtils
 import org.apache.spark.ui.WebUIPage
-import org.apache.spark.ui.jobs.ApiHelper.errorMessageCell
 
 class InsightsTab(parent: SparkUI, store: AppStatusStore) extends SparkUITab(parent, "insights") {
 
@@ -98,23 +98,6 @@ private[ui] class InsightsPage(
     <a href={nameLinkUri} class="name-link">
       {s.description.get} {s.numFailedTasks}/{s.numTasks} tasks
     </a>
-  }
-
-  def failureSummaryTable(failureSummary: Seq[FailureSummary]): Seq[Node] = {
-    val propertyHeader = Seq("Exception", "Message", "Count", "Details")
-    val headerClasses = Seq("sorttable_alpha", "sorttable_alpha")
-    UIUtils.listingTable(propertyHeader, failureSummaryRow,
-      failureSummary,
-      headerClasses = headerClasses)
-  }
-
-  def failureSummaryRow(e: FailureSummary): Seq[Node] = {
-    <tr>
-      <td>{e.exceptionFailure.failureType}</td>
-      <td>{e.exceptionFailure.message}</td>
-      <td>{e.count}</td>
-      {errorMessageCell(e.exceptionFailure.stackTrace)}
-    </tr>
   }
 
   private def insightsTable(basePathUri: String) = {
