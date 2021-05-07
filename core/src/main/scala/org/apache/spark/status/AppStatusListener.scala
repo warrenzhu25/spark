@@ -678,7 +678,6 @@ private[spark] class AppStatusListener(
             e.reason.getOrElse("").split('\n')(0), e.toErrorString))
         case e: FetchFailed =>
           parseErrorMessage(e.message)
-            .map(f => new v1.FailureReason(e.getClass.getSimpleName, f.message, f.stackTrace))
         case e: TaskFailedReason =>
           Some(new v1.FailureReason(e.getClass.getSimpleName, e.toErrorString, e.toErrorString))
         case _ =>
@@ -1449,11 +1448,11 @@ private[spark] class AppStatusListener(
       .map(s => s.split("(?<=Exception|Error): "))
       .flatMap(s => {
         if (s.last.endsWith("Exception") || s.last.endsWith("Error")) {
-          Some(new v1.FailureReason(s.last, "", errorMessage))
+          Some(new v1.FailureReason(s.last.split("\\.").last, "", errorMessage))
         } else if (s.length == 1) {
           None
         } else {
-          Some(new v1.FailureReason(s(s.length - 2), s.last, errorMessage))
+          Some(new v1.FailureReason(s(s.length - 2).split("\\.").last, s.last, errorMessage))
         }
       })
   }
