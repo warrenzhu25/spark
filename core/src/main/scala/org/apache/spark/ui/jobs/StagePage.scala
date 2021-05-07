@@ -869,7 +869,7 @@ private[spark] object ApiHelper {
       case Some(d) =>
         <td>{d.desc}</td>
           <td>{d.rootCause}</td>
-          <td>{configsCell(d.suggestedConfigs)}{copyToClipboardButton(d)}</td>
+          <td>{configsCell(d)}</td>
       case _ =>
         <td></td>
           <td></td>
@@ -877,11 +877,15 @@ private[spark] object ApiHelper {
     }
   }
 
-  def configsCell(configs: Map[String, String]): Seq[Node] = {
-    configs
-      .map(_.productIterator.mkString("="))
-      .map(s => <p>{s}</p>)
-      .toSeq
+  def configsCell(diagnosisResult: DiagnosisResult): Seq[Node] = {
+    if (diagnosisResult.suggestedConfigs.nonEmpty) {
+      diagnosisResult.suggestedConfigs
+        .map(_.productIterator.mkString("="))
+        .map(s => <p>{s}</p>)
+        .toSeq ++ copyToClipboardButton(diagnosisResult)
+    } else {
+      Seq.empty
+    }
   }
 
   def copyToClipboardButton(diagnosisResult: DiagnosisResult): Seq[Node] = {
