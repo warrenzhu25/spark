@@ -26,14 +26,15 @@ import scala.collection.mutable.ListBuffer
 import scala.xml._
 
 import org.apache.commons.text.StringEscapeUtils
-
 import org.apache.spark.JobExecutionStatus
+
 import org.apache.spark.internal.config.SCHEDULER_MODE
 import org.apache.spark.internal.config.UI._
 import org.apache.spark.scheduler._
 import org.apache.spark.status.AppStatusStore
 import org.apache.spark.status.api.v1
 import org.apache.spark.ui._
+import org.apache.spark.ui.jobs.AllJobsPage.jobsTable
 import org.apache.spark.util.Utils
 
 /** Page showing list of all ongoing and recently finished jobs */
@@ -241,39 +242,7 @@ private[ui] class AllJobsPage(parent: JobsTab, store: AppStatusStore) extends We
     </script>
   }
 
-  private def jobsTable(
-      request: HttpServletRequest,
-      tableHeaderId: String,
-      jobTag: String,
-      jobs: Seq[v1.JobData],
-      killEnabled: Boolean): Seq[Node] = {
 
-    val someJobHasJobGroup = jobs.exists(_.jobGroup.isDefined)
-    val jobIdTitle = if (someJobHasJobGroup) "Job Id (Job Group)" else "Job Id"
-    val jobPage = Option(request.getParameter(jobTag + ".page")).map(_.toInt).getOrElse(1)
-
-    try {
-      new JobPagedTable(
-        request,
-        store,
-        jobs,
-        tableHeaderId,
-        jobTag,
-        UIUtils.prependBaseUri(request, parent.basePath),
-        "jobs", // subPath
-        killEnabled,
-        jobIdTitle
-      ).table(jobPage)
-    } catch {
-      case e @ (_ : IllegalArgumentException | _ : IndexOutOfBoundsException) =>
-        <div class="alert alert-error">
-          <p>Error while rendering job table:</p>
-          <pre>
-            {Utils.exceptionString(e)}
-          </pre>
-        </div>
-    }
-  }
 
   def render(request: HttpServletRequest): Seq[Node] = {
     val appInfo = store.applicationInfo()
@@ -296,11 +265,11 @@ private[ui] class AllJobsPage(parent: JobsTab, store: AppStatusStore) extends We
     }
 
     val activeJobsTable =
-      jobsTable(request, "active", "activeJob", activeJobs.toSeq, killEnabled = parent.killEnabled)
+      jobsTable(store, parent.basePath, request, "active", "activeJob", activeJobs.toSeq, killEnabled = parent.killEnabled)
     val completedJobsTable =
-      jobsTable(request, "completed", "completedJob", completedJobs.toSeq, killEnabled = false)
+      jobsTable(store, parent.basePath, request, "completed", "completedJob", completedJobs.toSeq, killEnabled = false)
     val failedJobsTable =
-      jobsTable(request, "failed", "failedJob", failedJobs.toSeq, killEnabled = false)
+      jobsTable(store, parent.basePath, request, "failed", "failedJob", failedJobs.toSeq, killEnabled = false)
 
     val shouldShowActiveJobs = activeJobs.nonEmpty
     val shouldShowCompletedJobs = completedJobs.nonEmpty
@@ -609,5 +578,43 @@ private[ui] class JobPagedTable(
         reasonToNumKilled = job.killedTasksSummary, total = job.numTasks - job.numSkippedTasks)}
       </td>
     </tr>
+  }
+}
+
+private[ui] object AllJobsPage{
+  def jobsTable(
+    store: AppStatusStore,
+    basePath: String,
+    request: HttpServletRequest,
+    tableHeaderId: String,
+    jobTag: String,
+    jobs: Seq[v1.JobData],
+    killEnabled: Boolean): Seq[Node] = {
+
+    val someJobHasJobGroup = jobs.exists(_.jobGroup.isDefined)
+    val jobIdTitle = if (someJobHasJobGroup) "Job Id (Job Group)" else "Job Id"
+    val jobPage = Option(request.getParameter(jobTag + ".page")).map(_.toInt).getOrElse(1)
+
+    try {
+      new JobPagedTable(
+        request,
+        store,
+        jobs,
+        tableHeaderId,
+        jobTag,
+        UIUtils.prependBaseUri(request, basePath),
+        "jobs", // subPath
+        killEnabled,
+        jobIdTitle
+      ).table(jobPage)
+    } catch {
+      case e @ (_ : IllegalArgumentException | _ : IndexOutOfBoundsException) =>
+        <div class="alert alert-error">
+          <p>Error while rendering job table:</p>
+          <pre>
+            {Utils.exceptionString(e)}
+          </pre>
+        </div>
+    }
   }
 }

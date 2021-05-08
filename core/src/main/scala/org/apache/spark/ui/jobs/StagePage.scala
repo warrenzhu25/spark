@@ -29,7 +29,7 @@ import scala.xml.{Node, Unparsed}
 import org.apache.commons.text.StringEscapeUtils
 
 import org.apache.spark.internal.config.UI._
-import org.apache.spark.insight.ui.InsightUIUtils.failureSummaryTable
+import org.apache.spark.ui.insights.InsightUIUtils.failureSummaryTable
 import org.apache.spark.scheduler.TaskLocality
 import org.apache.spark.status._
 import org.apache.spark.status.api.v1._

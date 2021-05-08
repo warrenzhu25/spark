@@ -25,6 +25,10 @@ import org.apache.spark.scheduler.Schedulable
 import org.apache.spark.status.{AppSummary, PoolData}
 import org.apache.spark.status.api.v1.{StageData, StageStatus}
 import org.apache.spark.ui.{UIUtils, WebUIPage}
+import org.apache.spark.ui.jobs.AllStagesPage.stageTag
+import org.apache.spark.ui.jobs.AllStagesPage.statusName
+import org.apache.spark.ui.jobs.AllStagesPage.summary
+import org.apache.spark.ui.jobs.AllStagesPage.table
 
 /** Page showing list of all ongoing and recently finished stages and pools */
 private[ui] class AllStagesPage(parent: StagesTab) extends WebUIPage("") {
@@ -76,7 +80,7 @@ private[ui] class AllStagesPage(parent: StagesTab) extends WebUIPage("") {
     UIUtils.headerSparkPage(request, "Stages for All Jobs", content, parent)
   }
 
-  private def summaryAndTableForStatus(
+  def summaryAndTableForStatus(
       allStages: Seq[StageData],
       appSummary: AppSummary,
       status: StageStatus,
@@ -101,26 +105,31 @@ private[ui] class AllStagesPage(parent: StagesTab) extends WebUIPage("") {
         Some(table(appSummary, status, stagesTable, stagesSize)))
     }
   }
+}
 
-  private def statusName(status: StageStatus): String = status match {
-    case StageStatus.ACTIVE => "active"
-    case StageStatus.COMPLETE => "completed"
-    case StageStatus.FAILED => "failed"
-    case StageStatus.PENDING => "pending"
-    case StageStatus.SKIPPED => "skipped"
+private[ui] object AllStagesPage {
+
+  def table(
+    appSummary: AppSummary,
+    status: StageStatus,
+    stagesTable: StageTableBase,
+    size: Int): NodeSeq = {
+    val classSuffix = s"${statusName(status).capitalize}Stages"
+    <span id={statusName(status)}
+          class={s"collapse-aggregated-all$classSuffix collapse-table"}
+          onClick={s"collapseTable('collapse-aggregated-all$classSuffix'," +
+            s" 'aggregated-all$classSuffix')"}>
+      <h4>
+        <span class="collapse-table-arrow arrow-open"></span>
+        <a>{headerDescription(status)} Stages ({summaryContent(appSummary, status, size)})</a>
+      </h4>
+    </span> ++
+      <div class={s"aggregated-all$classSuffix collapsible-table"}>
+        {stagesTable.toNodeSeq}
+      </div>
   }
 
-  private def stageTag(status: StageStatus): String = s"${statusName(status)}Stage"
-
-  private def headerDescription(status: StageStatus): String = statusName(status).capitalize
-
-  private def summaryContent(appSummary: AppSummary, status: StageStatus, size: Int): String = {
-    if (status == StageStatus.COMPLETE && appSummary.numCompletedStages != size) {
-      s"${appSummary.numCompletedStages}, only showing $size"
-    } else {
-      s"$size"
-    }
-  }
+  def stageTag(status: StageStatus): String = s"${statusName(status)}Stage"
 
   private def summary(appSummary: AppSummary, status: StageStatus, size: Int): Elem = {
     val summary =
@@ -138,23 +147,21 @@ private[ui] class AllStagesPage(parent: StagesTab) extends WebUIPage("") {
     }
   }
 
-  private def table(
-      appSummary: AppSummary,
-      status: StageStatus,
-      stagesTable: StageTableBase,
-      size: Int): NodeSeq = {
-    val classSuffix = s"${statusName(status).capitalize}Stages"
-    <span id={statusName(status)}
-          class={s"collapse-aggregated-all$classSuffix collapse-table"}
-          onClick={s"collapseTable('collapse-aggregated-all$classSuffix'," +
-            s" 'aggregated-all$classSuffix')"}>
-      <h4>
-        <span class="collapse-table-arrow arrow-open"></span>
-        <a>{headerDescription(status)} Stages ({summaryContent(appSummary, status, size)})</a>
-      </h4>
-    </span> ++
-      <div class={s"aggregated-all$classSuffix collapsible-table"}>
-        {stagesTable.toNodeSeq}
-      </div>
+  def statusName(status: StageStatus): String = status match {
+    case StageStatus.ACTIVE => "active"
+    case StageStatus.COMPLETE => "completed"
+    case StageStatus.FAILED => "failed"
+    case StageStatus.PENDING => "pending"
+    case StageStatus.SKIPPED => "skipped"
+  }
+
+  private def headerDescription(status: StageStatus): String = statusName(status).capitalize
+
+  private def summaryContent(appSummary: AppSummary, status: StageStatus, size: Int): String = {
+    if (status == StageStatus.COMPLETE && appSummary.numCompletedStages != size) {
+      s"${appSummary.numCompletedStages}, only showing $size"
+    } else {
+      s"$size"
+    }
   }
 }
