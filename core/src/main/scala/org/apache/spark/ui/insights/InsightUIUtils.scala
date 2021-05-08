@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package org.apache.spark.insight.ui
+package org.apache.spark.ui.insights
 
 import scala.xml.Node
 
