@@ -17,23 +17,21 @@
 
 package org.apache.spark.ui.jobs
 
-import java.net.URLEncoder
-import java.nio.charset.StandardCharsets.UTF_8
-import java.util.Date
-import java.util.concurrent.TimeUnit
-import javax.servlet.http.HttpServletRequest
-
-import scala.collection.mutable.{HashMap, HashSet}
-import scala.xml.{Node, Unparsed}
-
 import org.apache.commons.text.StringEscapeUtils
-
 import org.apache.spark.internal.config.UI._
 import org.apache.spark.scheduler.TaskLocality
 import org.apache.spark.status._
 import org.apache.spark.status.api.v1._
 import org.apache.spark.ui._
 import org.apache.spark.util.Utils
+
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets.UTF_8
+import java.util.Date
+import java.util.concurrent.TimeUnit
+import javax.servlet.http.HttpServletRequest
+import scala.collection.mutable.{HashMap, HashSet}
+import scala.xml.{Node, Unparsed}
 
 /** Page showing statistics and task list for a given stage */
 private[ui] class StagePage(parent: StagesTab, store: AppStatusStore) extends WebUIPage("stage") {
