@@ -25,18 +25,20 @@ import org.eclipse.jetty.servlet.ServletContextHandler
 import org.apache.spark.SecurityManager
 import org.apache.spark.SparkConf
 import org.apache.spark.SparkContext
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.UI._
 import org.apache.spark.scheduler._
 import org.apache.spark.status.AppStatusStore
 import org.apache.spark.status.api.v1._
-import org.apache.spark.insight.ui.InsightsTab
 import org.apache.spark.ui.JettyUtils._
 import org.apache.spark.ui.env.EnvironmentTab
 import org.apache.spark.ui.exec.ExecutorsTab
+import org.apache.spark.ui.insights.InsightsTab
 import org.apache.spark.ui.jobs.JobsTab
 import org.apache.spark.ui.jobs.StagesTab
 import org.apache.spark.ui.storage.StorageTab
+import org.apache.spark.util.kvstore.KVStore
 
 /**
  * Top level user interface for a Spark application.
@@ -49,7 +51,8 @@ private[spark] class SparkUI private (
     var appName: String,
     val basePath: String,
     val startTime: Long,
-    val appSparkVersion: String)
+    val appSparkVersion: String,
+    val listing: Option[KVStore] = None)
   extends WebUI(securityManager, securityManager.getSSLOptions("ui"), SparkUI.getUIPort(conf),
     conf, basePath, "SparkUI")
   with Logging
@@ -89,7 +92,7 @@ private[spark] class SparkUI private (
     attachTab(new StorageTab(this, store))
     attachTab(new EnvironmentTab(this, store))
     attachTab(new ExecutorsTab(this))
-    attachTab(new InsightsTab(this, store))
+    attachTab(new InsightsTab(this, store, listing))
     addStaticHandler(SparkUI.STATIC_RESOURCE_DIR)
     attachHandler(createRedirectHandler("/", "/jobs/", basePath = basePath))
     attachHandler(ApiRootResource.getServletHandler(this))
@@ -223,9 +226,11 @@ private[spark] object SparkUI {
       appName: String,
       basePath: String,
       startTime: Long,
-      appSparkVersion: String = org.apache.spark.SPARK_VERSION): SparkUI = {
+      appSparkVersion: String = org.apache.spark.SPARK_VERSION,
+      listing: Option[KVStore] = None): SparkUI = {
 
-    new SparkUI(store, sc, conf, securityManager, appName, basePath, startTime, appSparkVersion)
+    new SparkUI(store, sc, conf, securityManager, appName, basePath, startTime, appSparkVersion, listing)
+
   }
 
 }
