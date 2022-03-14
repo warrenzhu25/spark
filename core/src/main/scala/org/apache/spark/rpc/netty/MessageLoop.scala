@@ -19,7 +19,10 @@ package org.apache.spark.rpc.netty
 
 import java.util.concurrent._
 
+import scala.collection.JavaConverters._
 import scala.util.control.NonFatal
+
+import com.codahale.metrics.Metric
 
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.internal.Logging
@@ -48,6 +51,8 @@ private sealed abstract class MessageLoop(dispatcher: Dispatcher) extends Loggin
   def post(endpointName: String, message: InboxMessage): Unit
 
   def unregister(name: String): Unit
+
+  def getMetrics(): Map[String, Metric]
 
   def stop(): Unit = {
     synchronized {
@@ -151,6 +156,10 @@ private class SharedMessageLoop(
     // Mark active to handle the OnStart message.
     setActive(inbox)
   }
+
+  override def getMetrics(): Map[String, Metric] = {
+    endpoints.asScala.values.flatMap(i => i.getMetrics()).toMap
+  }
 }
 
 /**
@@ -190,5 +199,9 @@ private class DedicatedMessageLoop(
     setActive(inbox)
     setActive(MessageLoop.PoisonPill)
     threadpool.shutdown()
+  }
+
+  override def getMetrics(): Map[String, Metric] = {
+    inbox.getMetrics()
   }
 }

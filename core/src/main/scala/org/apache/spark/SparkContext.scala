@@ -59,6 +59,7 @@ import org.apache.spark.rdd._
 import org.apache.spark.resource._
 import org.apache.spark.resource.ResourceUtils._
 import org.apache.spark.rpc.RpcEndpointRef
+import org.apache.spark.rpc.netty.RpcSource
 import org.apache.spark.scheduler._
 import org.apache.spark.scheduler.cluster.StandaloneSchedulerBackend
 import org.apache.spark.scheduler.local.LocalSchedulerBackend
@@ -672,6 +673,7 @@ class SparkContext(config: SparkConf) extends Logging {
     _env.metricsSystem.registerSource(_dagScheduler.metricsSource)
     _env.metricsSystem.registerSource(new BlockManagerSource(_env.blockManager))
     _env.metricsSystem.registerSource(new JVMCPUSource())
+    _env.metricsSystem.registerSource(new RpcSource(_env.rpcEnv.getMetrics()))
     _executorMetricsSource.foreach(_.register(_env.metricsSystem))
     _executorAllocationManager.foreach { e =>
       _env.metricsSystem.registerSource(e.executorAllocationManagerSource)

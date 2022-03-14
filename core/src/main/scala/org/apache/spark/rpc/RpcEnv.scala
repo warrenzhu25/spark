@@ -147,6 +147,8 @@ private[spark] abstract class RpcEnv(conf: SparkConf) {
    * @param uri URI with location of the file.
    */
   def openChannel(uri: String): ReadableByteChannel
+
+  def getMetrics(): RpcMetrics
 }
 
 /**

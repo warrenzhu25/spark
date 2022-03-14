@@ -62,8 +62,9 @@ private[netty] class NettyRpcEnv(
 
   private val streamManager = new NettyStreamManager(this)
 
-  private val transportContext = new TransportContext(transportConf,
-    new NettyRpcHandler(dispatcher, this, streamManager))
+  private val rpcHandler = new NettyRpcHandler(dispatcher, this, streamManager)
+  private val transportContext = new TransportContext(transportConf, rpcHandler)
+  private val rpcMetrics = new NettyRpcMetrics(rpcHandler, dispatcher)
 
   private def createClientBootstraps(): java.util.List[TransportClientBootstrap] = {
     if (securityManager.isAuthenticationEnabled()) {
@@ -457,6 +458,8 @@ private[netty] class NettyRpcEnv(
     }
 
   }
+
+  override def getMetrics(): RpcMetrics = rpcMetrics
 }
 
 private[netty] object NettyRpcEnv extends Logging {
@@ -756,4 +759,6 @@ private[netty] class NettyRpcHandler(
       // See java.net.Socket.getRemoteSocketAddress
     }
   }
+
+  override def getNumActiveConnections: Int = remoteAddresses.size()
 }
