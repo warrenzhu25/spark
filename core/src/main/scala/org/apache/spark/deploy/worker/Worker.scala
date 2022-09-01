@@ -699,6 +699,9 @@ private[deploy] class Worker(
     case DecommissionWorker =>
       decommissionSelf()
 
+    case RecommissionWorker =>
+      recommissionSelf()
+
     case WorkerDecommissionSigReceived =>
       decommissionSelf()
       // Tell the Master that we are starting decommissioning
@@ -857,6 +860,15 @@ private[deploy] class Worker(
       logWarning(s"Worker $workerId already started decommissioning.")
     } else {
       logWarning(s"Receive decommission request, but decommission feature is disabled.")
+    }
+  }
+
+  private[deploy] def recommissionSelf(): Unit = {
+    if (decommissioned) {
+      decommissioned = false
+      logInfo(s"Worker $workerId is recommissioned.")
+    } else {
+      logWarning(s"Received recommission request, but worker is not decommissioned.")
     }
   }
 

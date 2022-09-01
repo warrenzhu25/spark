@@ -106,6 +106,8 @@ class MockWorker(master: RpcEndpointRef, conf: SparkConf = new SparkConf) extend
       driverIdToAppId.remove(driverId)
     case DecommissionWorker =>
       decommissioned = true
+    case RecommissionWorker =>
+      decommissioned = false
   }
 }
 
@@ -1030,6 +1032,21 @@ class MasterSuite extends SparkFunSuite
     val decomWorkersCountAgain = master.self
       .askSync[Integer](DecommissionWorkersOnHosts(hostnames, idleOnly))
     assert(decomWorkersCountAgain === numWorkersExpectedToDecom)
+
+    // Recommissioning is actually async ... wait for the workers to actually be recommissioned by
+    // polling the master's state.
+    eventually(timeout(60.seconds)) {
+      master.self.askSync[Integer](RecommissionWorkersOnHosts(hostnames))
+
+      val masterState = master.self.askSync[MasterStateResponse](RequestMasterState)
+      assert(masterState.workers.length === numWorkers, "worker count is wrong")
+      val aliveWorkerIds = masterState.workers
+        .filter(_.state == WorkerState.ALIVE).map(_.id)
+      val aliveWorkers = workers.filter(w => aliveWorkerIds.contains(w.id))
+      assert(aliveWorkers.length === numWorkers, "alive worker count is wrong")
+      assert(aliveWorkers.forall(!_.decommissioned))
+    }
+
   }
 
   test("All workers on a host should be decommissioned") {
