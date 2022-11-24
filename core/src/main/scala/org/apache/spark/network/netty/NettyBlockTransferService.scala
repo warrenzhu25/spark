@@ -218,4 +218,6 @@ private[spark] class NettyBlockTransferService(
       transportContext.close()
     }
   }
+
+  override def numPendingBlockFetches(): Int = transportContext.getNumOpenStream
 }

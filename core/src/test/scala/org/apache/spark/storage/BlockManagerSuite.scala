@@ -2548,6 +2548,8 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with PrivateMethodTe
       }
       super.fetchBlockSync(host, port, execId, blockId, tempFileManager)
     }
+
+    override def numPendingBlockFetches(): Int = 0
   }
 }
 
