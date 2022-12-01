@@ -724,8 +724,11 @@ class ExecutorAllocationManagerSuite extends SparkFunSuite {
     // executors needed = (5 + 5) / 4 + 1
     (30 until 35).map { i =>
       createTaskInfo(i, i, executorId = s"${i / 4}")}
-      .foreach { info => post(
-        SparkListenerTaskEnd(0, 0, null, Success, info, new ExecutorMetrics, null))}
+      .foreach { info => {
+        info.markFinished(TaskState.FINISHED, clock.getTimeMillis())
+        post(SparkListenerTaskEnd(0, 0, null, Success, info, new ExecutorMetrics, null))
+      }
+      }
     clock.advance(1000)
     manager invokePrivate _updateAndSyncNumExecutorsTarget(clock.nanoTime())
     assert(numExecutorsTarget(manager, defaultProfile.id) === 3)
@@ -1618,8 +1621,49 @@ class ExecutorAllocationManagerSuite extends SparkFunSuite {
 
     // If the task is failed, we expect it to be resubmitted later.
     val taskEndReason = ExceptionFailure(null, null, null, null, None)
+    taskInfo.markFinished(TaskState.FAILED, clock.getTimeMillis())
     post(SparkListenerTaskEnd(0, 0, null, taskEndReason, taskInfo, new ExecutorMetrics, null))
     assert(maxNumExecutorsNeededPerResourceProfile(manager, defaultProfile) === 1)
+  }
+
+  test("SPARK-8366: dynamic allocation ratio should be based on running task duration") {
+    val clock = new ManualClock()
+    val conf = createConf()
+      .set(config.DYN_ALLOCATION_DYNAMIC_EXECUTOR_ALLOCATION_RATIO_ENABLED, true)
+    val manager = createManager(conf, clock = clock)
+    assert(maxNumExecutorsNeededPerResourceProfile(manager, defaultProfile) === 0)
+
+    post(SparkListenerStageSubmitted(createStageInfo(0, 10)))
+    assert(maxNumExecutorsNeededPerResourceProfile(manager, defaultProfile) === 0)
+
+    clock.advance(5 * 60 * 100)
+    assert(maxNumExecutorsNeededPerResourceProfile(manager, defaultProfile) === 1)
+
+    val taskInfo = createTaskInfo(1, 1, "executor-1")
+    post(SparkListenerTaskStart(0, 0, taskInfo))
+
+    for (i <- 1 to 10) {
+      clock.advance(5 * 60 * 100)
+      assert(maxNumExecutorsNeededPerResourceProfile(manager, defaultProfile) === i)
+    }
+  }
+
+  test("SPARK-8366: dynamic allocation ratio should be based on finished task duration") {
+    val clock = new ManualClock()
+    val conf = createConf()
+      .set(config.DYN_ALLOCATION_DYNAMIC_EXECUTOR_ALLOCATION_RATIO_ENABLED, true)
+    val manager = createManager(conf, clock = clock)
+    val numTasks = 100
+    post(SparkListenerStageSubmitted(createStageInfo(0, numTasks)))
+
+    for (i <- 1 to 10) {
+      val taskInfo = createTaskInfo(i, i, "executor-1")
+      post(SparkListenerTaskStart(0, 0, taskInfo))
+      taskInfo.markFinished(TaskState.FINISHED, 5 * 60 * 100 * i)
+      post(SparkListenerTaskEnd(0, 0, null, Success, taskInfo, new ExecutorMetrics, null))
+      val expectedMaxNeeded = math.ceil((numTasks - i) * (0.05 + 0.05 * i)).toInt
+      assert(maxNumExecutorsNeededPerResourceProfile(manager, defaultProfile) === expectedMaxNeeded)
+    }
   }
 
   test("reset the state of allocation manager") {
