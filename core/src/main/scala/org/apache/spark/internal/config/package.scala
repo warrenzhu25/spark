@@ -624,6 +624,24 @@ package object config {
       .intConf
       .createWithDefault(Int.MaxValue)
 
+  private[spark] val DYN_ALLOCATION_DYNAMIC_RATIO_ENABLED =
+    ConfigBuilder("spark.dynamicAllocation.dynamicRatio.enabled")
+      .doc("Enable dynamic executor allocation ratio based on running or finished " +
+        "tasks average running time. " +
+        "This can avoid requesting too many executors for short tasks.")
+      .version("3.4.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  private[spark] val DYN_ALLOCATION_DYNAMIC_RATIO_BASELINE =
+    ConfigBuilder("spark.dynamicAllocation.dynamicRatio.baseline")
+      .doc("Dynamic executor allocation ratio is calculated by " +
+        "running or finished tasks average running time / baseline.")
+      .version("3.4.0")
+      .timeConf(TimeUnit.SECONDS)
+      .checkValue(_ >= 0L, "baseline must be >= 0.")
+      .createWithDefault(300)
+
   private[spark] val DYN_ALLOCATION_EXECUTOR_ALLOCATION_RATIO =
     ConfigBuilder("spark.dynamicAllocation.executorAllocationRatio")
       .version("2.4.0")
