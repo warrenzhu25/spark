@@ -24,7 +24,7 @@ import org.apache.spark.network.util.ByteUnit
 
 private[spark] object History {
 
-  val DEFAULT_LOG_DIR = "file:/tmp/spark-events"
+  val DEFAULT_LOG_DIR = "file:/Users/warrenzhu/spark-event"
 
   val HISTORY_LOG_DIR = ConfigBuilder("spark.history.fs.logDirectory")
     .version("1.1.0")
