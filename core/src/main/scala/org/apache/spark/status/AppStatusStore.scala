@@ -23,14 +23,10 @@ import java.util.{List => JList}
 import scala.collection.JavaConverters._
 import scala.collection.mutable.HashMap
 
-<<<<<<< HEAD
 import org.apache.spark.{JobExecutionStatus, SparkConf, SparkContext}
 import org.apache.spark.internal.config.History.HybridStoreDiskBackend
 import org.apache.spark.internal.config.Status.LIVE_UI_LOCAL_STORE_DIR
-=======
-import org.apache.spark.{JobExecutionStatus, SparkConf}
 
->>>>>>> 7c97943bc1 (Add spark insight config suggestions)
 import org.apache.spark.status.api.v1
 import org.apache.spark.status.api.v1.ExecutorPeakMetricsDistributions
 import org.apache.spark.storage.FallbackStorage.FALLBACK_BLOCK_MANAGER_ID

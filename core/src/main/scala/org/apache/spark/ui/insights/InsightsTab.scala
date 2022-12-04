@@ -44,9 +44,9 @@ class InsightsTab(
   private def init(): Unit = {
     attachPage(new InsightsPage(this, parent.appId, store))
     attachPage(new FailureSummaryPage(this, parent.appId, store))
-    if (listing.nonEmpty) {
-      attachPage(new AppTrendPage(this, parent.appId, store, listing.get))
-    }
+//    if (listing.nonEmpty) {
+//      attachPage(new AppTrendPage(this, parent.appId, store, listing.get))
+//    }
   }
 }
 
