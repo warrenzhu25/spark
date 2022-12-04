@@ -17,22 +17,22 @@
 
 package org.apache.spark.status
 
-import java.io.File
-import java.nio.file.Files
-import java.util.{List => JList}
-
-import scala.collection.JavaConverters._
-import scala.collection.mutable.HashMap
-import scala.util.control.NonFatal
-
-import org.apache.spark.{JobExecutionStatus, SparkConf, SparkContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.Status.DISK_STORE_DIR_FOR_STATUS
 import org.apache.spark.status.api.v1
+import org.apache.spark.status.api.v1.StageStatus
 import org.apache.spark.storage.FallbackStorage.FALLBACK_BLOCK_MANAGER_ID
 import org.apache.spark.ui.scope._
 import org.apache.spark.util.Utils
 import org.apache.spark.util.kvstore.{InMemoryStore, KVStore}
+import org.apache.spark.{JobExecutionStatus, SparkConf, SparkContext}
+
+import java.io.File
+import java.nio.file.Files
+import java.util.{List => JList}
+import scala.collection.JavaConverters._
+import scala.collection.mutable.HashMap
+import scala.util.control.NonFatal
 
 /**
  * A wrapper around a KVStore that provides methods for accessing the API data stored within.
@@ -546,10 +546,28 @@ private[spark] class AppStatusStore(
   def computeFailureSummary(stageId: Int, attemptId: Int): Seq[v1.FailureSummary] = {
     val tasks = taskList(stageId, attemptId, Int.MaxValue)
     tasks.filter(t => t.status.equalsIgnoreCase("failed"))
-      .flatMap(t => t.failureReason)
-      .groupBy(e => (e.failureType))
+      .flatMap(_.failureReason)
+      .groupBy(_.failureType)
       .values
       .map(t => new v1.FailureSummary(t.head, t.length))
+      .toSeq
+      .sortBy(s => (s.count, s.exceptionFailure.failureType))(Ordering[(Int, String)].reverse)
+      .take(EXCEPTION_SUMMARY_LIMIT)
+  }
+
+  def appFailureSummary(): Seq[v1.FailureSummary] = {
+    val failedStages =
+      stageList(List(StageStatus.FAILED).asJava)
+        .flatMap(s => failureSummary(s.stageId, s.attemptId))
+
+    aggregateFailureSummary(failedStages)
+  }
+
+  def aggregateFailureSummary(failureSummary: Seq[v1.FailureSummary]): Seq[v1.FailureSummary] = {
+      failureSummary
+      .groupBy(_.exceptionFailure.failureType)
+      .values
+      .map(t => new v1.FailureSummary(t.head.exceptionFailure, t.map(_.count).sum))
       .toSeq
       .sortBy(s => (s.count, s.exceptionFailure.failureType))(Ordering[(Int, String)].reverse)
       .take(EXCEPTION_SUMMARY_LIMIT)

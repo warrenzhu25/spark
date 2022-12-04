@@ -46,6 +46,7 @@ private[ui] class FailureSummaryPage(
   override def render(request: HttpServletRequest): Seq[Node] = {
     val content =
       <span>
+        {appFailureSummary(request)}
         {failedJobs(request)}
         {failedStages(request)}
         {failureSummary(request)}
@@ -78,15 +79,33 @@ private[ui] class FailureSummaryPage(
     table(appSummary, status, stagesTable, failedStages.size)
   }
 
+  private def appFailureSummary(request: HttpServletRequest) = {
+    val appFailureSummary = store.appFailureSummary()
+
+    {if (appFailureSummary.nonEmpty) {
+      <span class="collapse-aggregated-failureSummaries collapse-table"
+            onClick="collapseTable('collapse-aggregated-failureSummaries',
+            'aggregated-exceptionSummaries')">
+        <h4>
+          <span class="collapse-table-arrow arrow-open"></span>
+          <a>App Failure Summary</a>
+        </h4>
+      </span> ++
+            <div class="aggregated-exceptionSummaries collapsible-table">
+              {failureSummaryTable(appFailureSummary)}
+            </div>
+    } else Seq.empty}
+  }
+
   private def failureSummary(request: HttpServletRequest) = {
     val failedStages: Seq[StageData] = store
       .stageList(List.empty[StageStatus].asJava)
       .filter(_.status.equals(StageStatus.FAILED))
 
     {if (failedStages.nonEmpty) {
-      <span class="collapse-aggregated-failureSummaries collapse-table"
-            onClick="collapseTable('collapse-aggregated-failureSummaries',
-            'aggregated-exceptionSummaries')">
+      <span class="collapse-stage-failureSummaries collapse-table"
+            onClick="collapseTable('collapse-stage-failureSummaries',
+            'stage-exceptionSummaries')">
         <h4>
           <span class="collapse-table-arrow arrow-open"></span>
           <a>Stage Failure Summary</a>
@@ -96,7 +115,7 @@ private[ui] class FailureSummaryPage(
           <h5>
             {stageNameLink(request, s)}
           </h5>
-            <div class="aggregated-exceptionSummaries collapsible-table">
+            <div class="stage-exceptionSummaries collapsible-table">
               {failureSummaryTable(store.failureSummary(s.stageId, s.attemptId))}
             </div>
         )
