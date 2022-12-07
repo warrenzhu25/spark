@@ -1300,7 +1300,7 @@ private[spark] object JsonProtocol {
           message.getOrElse("Unknown reason"))
       case `exceptionFailure` =>
         val className = json.get("Class Name").extractString
-        val description = json.get("Description").extractString
+        val description = jsonOption(json.get("Description")).map(_.extractString).orNull
         val stackTrace = stackTraceFromJson(json.get("Stack Trace"))
         val fullStackTrace =
           jsonOption(json.get("Full Stack Trace")).map(_.asText).orNull
@@ -1501,7 +1501,7 @@ private[spark] object JsonProtocol {
     json.extractElements.map { line =>
       val declaringClass = line.get("Declaring Class").extractString
       val methodName = line.get("Method Name").extractString
-      val fileName = line.get("File Name").extractString
+      val fileName = jsonOption(line.get("File Name")).map(_.extractString).orNull
       val lineNumber = line.get("Line Number").extractInt
       new StackTraceElement(declaringClass, methodName, fileName, lineNumber)
     }.toArray
