@@ -86,6 +86,10 @@ private[spark] class TaskSetManager(
     conf.get(SPECULATION_EFFICIENCY_TASK_PROCESS_RATE_MULTIPLIER)
   private val efficientTaskDurationFactor = conf.get(SPECULATION_EFFICIENCY_TASK_DURATION_FACTOR)
 
+
+  val isDecommissionEnabled = conf.get(DECOMMISSION_ENABLED)
+  val isShuffleMigrationEnabled = conf.get(STORAGE_DECOMMISSION_SHUFFLE_BLOCKS_ENABLED)
+
   // Quantile of tasks at which to start speculation
   val speculationQuantile = conf.get(SPECULATION_QUANTILE)
   val speculationMultiplier = conf.get(SPECULATION_MULTIPLIER)
@@ -1050,7 +1054,10 @@ private[spark] class TaskSetManager(
     // and we are not using an external shuffle server which could serve the shuffle outputs.
     // The reason is the next stage wouldn't be able to fetch the data from this dead executor
     // so we would need to rerun these tasks on other executors.
-    if (isShuffleMapTasks && !env.blockManager.externalShuffleServiceEnabled && !isZombie) {
+    val isShuffleBlockMigrated = isDecommissionEnabled && isShuffleMigrationEnabled &&
+      reason.isInstanceOf[ExecutorDecommission]
+    if (isShuffleMapTasks && !env.blockManager.externalShuffleServiceEnabled && !isZombie &&
+      !isShuffleBlockMigrated) {
       for ((tid, info) <- taskInfos if info.executorId == execId) {
         val index = info.index
         // We may have a running task whose partition has been marked as successful,
