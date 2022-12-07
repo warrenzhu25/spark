@@ -17,11 +17,10 @@
 
 package org.apache.spark
 
-import java.io.{ByteArrayInputStream, InputStream, IOException, ObjectInputStream, ObjectOutputStream}
+import java.io.{ByteArrayInputStream, IOException, InputStream, ObjectInputStream, ObjectOutputStream}
 import java.nio.ByteBuffer
 import java.util.concurrent.{ConcurrentHashMap, LinkedBlockingQueue, ThreadPoolExecutor, TimeUnit}
 import java.util.concurrent.locks.ReentrantReadWriteLock
-
 import scala.collection
 import scala.collection.JavaConverters._
 import scala.collection.mutable.{HashMap, ListBuffer, Map}
@@ -29,10 +28,8 @@ import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration.Duration
 import scala.reflect.ClassTag
 import scala.util.control.NonFatal
-
 import org.apache.commons.io.output.{ByteArrayOutputStream => ApacheByteArrayOutputStream}
 import org.roaringbitmap.RoaringBitmap
-
 import org.apache.spark.broadcast.{Broadcast, BroadcastManager}
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config._
@@ -43,6 +40,8 @@ import org.apache.spark.shuffle.MetadataFetchFailedException
 import org.apache.spark.storage.{BlockId, BlockManagerId, ShuffleBlockId, ShuffleMergedBlockId}
 import org.apache.spark.util._
 import org.apache.spark.util.io.{ChunkedByteBuffer, ChunkedByteBufferOutputStream}
+
+import scala.collection.mutable
 
 /**
  * Helper class used by the [[MapOutputTrackerMaster]] to perform bookkeeping for a single
@@ -95,7 +94,9 @@ private class ShuffleStatus(
   /**
    * Keep the previous deleted MapStatus for recovery.
    */
-  val mapStatusesDeleted = new Array[MapStatus](numPartitions)
+  val mapStatusesDeleted = new mutable.HashMap[Long, MapStatus]()
+
+  val mapIdToIndex = new mutable.HashMap[Long, Int]()
 
   /**
    * MergeStatus for each shuffle partition when push-based shuffle is enabled. The index of the
@@ -152,11 +153,13 @@ private class ShuffleStatus(
    * will be replaced by the new location.
    */
   def addMapOutput(mapIndex: Int, status: MapStatus): Unit = withWriteLock {
+    assert(status != null)
     if (mapStatuses(mapIndex) == null) {
       _numAvailableMapOutputs += 1
       invalidateSerializedMapOutputStatusCache()
     }
     mapStatuses(mapIndex) = status
+    mapIdToIndex(status.mapId) = mapIndex
   }
 
   /**
@@ -171,15 +174,14 @@ private class ShuffleStatus(
           mapStatus.updateLocation(bmAddress)
           invalidateSerializedMapOutputStatusCache()
         case None =>
-          val index = mapStatusesDeleted.indexWhere(x => x != null && x.mapId == mapId)
-          if (index >= 0 && mapStatuses(index) == null) {
-            val mapStatus = mapStatusesDeleted(index)
+          val mapStatus = mapStatusesDeleted(mapId)
+          val index = mapIdToIndex(mapId)
+          if (mapStatuses(index) == null) {
             mapStatus.updateLocation(bmAddress)
             mapStatuses(index) = mapStatus
             _numAvailableMapOutputs += 1
             invalidateSerializedMapOutputStatusCache()
-            mapStatusesDeleted(index) = null
-            logInfo(s"Recover ${mapStatus.mapId} ${mapStatus.location}")
+            logInfo(s"Recover map output $index ${mapStatus.mapId} ${mapStatus.location}")
           } else {
             logWarning(s"Asked to update map output ${mapId} for untracked map status.")
           }
@@ -196,11 +198,13 @@ private class ShuffleStatus(
    * different block manager.
    */
   def removeMapOutput(mapIndex: Int, bmAddress: BlockManagerId): Unit = withWriteLock {
-    logDebug(s"Removing existing map output ${mapIndex} ${bmAddress}")
+    val status = mapStatuses(mapIndex)
     if (mapStatuses(mapIndex) != null && mapStatuses(mapIndex).location == bmAddress) {
       _numAvailableMapOutputs -= 1
-      mapStatusesDeleted(mapIndex) = mapStatuses(mapIndex)
+      mapStatusesDeleted(status.mapId) = status
       mapStatuses(mapIndex) = null
+      logInfo(s"Removed existing map output ${mapIndex}" +
+        s" ${status.mapId} ${bmAddress}")
       invalidateSerializedMapOutputStatusCache()
     }
   }
@@ -265,10 +269,13 @@ private class ShuffleStatus(
    */
   def removeOutputsByFilter(f: BlockManagerId => Boolean): Unit = withWriteLock {
     for (mapIndex <- mapStatuses.indices) {
+      val status = mapStatuses(mapIndex)
       if (mapStatuses(mapIndex) != null && f(mapStatuses(mapIndex).location)) {
         _numAvailableMapOutputs -= 1
-        mapStatusesDeleted(mapIndex) = mapStatuses(mapIndex)
+        mapStatusesDeleted(status.mapId) = status
         mapStatuses(mapIndex) = null
+        logInfo(s"Removed existing map output ${mapIndex}" +
+          s" ${status.mapId} ${status.location}")
         invalidateSerializedMapOutputStatusCache()
       }
     }
