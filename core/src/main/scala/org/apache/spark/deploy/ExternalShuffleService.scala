@@ -17,22 +17,21 @@
 
 package org.apache.spark.deploy
 
-import java.io.File
-import java.util.concurrent.CountDownLatch
-
-import scala.collection.JavaConverters._
-
-import org.apache.spark.{SecurityManager, SparkConf}
-import org.apache.spark.internal.{config, Logging}
+import org.apache.spark.internal.{Logging, config}
 import org.apache.spark.metrics.{MetricsSystem, MetricsSystemInstances}
 import org.apache.spark.network.TransportContext
 import org.apache.spark.network.crypto.AuthServerBootstrap
 import org.apache.spark.network.netty.SparkTransportConf
 import org.apache.spark.network.server.{TransportServer, TransportServerBootstrap}
-import org.apache.spark.network.shuffle.ExternalBlockHandler
+import org.apache.spark.network.shuffle.{ExternalBlockHandler, MergedShuffleFileManager, NoOpMergedShuffleFileManager}
 import org.apache.spark.network.shuffledb.DBBackend
 import org.apache.spark.network.util.TransportConf
 import org.apache.spark.util.{ShutdownHookManager, Utils}
+import org.apache.spark.{SecurityManager, SparkConf}
+
+import java.io.File
+import java.util.concurrent.CountDownLatch
+import scala.collection.JavaConverters._
 
 /**
  * Provides a server from which Executors can read shuffle files (rather than reading directly from
@@ -79,17 +78,37 @@ class ExternalShuffleService(sparkConf: SparkConf, securityManager: SecurityMana
 
   /** Create a new shuffle block handler. Factored out for subclasses to override. */
   protected def newShuffleBlockHandler(conf: TransportConf): ExternalBlockHandler = {
+    val mergedShuffleFileManager = newMergedShuffleFileManagerInstance(conf, null)
     if (sparkConf.get(config.SHUFFLE_SERVICE_DB_ENABLED) && enabled) {
       val shuffleDBName = sparkConf.get(config.SHUFFLE_SERVICE_DB_BACKEND)
       val dbBackend = DBBackend.byName(shuffleDBName)
       logInfo(s"Use ${dbBackend.name()} as the implementation of " +
         s"${config.SHUFFLE_SERVICE_DB_BACKEND.key}")
       new ExternalBlockHandler(conf,
-        findRegisteredExecutorsDBFile(dbBackend.fileName(registeredExecutorsDB)))
+        findRegisteredExecutorsDBFile(dbBackend.fileName(registeredExecutorsDB)),
+        mergedShuffleFileManager)
     } else {
-      new ExternalBlockHandler(conf, null)
+      new ExternalBlockHandler(conf, null, mergedShuffleFileManager)
     }
   }
+
+  protected def newMergedShuffleFileManagerInstance(conf: TransportConf, mergeManagerFile: File) = {
+    val mergeManagerImplClassName = conf.mergedShuffleFileManagerImpl
+    try {
+      val mergeManagerImplClazz = Utils.classForName(mergeManagerImplClassName,
+        noSparkClassLoader = true)
+      val mergeManagerSubClazz = mergeManagerImplClazz.asSubclass(classOf[MergedShuffleFileManager])
+      // The assumption is that all the custom implementations just like the RemoteBlockPushResolver
+      // will also need the transport configuration.
+      mergeManagerSubClazz.getConstructor(classOf[TransportConf],
+        classOf[File]).newInstance(conf, mergeManagerFile)
+    } catch {
+      case e: Exception =>
+        log.error("Unable to create an instance of {}", mergeManagerImplClassName)
+        new NoOpMergedShuffleFileManager(conf, mergeManagerFile)
+    }
+  }
+
 
   /** Starts the external shuffle service if the user has configured us to. */
   def startIfEnabled(): Unit = {

@@ -96,6 +96,11 @@ public class ExternalBlockHandler extends RpcHandler
     return blockManager;
   }
 
+  @VisibleForTesting
+  public MergedShuffleFileManager getMergeManager() {
+    return mergeManager;
+  }
+
   /** Enables mocking out the StreamManager and BlockManager. */
   @VisibleForTesting
   public ExternalBlockHandler(
