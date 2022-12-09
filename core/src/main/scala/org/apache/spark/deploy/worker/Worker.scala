@@ -535,7 +535,7 @@ private[deploy] class Worker(
             // if an application is stopped while the external shuffle service is down?
             // So then it'll leave an entry in the DB and the entry should be removed.
             if (conf.get(config.SHUFFLE_SERVICE_DB_ENABLED) &&
-                conf.get(config.SHUFFLE_SERVICE_ENABLED)) {
+                conf.get(config.SHUFFLE_SERVICE_SERVER_ENABLED)) {
               shuffleService.applicationRemoved(dir.getName)
             }
           }
@@ -939,7 +939,7 @@ private[deploy] object Worker extends Logging {
     // bound, we may launch no more than one external shuffle service on each host.
     // When this happens, we should give explicit reason of failure instead of fail silently. For
     // more detail see SPARK-20989.
-    val externalShuffleServiceEnabled = conf.get(config.SHUFFLE_SERVICE_ENABLED)
+    val externalShuffleServiceEnabled = conf.get(config.SHUFFLE_SERVICE_SERVER_ENABLED)
     val sparkWorkerInstances = scala.sys.env.getOrElse("SPARK_WORKER_INSTANCES", "1").toInt
     require(externalShuffleServiceEnabled == false || sparkWorkerInstances <= 1,
       "Starting multiple workers on one host is failed because we may launch no more than one " +

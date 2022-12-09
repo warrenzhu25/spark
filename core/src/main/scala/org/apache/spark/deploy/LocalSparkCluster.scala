@@ -57,6 +57,7 @@ class LocalSparkCluster private (
     val _conf = conf.clone()
       .setIfMissing(config.MASTER_REST_SERVER_ENABLED, false)
       .set(config.SHUFFLE_SERVICE_ENABLED, false)
+      .set(config.SHUFFLE_SERVICE_SERVER_ENABLED, false)
 
     /* Start the Master */
     val (rpcEnv, webUiPort, _) = Master.startRpcEnvAndEndpoint(localHostname, 0, 0, _conf)

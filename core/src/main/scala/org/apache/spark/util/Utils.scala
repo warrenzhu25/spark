@@ -2650,8 +2650,7 @@ private[spark] object Utils extends Logging {
     if (pushBasedShuffleEnabled) {
       val canDoPushBasedShuffle = {
         val isTesting = conf.get(IS_TESTING).getOrElse(false)
-        val isShuffleServiceAndYarn = conf.get(SHUFFLE_SERVICE_ENABLED) &&
-            conf.get(SparkLauncher.SPARK_MASTER, null) == "yarn"
+        val isShuffleServiceAndYarn = conf.get(SHUFFLE_SERVICE_ENABLED)
         lazy val serializerIsSupported = {
           if (checkSerializer) {
             Option(SparkEnv.get)

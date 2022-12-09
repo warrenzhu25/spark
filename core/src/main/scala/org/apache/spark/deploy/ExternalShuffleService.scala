@@ -46,7 +46,7 @@ class ExternalShuffleService(sparkConf: SparkConf, securityManager: SecurityMana
   protected val masterMetricsSystem =
     MetricsSystem.createMetricsSystem(MetricsSystemInstances.SHUFFLE_SERVICE, sparkConf)
 
-  private val enabled = sparkConf.get(config.SHUFFLE_SERVICE_ENABLED)
+  private val enabled = sparkConf.get(config.SHUFFLE_SERVICE_SERVER_ENABLED)
   private val port = sparkConf.get(config.SHUFFLE_SERVICE_PORT)
 
   private val registeredExecutorsDB = "registeredExecutors"
@@ -186,6 +186,7 @@ object ExternalShuffleService extends Logging {
     // we override this value since this service is started from the command line
     // and we assume the user really wants it to be running
     sparkConf.set(config.SHUFFLE_SERVICE_ENABLED.key, "true")
+    sparkConf.set(config.SHUFFLE_SERVICE_SERVER_ENABLED.key, "true")
     server = newShuffleService(sparkConf, securityManager)
     server.start()
 

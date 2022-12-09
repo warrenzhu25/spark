@@ -687,6 +687,14 @@ package object config {
       .booleanConf
       .createWithDefault(false)
 
+  private[spark] val SHUFFLE_SERVICE_SERVER_ENABLED =
+    ConfigBuilder("spark.shuffle.service.server.enabled")
+      .doc("Whether external shuffle server enabled on some nodes. This support hybrid deployment" +
+        " of nodes with and without external shuffle server")
+      .version("3.4.0")
+      .booleanConf
+      .createWithDefault(false)
+
   private[spark] val SHUFFLE_SERVICE_REMOVE_SHUFFLE_ENABLED =
     ConfigBuilder("spark.shuffle.service.removeShuffle")
       .doc("Whether to use the ExternalShuffleService for deleting shuffle blocks for " +

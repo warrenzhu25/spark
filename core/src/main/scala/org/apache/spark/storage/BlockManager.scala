@@ -18,12 +18,11 @@
 package org.apache.spark.storage
 
 import java.io._
-import java.lang.ref.{ReferenceQueue => JReferenceQueue, WeakReference}
+import java.lang.ref.{WeakReference, ReferenceQueue => JReferenceQueue}
 import java.nio.ByteBuffer
 import java.nio.channels.Channels
 import java.util.Collections
 import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, TimeUnit}
-
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.collection.mutable.HashMap
@@ -32,18 +31,16 @@ import scala.concurrent.duration._
 import scala.reflect.ClassTag
 import scala.util.{Failure, Random, Success, Try}
 import scala.util.control.NonFatal
-
 import com.codahale.metrics.{MetricRegistry, MetricSet}
 import com.esotericsoftware.kryo.KryoException
 import com.google.common.cache.CacheBuilder
 import org.apache.commons.io.IOUtils
-
 import org.apache.spark._
 import org.apache.spark.errors.SparkCoreErrors
 import org.apache.spark.executor.DataReadMethod
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config
-import org.apache.spark.internal.config.Network
+import org.apache.spark.internal.config.{Network, SHUFFLE_SERVICE_SERVER_ENABLED}
 import org.apache.spark.memory.{MemoryManager, MemoryMode}
 import org.apache.spark.metrics.source.Source
 import org.apache.spark.network._
@@ -186,6 +183,7 @@ private[spark] class BlockManager(
 
   // same as `conf.get(config.SHUFFLE_SERVICE_ENABLED)`
   private[spark] val externalShuffleServiceEnabled: Boolean = externalBlockStoreClient.isDefined
+  private val externalShuffleServerEnabled = conf.get(SHUFFLE_SERVICE_SERVER_ENABLED)
   private val isDriver = executorId == SparkContext.DRIVER_IDENTIFIER
 
   private val remoteReadNioBufferConversion =
@@ -196,7 +194,7 @@ private[spark] class BlockManager(
   val diskBlockManager = {
     // Only perform cleanup if an external service is not serving our shuffle files.
     val deleteFilesOnStop =
-      !externalShuffleServiceEnabled || isDriver
+      !(externalShuffleServiceEnabled && externalShuffleServerEnabled) || isDriver
     new DiskBlockManager(conf, deleteFilesOnStop = deleteFilesOnStop, isDriver = isDriver)
   }
 
@@ -521,7 +519,7 @@ private[spark] class BlockManager(
     // it needs the merge directories metadata which is provided by the local executor during
     // the registration with the ESS. Therefore, this registration should be prior to
     // the BlockManager registration. See SPARK-39647.
-    if (externalShuffleServiceEnabled) {
+    if (externalShuffleServerEnabled) {
       logInfo(s"external shuffle service port = $externalShuffleServicePort")
       shuffleServerId = BlockManagerId(executorId, blockTransferService.hostName,
         externalShuffleServicePort)
@@ -540,11 +538,13 @@ private[spark] class BlockManager(
       diskBlockManager.localDirsString,
       maxOnHeapMemory,
       maxOffHeapMemory,
-      storageEndpoint)
+      storageEndpoint,
+      externalShuffleServerEnabled
+    )
 
     blockManagerId = if (idFromMaster != null) idFromMaster else id
 
-    if (!externalShuffleServiceEnabled) {
+    if (!externalShuffleServerEnabled) {
       shuffleServerId = blockManagerId
     }
 
@@ -567,7 +567,7 @@ private[spark] class BlockManager(
   def shuffleMetricsSource: Source = {
     import BlockManager._
 
-    if (externalShuffleServiceEnabled) {
+    if (externalShuffleServerEnabled) {
       new ShuffleMetricsSource("ExternalShuffle", blockStoreClient.shuffleMetrics())
     } else {
       new ShuffleMetricsSource("NettyBlockTransfer", blockStoreClient.shuffleMetrics())
@@ -594,7 +594,7 @@ private[spark] class BlockManager(
     for (i <- 1 to MAX_ATTEMPTS) {
       try {
         // Synchronous and will throw an exception if we cannot connect.
-        blockStoreClient.asInstanceOf[ExternalBlockStoreClient].registerWithShuffleServer(
+        blockStoreClient.registerWithShuffleServer(
           shuffleServerId.host, shuffleServerId.port, shuffleServerId.executorId, shuffleConfig)
         return
       } catch {

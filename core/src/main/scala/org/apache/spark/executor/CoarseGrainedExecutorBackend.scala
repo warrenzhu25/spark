@@ -469,6 +469,10 @@ private[spark] object CoarseGrainedExecutorBackend extends Logging {
       }
 
       driverConf.set(EXECUTOR_ID, arguments.executorId)
+      val isShuffleServerEnabled = executorConf.get(SHUFFLE_SERVICE_SERVER_ENABLED)
+      log.info(s"Config ${SHUFFLE_SERVICE_SERVER_ENABLED.key} is overrided by worker conf:" +
+        s" $isShuffleServerEnabled")
+      driverConf.set(SHUFFLE_SERVICE_SERVER_ENABLED, isShuffleServerEnabled)
       val env = SparkEnv.createExecutorEnv(driverConf, arguments.executorId, arguments.bindAddress,
         arguments.hostname, arguments.cores, cfg.ioEncryptionKey, isLocal = false)
       // Set the application attemptId in the BlockStoreClient if available.

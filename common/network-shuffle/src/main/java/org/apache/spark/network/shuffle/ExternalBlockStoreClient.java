@@ -271,6 +271,7 @@ public class ExternalBlockStoreClient extends BlockStoreClient {
    * @param execId This Executor's id.
    * @param executorInfo Contains all info necessary for the service to find our shuffle files.
    */
+  @Override
   public void registerWithShuffleServer(
       String host,
       int port,

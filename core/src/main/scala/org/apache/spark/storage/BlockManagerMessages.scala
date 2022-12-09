@@ -63,7 +63,8 @@ private[spark] object BlockManagerMessages {
       localDirs: Array[String],
       maxOnHeapMemSize: Long,
       maxOffHeapMemSize: Long,
-      sender: RpcEndpointRef)
+      sender: RpcEndpointRef,
+      shuffleServerEnabled: Boolean = false)
     extends ToBlockManagerMaster
 
   case class UpdateBlockInfo(

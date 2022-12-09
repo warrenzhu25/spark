@@ -19,6 +19,7 @@ package org.apache.spark.network.shuffle;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.UnsupportedEncodingException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Collections;
@@ -254,5 +255,13 @@ public abstract class BlockStoreClient implements Closeable {
       int reduceId,
       MergedBlocksMetaListener listener) {
     throw new UnsupportedOperationException();
+  }
+
+  public void registerWithShuffleServer(
+      String host,
+      int port,
+      String execId,
+      ExecutorShuffleInfo executorInfo) throws IOException, InterruptedException {
+    throw new UnsupportedEncodingException();
   }
 }

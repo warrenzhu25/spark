@@ -18,9 +18,8 @@
 package org.apache.spark.deploy
 
 import scala.collection.JavaConverters._
-
 import org.apache.spark.{SecurityManager, SparkConf, SparkFunSuite}
-import org.apache.spark.internal.config.{SHUFFLE_SERVICE_DB_ENABLED, SHUFFLE_SERVICE_ENABLED}
+import org.apache.spark.internal.config.{SHUFFLE_SERVICE_DB_ENABLED, SHUFFLE_SERVICE_ENABLED, SHUFFLE_SERVICE_SERVER_ENABLED}
 import org.apache.spark.util.Utils
 
 class ExternalShuffleServiceMetricsSuite extends SparkFunSuite {
@@ -32,6 +31,7 @@ class ExternalShuffleServiceMetricsSuite extends SparkFunSuite {
     super.beforeAll()
     sparkConf = new SparkConf()
     sparkConf.set(SHUFFLE_SERVICE_ENABLED, true)
+    sparkConf.set(SHUFFLE_SERVICE_SERVER_ENABLED, true)
     sparkConf.set(SHUFFLE_SERVICE_DB_ENABLED, false)
     sparkConf.set("spark.local.dir", System.getProperty("java.io.tmpdir"))
     Utils.loadDefaultSparkProperties(sparkConf, null)

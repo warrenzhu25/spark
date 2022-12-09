@@ -17,10 +17,9 @@
 
 package org.apache.spark.storage
 
-import java.io.{File, InputStream, IOException}
+import java.io.{File, IOException, InputStream}
 import java.nio.ByteBuffer
 import java.nio.file.Files
-
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -28,7 +27,6 @@ import scala.concurrent.{Future, TimeoutException}
 import scala.concurrent.duration._
 import scala.language.implicitConversions
 import scala.reflect.ClassTag
-
 import com.esotericsoftware.kryo.KryoException
 import org.apache.commons.lang3.RandomUtils
 import org.mockito.{ArgumentCaptor, ArgumentMatchers => mc}
@@ -38,7 +36,6 @@ import org.scalatest.concurrent.{Signaler, ThreadSignaler, TimeLimits}
 import org.scalatest.concurrent.Eventually._
 import org.scalatest.matchers.must.Matchers
 import org.scalatest.matchers.should.Matchers._
-
 import org.apache.spark._
 import org.apache.spark.broadcast.BroadcastManager
 import org.apache.spark.executor.DataReadMethod
@@ -53,7 +50,7 @@ import org.apache.spark.network.client.{RpcResponseCallback, TransportClient}
 import org.apache.spark.network.netty.{NettyBlockTransferService, SparkTransportConf}
 import org.apache.spark.network.server.{NoOpRpcHandler, TransportServer, TransportServerBootstrap}
 import org.apache.spark.network.shuffle.{BlockFetchingListener, DownloadFileManager, ExecutorDiskUtils, ExternalBlockStoreClient}
-import org.apache.spark.network.shuffle.protocol.{BlockTransferMessage, RegisterExecutor}
+import org.apache.spark.network.shuffle.protocol.{BlockTransferMessage, ExecutorShuffleInfo, RegisterExecutor}
 import org.apache.spark.network.util.{MapConfigProvider, TransportConf}
 import org.apache.spark.rpc.{RpcCallContext, RpcEndpoint, RpcEnv}
 import org.apache.spark.scheduler.{LiveListenerBus, MapStatus, MergeStatus, SparkListenerBlockUpdated}
@@ -117,11 +114,15 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with PrivateMethodTe
       name: String = SparkContext.DRIVER_IDENTIFIER,
       master: BlockManagerMaster = this.master,
       transferService: Option[BlockTransferService] = Option.empty,
+      externalShuffleServerEnabled: Boolean = false,
       testConf: Option[SparkConf] = None,
       shuffleManager: ShuffleManager = shuffleManager): BlockManager = {
     val bmConf = testConf.map(_.setAll(conf.getAll)).getOrElse(conf)
     bmConf.set(TEST_MEMORY, maxMem)
     bmConf.set(MEMORY_OFFHEAP_SIZE, maxMem)
+    if (externalShuffleServerEnabled) {
+      bmConf.set(SHUFFLE_SERVICE_SERVER_ENABLED, true)
+    }
     val serializer = new KryoSerializer(bmConf)
     val encryptionKey = if (bmConf.get(IO_ENCRYPTION_ENABLED)) {
       Some(CryptoStreamUtils.createKey(bmConf))
@@ -295,7 +296,7 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with PrivateMethodTe
     eventually(timeout(5.seconds)) {
       // make sure both bm1 and bm2 are registered at driver side BlockManagerMaster
       verify(master, times(2))
-        .registerBlockManager(mc.any(), mc.any(), mc.any(), mc.any(), mc.any())
+        .registerBlockManager(mc.any(), mc.any(), mc.any(), mc.any(), mc.any(), mc.anyBoolean())
       assert(driverEndpoint.askSync[Boolean](
         CoarseGrainedClusterMessages.IsExecutorAlive(bm1Id.executorId)))
       assert(driverEndpoint.askSync[Boolean](
@@ -1831,6 +1832,7 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with PrivateMethodTe
         newShuffleServer, conf, "ShuffleServer")
 
       conf.set(SHUFFLE_SERVICE_ENABLED.key, "true")
+      conf.set(SHUFFLE_SERVICE_SERVER_ENABLED, true)
       conf.set(SHUFFLE_SERVICE_PORT.key, shufflePort.toString)
       conf.set(SHUFFLE_REGISTRATION_TIMEOUT.key, "40")
       conf.set(SHUFFLE_REGISTRATION_MAX_ATTEMPTS.key, "1")
@@ -2049,15 +2051,20 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with PrivateMethodTe
     " spark.shuffle.push.retainedMergerLocations") {
     assert(master.getShufflePushMergerLocations(10, Set.empty).isEmpty)
     makeBlockManager(100, "execA",
-      transferService = Some(new MockBlockTransferService(10, "hostA")))
+      transferService = Some(new MockBlockTransferService(10, "hostA")),
+      externalShuffleServerEnabled = true)
     makeBlockManager(100, "execB",
-      transferService = Some(new MockBlockTransferService(10, "hostB")))
+      transferService = Some(new MockBlockTransferService(10, "hostB")),
+      externalShuffleServerEnabled = true)
     makeBlockManager(100, "execC",
-      transferService = Some(new MockBlockTransferService(10, "hostC")))
+      transferService = Some(new MockBlockTransferService(10, "hostC")),
+      externalShuffleServerEnabled = true)
     makeBlockManager(100, "execD",
-      transferService = Some(new MockBlockTransferService(10, "hostD")))
+      transferService = Some(new MockBlockTransferService(10, "hostD")),
+      externalShuffleServerEnabled = true)
     makeBlockManager(100, "execE",
-      transferService = Some(new MockBlockTransferService(10, "hostA")))
+      transferService = Some(new MockBlockTransferService(10, "hostA")),
+      externalShuffleServerEnabled = true)
     assert(master.getShufflePushMergerLocations(10, Set.empty).size == 4)
     assert(master.getShufflePushMergerLocations(10, Set.empty).map(_.host).sorted ===
       Seq("hostC", "hostD", "hostA", "hostB").sorted)
@@ -2066,15 +2073,20 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with PrivateMethodTe
 
   test("SPARK-32919: Prefer active executor locations for shuffle push mergers") {
     makeBlockManager(100, "execA",
-      transferService = Some(new MockBlockTransferService(10, "hostA")))
+      transferService = Some(new MockBlockTransferService(10, "hostA")),
+      externalShuffleServerEnabled = true)
     makeBlockManager(100, "execB",
-      transferService = Some(new MockBlockTransferService(10, "hostB")))
+      transferService = Some(new MockBlockTransferService(10, "hostB")),
+      externalShuffleServerEnabled = true)
     makeBlockManager(100, "execC",
-      transferService = Some(new MockBlockTransferService(10, "hostC")))
+      transferService = Some(new MockBlockTransferService(10, "hostC")),
+      externalShuffleServerEnabled = true)
     makeBlockManager(100, "execD",
-      transferService = Some(new MockBlockTransferService(10, "hostD")))
+      transferService = Some(new MockBlockTransferService(10, "hostD")),
+      externalShuffleServerEnabled = true)
     makeBlockManager(100, "execE",
-      transferService = Some(new MockBlockTransferService(10, "hostA")))
+      transferService = Some(new MockBlockTransferService(10, "hostA")),
+      externalShuffleServerEnabled = true)
     assert(master.getShufflePushMergerLocations(5, Set.empty).size == 4)
     assert(master.getExecutorEndpointRef(SparkContext.DRIVER_IDENTIFIER).isEmpty)
     makeBlockManager(100, SparkContext.DRIVER_IDENTIFIER,
@@ -2093,7 +2105,19 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with PrivateMethodTe
       Seq("hostB", "hostC", "hostD").sorted)
   }
 
-  test("SPARK-33387 Support ordered shuffle block migration") {
+  test("Only block manager with external shuffle server enabled can act as push merger") {
+    makeBlockManager(100, "execA",
+      transferService = Some(new MockBlockTransferService(10, "hostA")))
+    makeBlockManager(100, "execB",
+      transferService = Some(new MockBlockTransferService(10, "hostB")),
+      externalShuffleServerEnabled = true)
+
+    assert(master.getShufflePushMergerLocations(2, Set.empty).size == 1)
+    assert(master.getShufflePushMergerLocations(2, Set.empty).map(_.host).sorted ===
+      Seq("hostB").sorted)
+  }
+
+    test("SPARK-33387 Support ordered shuffle block migration") {
     val blocks: Seq[ShuffleBlockInfo] = Seq(
       ShuffleBlockInfo(1, 0L),
       ShuffleBlockInfo(0, 1L),
@@ -2199,6 +2223,7 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with PrivateMethodTe
         newShuffleServer, conf, "ShuffleServer")
 
       conf.set(SHUFFLE_SERVICE_ENABLED.key, "true")
+      conf.set(SHUFFLE_SERVICE_SERVER_ENABLED.key, "true")
       conf.set(SHUFFLE_SERVICE_PORT.key, shufflePort.toString)
       conf.set(SHUFFLE_REGISTRATION_TIMEOUT.key, "40")
       conf.set(SHUFFLE_REGISTRATION_MAX_ATTEMPTS.key, "1")
@@ -2207,7 +2232,7 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with PrivateMethodTe
       }.getMessage
       assert(e.contains("TimeoutException"))
       verify(master, times(0))
-        .registerBlockManager(mc.any(), mc.any(), mc.any(), mc.any(), mc.any())
+        .registerBlockManager(mc.any(), mc.any(), mc.any(), mc.any(), mc.any(), mc.anyBoolean())
       server.close()
     }
   }
@@ -2287,6 +2312,9 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with PrivateMethodTe
       }
       super.fetchBlockSync(host, port, execId, blockId, tempFileManager)
     }
+
+    override def registerWithShuffleServer(host: String, port: Int, execId: String,
+                                           executorInfo: ExecutorShuffleInfo): Unit = {}
   }
 }
 

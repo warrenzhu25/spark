@@ -117,8 +117,10 @@ class BlockManagerMasterEndpoint(
     RpcUtils.makeDriverRef(CoarseGrainedSchedulerBackend.ENDPOINT_NAME, conf, rpcEnv)
 
   override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {
-    case RegisterBlockManager(id, localDirs, maxOnHeapMemSize, maxOffHeapMemSize, endpoint) =>
-      context.reply(register(id, localDirs, maxOnHeapMemSize, maxOffHeapMemSize, endpoint))
+    case RegisterBlockManager(id, localDirs, maxOnHeapMemSize, maxOffHeapMemSize, endpoint,
+    shuffleServerEnabled) =>
+      context.reply(register(id, localDirs, maxOnHeapMemSize, maxOffHeapMemSize, endpoint,
+        shuffleServerEnabled))
 
     case _updateBlockInfo @
         UpdateBlockInfo(blockManagerId, blockId, storageLevel, deserializedSize, size) =>
@@ -572,7 +574,8 @@ class BlockManagerMasterEndpoint(
       localDirs: Array[String],
       maxOnHeapMemSize: Long,
       maxOffHeapMemSize: Long,
-      storageEndpoint: RpcEndpointRef): BlockManagerId = {
+      storageEndpoint: RpcEndpointRef,
+      shuffleServerEnabled: Boolean): BlockManagerId = {
     // the dummy id is not expected to contain the topology information.
     // we get that info here and respond back with a more fleshed out block manager id
     val id = BlockManagerId(
@@ -613,7 +616,7 @@ class BlockManagerMasterEndpoint(
       blockManagerInfo(id) = new BlockManagerInfo(id, System.currentTimeMillis(),
         maxOnHeapMemSize, maxOffHeapMemSize, storageEndpoint, externalShuffleServiceBlockStatus)
 
-      if (pushBasedShuffleEnabled) {
+      if (shuffleServerEnabled && pushBasedShuffleEnabled) {
         addMergerLocation(id)
       }
     }
@@ -761,7 +764,9 @@ class BlockManagerMasterEndpoint(
       numMergersNeeded: Int,
       hostsToFilter: Set[String]): Seq[BlockManagerId] = {
     val blockManagerHosts = blockManagerIdByExecutor
-      .filterNot(_._2.isDriver).values.map(_.host).toSet
+      .filterNot(_._2.isDriver)
+      .filter(b => shuffleMergerLocations.contains(b._2.host))
+      .values.map(_.host).toSet
     val filteredBlockManagerHosts = blockManagerHosts.diff(hostsToFilter)
     val filteredMergersWithExecutors = filteredBlockManagerHosts.map(
       BlockManagerId(BlockManagerId.SHUFFLE_MERGER_IDENTIFIER, _, externalShuffleServicePort))
