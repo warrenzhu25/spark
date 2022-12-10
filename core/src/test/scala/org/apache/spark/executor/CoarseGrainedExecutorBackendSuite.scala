@@ -349,6 +349,37 @@ class CoarseGrainedExecutorBackendSuite extends SparkFunSuite
     assert(arg.bindAddress == "host1")
   }
 
+  test("externalShuffleEnabled is correctly set") {
+    val noArgs = Array(
+      "--driver-url", "driverurl",
+      "--executor-id", "1",
+      "--hostname", "host1",
+      "--cores", "1",
+      "--app-id", "app1")
+    assert(!CoarseGrainedExecutorBackend.parseArguments(noArgs, "")
+      .shuffleServerEnabled)
+
+    val withTrue = Array(
+      "--driver-url", "driverurl",
+      "--executor-id", "1",
+      "--hostname", "host1",
+      "--cores", "1",
+      "--app-id", "app1",
+      "--externalShuffleServer", "true")
+    assert(CoarseGrainedExecutorBackend.parseArguments(withTrue, "")
+      .shuffleServerEnabled)
+
+    val withFalse = Array(
+      "--driver-url", "driverurl",
+      "--executor-id", "1",
+      "--hostname", "host1",
+      "--cores", "1",
+      "--app-id", "app1",
+      "--externalShuffleServer", "false")
+    assert(!CoarseGrainedExecutorBackend.parseArguments(withFalse, "")
+      .shuffleServerEnabled)
+  }
+
   test("SPARK-24203 when bindAddress is different, it does not default to hostname") {
     val args1 = Array(
       "--driver-url", "driverurl",

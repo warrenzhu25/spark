@@ -401,7 +401,8 @@ private[spark] object CoarseGrainedExecutorBackend extends Logging {
       appId: String,
       workerUrl: Option[String],
       resourcesFileOpt: Option[String],
-      resourceProfileId: Int)
+      resourceProfileId: Int,
+      shuffleServerEnabled: Boolean = false)
 
   def main(args: Array[String]): Unit = {
     val createFn: (RpcEnv, Arguments, SparkEnv, ResourceProfile) =>
@@ -469,10 +470,9 @@ private[spark] object CoarseGrainedExecutorBackend extends Logging {
       }
 
       driverConf.set(EXECUTOR_ID, arguments.executorId)
-      val isShuffleServerEnabled = executorConf.get(SHUFFLE_SERVICE_SERVER_ENABLED)
       log.info(s"Config ${SHUFFLE_SERVICE_SERVER_ENABLED.key} is overrided by worker conf:" +
-        s" $isShuffleServerEnabled")
-      driverConf.set(SHUFFLE_SERVICE_SERVER_ENABLED, isShuffleServerEnabled)
+        s" ${arguments.shuffleServerEnabled}")
+      driverConf.set(SHUFFLE_SERVICE_SERVER_ENABLED, arguments.shuffleServerEnabled)
       val env = SparkEnv.createExecutorEnv(driverConf, arguments.executorId, arguments.bindAddress,
         arguments.hostname, arguments.cores, cfg.ioEncryptionKey, isLocal = false)
       // Set the application attemptId in the BlockStoreClient if available.
@@ -500,6 +500,7 @@ private[spark] object CoarseGrainedExecutorBackend extends Logging {
     var appId: String = null
     var workerUrl: Option[String] = None
     var resourceProfileId: Int = DEFAULT_RESOURCE_PROFILE_ID
+    var externalShuffleServer: Boolean = false
 
     var argv = args.toList
     while (!argv.isEmpty) {
@@ -532,6 +533,9 @@ private[spark] object CoarseGrainedExecutorBackend extends Logging {
         case ("--resourceProfileId") :: value :: tail =>
           resourceProfileId = value.toInt
           argv = tail
+        case ("--externalShuffleServer") :: value :: tail =>
+          externalShuffleServer = value.toBoolean
+          argv = tail
         case Nil =>
         case tail =>
           // scalastyle:off println
@@ -555,7 +559,7 @@ private[spark] object CoarseGrainedExecutorBackend extends Logging {
     }
 
     Arguments(driverUrl, executorId, bindAddress, hostname, cores, appId, workerUrl,
-      resourcesFileOpt, resourceProfileId)
+      resourcesFileOpt, resourceProfileId, externalShuffleServer)
   }
 
   private def printUsageAndExit(classNameForEntry: String): Unit = {
@@ -574,6 +578,7 @@ private[spark] object CoarseGrainedExecutorBackend extends Logging {
       |   --app-id <appid>
       |   --worker-url <workerUrl>
       |   --resourceProfileId <id>
+      |   --externalShuffleServer <enabled>
       |""".stripMargin)
     // scalastyle:on println
     System.exit(1)

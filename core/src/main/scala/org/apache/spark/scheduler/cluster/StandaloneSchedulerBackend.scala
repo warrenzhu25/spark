@@ -90,7 +90,8 @@ private[spark] class StandaloneSchedulerBackend(
       "--cores", "{{CORES}}",
       "--app-id", "{{APP_ID}}",
       "--worker-url", "{{WORKER_URL}}",
-      "--resourceProfileId", "{{RESOURCE_PROFILE_ID}}")
+      "--resourceProfileId", "{{RESOURCE_PROFILE_ID}}",
+      "--externalShuffleServer", "{{SHUFFLE_SERVER_ENABLED}}")
     val extraJavaOpts = sc.conf.get(config.EXECUTOR_JAVA_OPTIONS)
       .map(Utils.splitCommandString).getOrElse(Seq.empty)
     val classPathEntries = sc.conf.get(config.EXECUTOR_CLASS_PATH)

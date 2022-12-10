@@ -19,17 +19,14 @@ package org.apache.spark.deploy.worker
 
 import java.io._
 import java.nio.charset.StandardCharsets
-
 import scala.collection.JavaConverters._
-
 import com.google.common.io.Files
-
 import org.apache.spark.{SecurityManager, SparkConf}
 import org.apache.spark.deploy.{ApplicationDescription, ExecutorState}
 import org.apache.spark.deploy.DeployMessages.ExecutorStateChanged
 import org.apache.spark.deploy.StandaloneResourceUtils.prepareResourcesFile
 import org.apache.spark.internal.Logging
-import org.apache.spark.internal.config.SPARK_EXECUTOR_PREFIX
+import org.apache.spark.internal.config.{SHUFFLE_SERVICE_SERVER_ENABLED, SPARK_EXECUTOR_PREFIX}
 import org.apache.spark.internal.config.UI._
 import org.apache.spark.resource.ResourceInformation
 import org.apache.spark.rpc.RpcEndpointRef
@@ -141,6 +138,7 @@ private[deploy] class ExecutorRunner(
     case "{{CORES}}" => cores.toString
     case "{{APP_ID}}" => appId
     case "{{RESOURCE_PROFILE_ID}}" => rpId.toString
+    case "{{SHUFFLE_SERVER_ENABLED}}" => conf.get(SHUFFLE_SERVICE_SERVER_ENABLED).toString
     case other => other
   }
 

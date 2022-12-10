@@ -39,4 +39,38 @@ class ExecutorRunnerTest extends SparkFunSuite {
     val builderCommand = builder.command()
     assert(builderCommand.get(builderCommand.size() - 1) === appId)
   }
+
+  test("command includes externalShuffleEnabled as true") {
+    val args = Seq("--externalShuffleServer", "{{SHUFFLE_SERVER_ENABLED}}")
+    val appId = "12345-worker321-9876"
+    val conf = new SparkConf().set("spark.shuffle.service.server.enabled", "true")
+    val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
+    val appDesc = ApplicationDescription("app name", Some(8),
+      Command("foo", args, Map(), Seq(), Seq(), Seq()), "appUiUrl",
+      DeployTestUtils.defaultResourceProfile)
+    val er = new ExecutorRunner(appId, 1, appDesc, 8, 1234, null, "blah", "http://", "worker321",
+      123, "publicAddr", new File(sparkHome), new File("ooga"), "blah", conf, Seq("localDir"),
+      ExecutorState.RUNNING, ResourceProfile.DEFAULT_RESOURCE_PROFILE_ID)
+    val builder = CommandUtils.buildProcessBuilder(
+      appDesc.command, new SecurityManager(conf), 1234, sparkHome, er.substituteVariables)
+    val builderCommand = builder.command()
+    assert(builderCommand.get(builderCommand.size() - 1) === "true")
+  }
+
+  test("command includes externalShuffleEnabled as default false") {
+    val args = Seq("--externalShuffleServer", "{{SHUFFLE_SERVER_ENABLED}}")
+    val appId = "12345-worker321-9876"
+    val conf = new SparkConf()
+    val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
+    val appDesc = ApplicationDescription("app name", Some(8),
+      Command("foo", args, Map(), Seq(), Seq(), Seq()), "appUiUrl",
+      DeployTestUtils.defaultResourceProfile)
+    val er = new ExecutorRunner(appId, 1, appDesc, 8, 1234, null, "blah", "http://", "worker321",
+      123, "publicAddr", new File(sparkHome), new File("ooga"), "blah", conf, Seq("localDir"),
+      ExecutorState.RUNNING, ResourceProfile.DEFAULT_RESOURCE_PROFILE_ID)
+    val builder = CommandUtils.buildProcessBuilder(
+      appDesc.command, new SecurityManager(conf), 1234, sparkHome, er.substituteVariables)
+    val builderCommand = builder.command()
+    assert(builderCommand.get(builderCommand.size() - 1) === "false")
+  }
 }
