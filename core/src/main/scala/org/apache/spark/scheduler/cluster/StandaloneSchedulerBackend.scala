@@ -17,25 +17,25 @@
 
 package org.apache.spark.scheduler.cluster
 
-import java.util.Locale
-import java.util.concurrent.{Semaphore, TimeUnit}
-import java.util.concurrent.atomic.AtomicBoolean
-
-import scala.concurrent.Future
-
-import org.apache.spark.{SparkConf, SparkContext}
-import org.apache.spark.deploy.{ApplicationDescription, Command}
 import org.apache.spark.deploy.client.{StandaloneAppClient, StandaloneAppClientListener}
+import org.apache.spark.deploy.{ApplicationDescription, Command}
 import org.apache.spark.executor.ExecutorExitCode
-import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.internal.config.EXECUTOR_REMOVE_DELAY
 import org.apache.spark.internal.config.Tests.IS_TESTING
+import org.apache.spark.internal.{Logging, config}
 import org.apache.spark.launcher.{LauncherBackend, SparkAppHandle}
 import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.rpc.{RpcAddress, RpcEndpointAddress}
 import org.apache.spark.scheduler._
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.RemoveExecutor
+import org.apache.spark.storage.{BlockManagerId, BlockManagerMaster}
 import org.apache.spark.util.{ThreadUtils, Utils}
+import org.apache.spark.{SparkConf, SparkContext}
+
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.{Semaphore, TimeUnit}
+import scala.concurrent.Future
 
 /**
  * A [[SchedulerBackend]] implementation for Spark's standalone cluster manager.
@@ -67,6 +67,18 @@ private[spark] class StandaloneSchedulerBackend(
   private val executorDelayRemoveThread =
     ThreadUtils.newDaemonSingleThreadScheduledExecutor("driver-executor-delay-remove-thread")
   private val _executorRemoveDelay = conf.get(EXECUTOR_REMOVE_DELAY)
+
+  private val blockManagerMaster: BlockManagerMaster = sc.env.blockManager.master
+
+  private val minMergersThresholdRatio =
+    conf.get(config.SHUFFLE_MERGER_LOCATIONS_MIN_THRESHOLD_RATIO)
+
+  private val minMergersStaticThreshold =
+    conf.get(config.SHUFFLE_MERGER_LOCATIONS_MIN_STATIC_THRESHOLD)
+
+  private val maxNumExecutors = conf.get(config.DYN_ALLOCATION_MAX_EXECUTORS)
+
+  private val numExecutors = conf.get(config.EXECUTOR_INSTANCES).getOrElse(0)
 
   override def start(): Unit = {
     super.start()
@@ -258,6 +270,42 @@ private[spark] class StandaloneSchedulerBackend(
       .map(e => (e._1.substring(prefix.length).toLowerCase(Locale.ROOT), e._2)).toMap
     if (driverLogUrls.nonEmpty) Some(driverLogUrls) else None
   }
+
+  override def getShufflePushMergerLocations(
+                                              numPartitions: Int,
+                                              resourceProfileId: Int): Seq[BlockManagerId] = {
+    // TODO (SPARK-33481) This is a naive way of calculating numMergersDesired for a stage,
+    // TODO we can use better heuristics to calculate numMergersDesired for a stage.
+//    val maxExecutors = if (Utils.isDynamicAllocationEnabled(sc.getConf)) {
+//      maxNumExecutors
+//    } else {
+//      numExecutors
+//    }
+//    val tasksPerExecutor = sc.resourceProfileManager
+//      .resourceProfileFromId(resourceProfileId).maxTasksPerExecutor(sc.conf)
+//    val numMergersDesired = math.min(
+//      math.max(1, math.ceil(numPartitions / tasksPerExecutor).toInt), maxExecutors)
+//    val minMergersNeeded = math.max(minMergersStaticThreshold,
+//      math.floor(numMergersDesired * minMergersThresholdRatio).toInt)
+//
+//    // Request for numMergersDesired shuffle mergers to BlockManagerMasterEndpoint
+//    // and if it's less than minMergersNeeded, we disable push based shuffle.
+//    val mergerLocations = blockManagerMaster
+//      .getShufflePushMergerLocations(numMergersDesired, scheduler.excludedNodes())
+//    if (mergerLocations.size < numMergersDesired && mergerLocations.size < minMergersNeeded) {
+//      Seq.empty[BlockManagerId]
+//    } else {
+//      logInfo(s"The number of shuffle mergers desired ${numMergersDesired}" +
+//        s" and available locations are ${mergerLocations.length}")
+//      mergerLocations
+//    }
+    val mergerLocations = blockManagerMaster.getShufflePushMergerLocations(1, scheduler.excludedNodes())
+    val numMergersDesired = 1
+    logInfo(s"The number of shuffle mergers desired ${numMergersDesired}" +
+     s" and available locations are ${mergerLocations.length}")
+    mergerLocations
+  }
+
 
   private def waitForRegistration() = {
     registrationBarrier.acquire()

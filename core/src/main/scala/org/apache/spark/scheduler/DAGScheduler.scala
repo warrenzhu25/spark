@@ -1408,7 +1408,8 @@ private[spark] class DAGScheduler(
         s" ${stage.shuffleDep.getMergerLocs.size} merger locations")
     } else {
       logInfo(s"Shuffle merge disabled for $stage with shuffle $shuffleId" +
-        s" and shuffle merge $shuffleMergeId, but can get enabled later adaptively" +
+        s" and shuffle merge $shuffleMergeId with ${stage.shuffleDep.getMergerLocs.size}" +
+        s" merger locations, but can get enabled later adaptively" +
         s" once enough mergers are available")
     }
   }
@@ -1420,7 +1421,7 @@ private[spark] class DAGScheduler(
       stage.shuffleDep.setMergerLocs(mergerLocs)
     }
 
-    logDebug(s"Shuffle merge locations for shuffle ${stage.shuffleDep.shuffleId} with" +
+    logInfo(s"Shuffle merge locations for shuffle ${stage.shuffleDep.shuffleId} with" +
       s" shuffle merge ${stage.shuffleDep.shuffleMergeId} is" +
       s" ${stage.shuffleDep.getMergerLocs.map(_.host).mkString(", ")}")
     mergerLocs
