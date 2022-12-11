@@ -631,7 +631,8 @@ final class ShuffleBlockFetcherIterator(
       // with the executors, in once. Otherwise, we'll fetch the local directories from those
       // executors directly one by one. The fetch requests won't be too much since one host is
       // almost impossible to have many executors at the same time practically.
-      val dirFetchRequests = if (blockManager.externalShuffleServiceEnabled) {
+      val dirFetchRequests = if (blockManager.externalShuffleServiceEnabled &&
+        blockManager.externalShuffleServerEnabled) {
         val host = blockManager.blockManagerId.host
         val port = blockManager.externalShuffleServicePort
         Seq((host, port, hostLocalBlocksWithMissingDirs.keys.toArray))

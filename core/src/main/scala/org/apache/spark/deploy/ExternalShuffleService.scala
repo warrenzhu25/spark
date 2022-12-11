@@ -100,11 +100,10 @@ class ExternalShuffleService(sparkConf: SparkConf, securityManager: SecurityMana
       val mergeManagerSubClazz = mergeManagerImplClazz.asSubclass(classOf[MergedShuffleFileManager])
       // The assumption is that all the custom implementations just like the RemoteBlockPushResolver
       // will also need the transport configuration.
-      mergeManagerSubClazz.getConstructor(classOf[TransportConf],
-        classOf[File]).newInstance(conf, mergeManagerFile)
+      mergeManagerSubClazz.getConstructor(classOf[TransportConf]).newInstance(conf)
     } catch {
       case e: Exception =>
-        log.error("Unable to create an instance of {}", mergeManagerImplClassName)
+        log.error(s"Unable to create an instance of $mergeManagerImplClassName", e)
         new NoOpMergedShuffleFileManager(conf, mergeManagerFile)
     }
   }
