@@ -1163,13 +1163,17 @@ class DAGSchedulerSuite extends SparkFunSuite with TempLocalSparkContext with Ti
     val reduceRdd = new MyRDD(sc, parts, List(shuffleDep), tracker = mapOutputTracker)
     submit(reduceRdd, (0 until parts).toArray)
 
-    for (attempt <- 0 until scheduler.maxConsecutiveStageAttempts) {
+    // For even attempt, fail stage with fetch failure from decommissioned executor,
+    // for odd attempt, fail stage with fetch failure from non-decommissioned executor
+    // After 2 * maxConsecutiveStageAttempts, the job should abort
+    val totalAttempts = scheduler.maxConsecutiveStageAttempts * 2
+    for (attempt <- 0 until totalAttempts) {
       // Complete all the tasks for the current attempt of stage 0 successfully
       completeShuffleMapStageSuccessfully(0, attempt, numShufflePartitions = parts,
         Seq("hostA", "hostB"))
 
-      // Only make first attempt fail due to executor decommission
-      if (attempt == 0) {
+      // Only make even attempt fail due to executor decommission
+      if (attempt % 2 == 0) {
         taskScheduler.executorDecommission("hostA-exec", ExecutorDecommissionInfo(""))
       } else {
         taskScheduler.executorsPendingDecommission.clear()
@@ -1181,12 +1185,22 @@ class DAGSchedulerSuite extends SparkFunSuite with TempLocalSparkContext with Ti
       // this will trigger a resubmission of stage 0, since we've lost some of its
       // map output, for the next iteration through the loop
       scheduler.resubmitFailedStages()
-   }
 
-    // Confirm job finished successfully
-    sc.listenerBus.waitUntilEmpty()
-    assert(scheduler.runningStages.nonEmpty)
-    assert(!ended)
+      if (attempt < totalAttempts - 1) {
+        assert(scheduler.runningStages.nonEmpty)
+        assert(!ended)
+      } else {
+        // Stage should have been aborted and removed from running stages
+        assertDataStructuresEmpty()
+        sc.listenerBus.waitUntilEmpty()
+        assert(ended)
+        jobResult match {
+          case JobFailed(reason) =>
+            assert(reason.getMessage.contains("ResultStage 1 () has failed the maximum"))
+          case other => fail(s"expected JobFailed, not $other")
+        }
+      }
+    }
   }
 
   /**
