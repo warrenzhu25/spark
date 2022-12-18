@@ -68,6 +68,23 @@ private[spark] class BlockStoreShuffleReader[K, C](
     doBatchFetch
   }
 
+  private def fetchMigratedBlocks: Boolean = {
+    val conf = SparkEnv.get.conf
+    val isExternalShuffleServiceEnabled = conf.get(config.SHUFFLE_SERVICE_ENABLED)
+    val isDecommissionEnabled = conf.get(config.DECOMMISSION_ENABLED)
+    val isStorageDecommissionEnabled = conf.get(config.STORAGE_DECOMMISSION_ENABLED)
+    val shuffleMigrationEnabled = conf.get(config.STORAGE_DECOMMISSION_SHUFFLE_BLOCKS_ENABLED)
+
+    val doFetchMigratedBlocks = !isExternalShuffleServiceEnabled &&
+      isDecommissionEnabled &&
+      isStorageDecommissionEnabled &&
+      shuffleMigrationEnabled &&
+      conf.get(config.STORAGE_DECOMMISSION_FETCH_MIGRATED_BLOCKS_ENABLED)
+
+    logInfo(s"FetchMigratedBlocks enabled is $doFetchMigratedBlocks")
+    doFetchMigratedBlocks
+  }
+
   /** Read the combined key-values for this reduce task */
   override def read(): Iterator[Product2[K, C]] = {
     val wrappedStreams = new ShuffleBlockFetcherIterator(
@@ -88,7 +105,8 @@ private[spark] class BlockStoreShuffleReader[K, C](
       SparkEnv.get.conf.get(config.SHUFFLE_CHECKSUM_ENABLED),
       SparkEnv.get.conf.get(config.SHUFFLE_CHECKSUM_ALGORITHM),
       readMetrics,
-      fetchContinuousBlocksInBatch).toCompletionIterator
+      fetchContinuousBlocksInBatch,
+      fetchMigratedBlocks).toCompletionIterator
 
     val serializerInstance = dep.serializer.newInstance()
 
