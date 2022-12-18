@@ -24,6 +24,8 @@ import java.util.concurrent.{CompletableFuture, Semaphore}
 import java.util.zip.CheckedInputStream
 
 import scala.collection.mutable
+
+import org.apache.spark.FetchFailed
 // scalastyle:off executioncontextglobal
 import scala.concurrent.ExecutionContext.Implicits.global
 // scalastyle:on executioncontextglobal
@@ -33,17 +35,17 @@ import com.google.common.io.ByteStreams
 import io.netty.util.internal.OutOfDirectMemoryError
 import org.apache.logging.log4j.Level
 import org.mockito.ArgumentMatchers.{any, eq => meq}
-import org.mockito.Mockito.{doThrow, mock, times, verify, when}
+import org.mockito.Mockito._
 import org.mockito.invocation.InvocationOnMock
 import org.mockito.stubbing.Answer
 import org.roaringbitmap.RoaringBitmap
 import org.scalatest.PrivateMethodTester
 
-import org.apache.spark.{MapOutputTracker, SparkFunSuite, TaskContext}
+import org.apache.spark.{ExecutorDeadException, MapOutputTracker, SparkFunSuite, TaskContext}
 import org.apache.spark.MapOutputTracker.SHUFFLE_PUSH_MAP_ID
 import org.apache.spark.network._
 import org.apache.spark.network.buffer.{FileSegmentManagedBuffer, ManagedBuffer}
-import org.apache.spark.network.shuffle.{BlockFetchingListener, DownloadFileManager, ExternalBlockStoreClient, MergedBlockMeta, MergedBlocksMetaListener}
+import org.apache.spark.network.shuffle._
 import org.apache.spark.network.util.LimitedInputStream
 import org.apache.spark.shuffle.{FetchFailedException, ShuffleReadMetricsReporter}
 import org.apache.spark.storage.BlockManagerId.SHUFFLE_MERGER_IDENTIFIER
@@ -61,6 +63,7 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite with PrivateMethodT
     mapOutputTracker = mock(classOf[MapOutputTracker])
     when(mapOutputTracker.getMapSizesForMergeResult(any(), any(), any()))
       .thenReturn(Seq.empty.iterator)
+    doNothing().when(mapOutputTracker).incrementEpoch()
   }
 
   private def doReturn(value: Any) = org.mockito.Mockito.doReturn(value, Seq.empty: _*)
@@ -194,7 +197,9 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite with PrivateMethodT
       checksumEnabled: Boolean = true,
       checksumAlgorithm: String = "ADLER32",
       shuffleMetrics: Option[ShuffleReadMetricsReporter] = None,
-      doBatchFetch: Boolean = false): ShuffleBlockFetcherIterator = {
+      doBatchFetch: Boolean = false,
+      fetchMigratedBlocks: Boolean = false
+  ): ShuffleBlockFetcherIterator = {
     val tContext = taskContext.getOrElse(TaskContext.empty())
     new ShuffleBlockFetcherIterator(
       tContext,
@@ -213,7 +218,9 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite with PrivateMethodT
       checksumEnabled,
       checksumAlgorithm,
       shuffleMetrics.getOrElse(tContext.taskMetrics().createTempShuffleReadMetrics()),
-      doBatchFetch)
+      doBatchFetch,
+      fetchMigratedBlocks
+    )
   }
   // scalastyle:on argcount
 
@@ -1826,5 +1833,254 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite with PrivateMethodT
     val iterator = createShuffleBlockIteratorWithDefaults(blocksByAddress,
       blockManager = Some(blockManager), streamWrapperLimitSize = Some(100))
     verifyLocalBlocksFromFallback(iterator)
+  }
+
+  test("Fetch migrated blocks with all blocks failed when fetch failed" +
+      " on a decommissioned executor") {
+    testMigratedBlocksSomeFailed(Set(ShuffleBlockId(0, 0, 0),
+      ShuffleBlockId(0, 1, 0), ShuffleBlockId(0, 2, 0)), 3)
+  }
+
+  test("Fetch migrated blocks with blocks migrated twice when fetch failed" +
+      " on a decommissioned executor") {
+    // Make sure remote blocks would return
+    val remoteBmId1 = BlockManagerId("test-client-1", "test-client-1", 2)
+    val remoteBmId2 = BlockManagerId("test-client-2", "test-client-2", 2)
+    val remoteBmId3 = BlockManagerId("test-client-3", "test-client-3", 3)
+    val blockId1 = ShuffleBlockId(0, 0, 0)
+    val blockId2 = ShuffleBlockId(0, 1, 0)
+    val blocks = Map[BlockId, ManagedBuffer](
+      blockId1 -> createMockManagedBuffer(),
+      blockId2 -> createMockManagedBuffer()
+    )
+
+    answerFetchBlocks { invocation =>
+      val host = invocation.getArgument[String](0)
+      val blockIds = invocation.getArgument[Array[String]](3)
+      val listener = invocation.getArgument[BlockFetchingListener](4)
+      if (host == remoteBmId1.host || host == remoteBmId2.host) {
+        blockIds.foreach(blockId =>
+          listener.onBlockFetchFailure(blockId,
+            ExecutorDeadException(true, "")))
+      } else {
+        blockIds.foreach(blockId =>
+          listener.onBlockFetchSuccess(blockId, blocks(BlockId(blockId))))
+      }
+    }
+
+    when(mapOutputTracker.getMapSizesByExecutorId(0, 0))
+        .thenReturn(
+          Seq((remoteBmId2, toBlockList(
+            Seq(blockId1), 1L, 1)),
+            (remoteBmId3, toBlockList(
+              Seq(blockId2), 1L, 1))
+          ).iterator)
+        .thenReturn(
+          Seq((remoteBmId3, toBlockList(
+            Seq(blockId1, blockId2), 1L, 1))
+          ).iterator)
+
+    val iterator = createShuffleBlockIteratorWithDefaults(
+      Map(remoteBmId1 -> toBlockList(blocks.keys, 1L, 0)),
+      fetchMigratedBlocks = true
+    )
+
+    verifyMigratedBlocksFetch(iterator, blocks, 2, 4)
+    verifyAllInFlightBeingZero(iterator)
+  }
+
+  test("Fetch migrated blocks with some blocks missing when fetch failed" +
+      " on a decommissioned executor") {
+    // Make sure remote blocks would return
+    val remoteBmId1 = BlockManagerId("test-client-1", "test-client-1", 2)
+    val remoteBmId2 = BlockManagerId("test-client-2", "test-client-2", 2)
+    val blockMapIndex = 3
+    val blockId1 = ShuffleBlockId(0, 0, 0)
+    val blockId2 = ShuffleBlockId(0, 1, 0)
+    val blocks = Map[BlockId, ManagedBuffer](
+      blockId1 -> createMockManagedBuffer(),
+      blockId2 -> createMockManagedBuffer()
+    )
+
+    answerFetchBlocks { invocation =>
+      val host = invocation.getArgument[String](0)
+      val blockIds = invocation.getArgument[Array[String]](3)
+      val listener = invocation.getArgument[BlockFetchingListener](4)
+      if (host == remoteBmId1.host) {
+        blockIds.foreach(blockId =>
+          listener.onBlockFetchFailure(blockId,
+            ExecutorDeadException(true, "")))
+      } else {
+        blockIds.foreach(blockId =>
+          listener.onBlockFetchSuccess(blockId, blocks(BlockId(blockId))))
+      }
+    }
+
+    when(mapOutputTracker.getMapSizesByExecutorId(0, 0)).thenReturn(
+      Seq((remoteBmId2, toBlockList(
+        Seq(blockId1), 1L, blockMapIndex))
+      ).iterator
+    )
+
+    val iterator = createShuffleBlockIteratorWithDefaults(
+      Map(remoteBmId1 -> toBlockList(blocks.keys, 1L, blockMapIndex)),
+      fetchMigratedBlocks = true
+    )
+
+    val e = intercept[FetchFailedException] {
+      iterator.next()
+    }
+    assert(e.toTaskFailedReason.isInstanceOf[FetchFailed])
+    val fetchFailed = e.toTaskFailedReason.asInstanceOf[FetchFailed]
+    assert(fetchFailed.mapId == 1L)
+    assert(fetchFailed.mapIndex == blockMapIndex)
+
+    verifyMigratedBlocksFetch(iterator, blocks, failed = true)
+  }
+
+  test("Fetch migrated blocks with some local blocks when fetch failed" +
+      " on a decommissioned executor") {
+    // Make sure remote blocks would return
+    val blockManager = createMockBlockManager()
+    val localBmId = blockManager.blockManagerId
+    val remoteBmId1 = BlockManagerId("test-client-1", "test-client-1", 2)
+    val remoteBmId2 = BlockManagerId("test-client-2", "test-client-2", 2)
+    val blockId1 = ShuffleBlockId(0, 0, 0)
+    val blockId2 = ShuffleBlockId(0, 1, 0)
+    val blocks = Map[BlockId, ManagedBuffer](
+      blockId1 -> createMockManagedBuffer(),
+      blockId2 -> createMockManagedBuffer()
+    )
+
+    answerFetchBlocks { invocation =>
+      val host = invocation.getArgument[String](0)
+      val blockIds = invocation.getArgument[Array[String]](3)
+      val listener = invocation.getArgument[BlockFetchingListener](4)
+      if (host == remoteBmId1.host) {
+        blockIds.foreach(blockId =>
+          listener.onBlockFetchFailure(blockId,
+            ExecutorDeadException(true, "")))
+      } else {
+        blockIds.foreach(blockId =>
+          listener.onBlockFetchSuccess(blockId, blocks(BlockId(blockId))))
+      }
+    }
+
+    when(mapOutputTracker.getMapSizesByExecutorId(0, 0)).thenReturn(
+      Seq((remoteBmId2, toBlockList(
+        Seq(blockId1), 1L, 1)),
+        (localBmId, toBlockList(
+          Seq(blockId2), 1L, 1))
+      ).iterator
+    )
+
+    doReturn(blocks(blockId2)).when(blockManager).getLocalBlockData(meq(blockId2))
+
+    val iterator = createShuffleBlockIteratorWithDefaults(
+      Map(remoteBmId1 -> toBlockList(blocks.keys, 1L, 1)),
+      blockManager = Some(blockManager),
+      fetchMigratedBlocks = true
+    )
+
+    verifyMigratedBlocksFetch(iterator, blocks, fetchBlocksTimes = 2)
+    verify(blockManager, times(1)).getLocalBlockData(any())
+    verifyAllInFlightBeingZero(iterator)
+  }
+
+  test("Fetch migrated blocks with 1st failed of total 3 when fetch failed" +
+      " on a decommissioned executor") {
+    testMigratedBlocksSomeFailed(Set(ShuffleBlockId(0, 0, 0)), 2)
+  }
+
+  test("Fetch migrated blocks with 2nd failed of total 3 when fetch failed" +
+      " on a decommissioned executor") {
+    testMigratedBlocksSomeFailed(Set(ShuffleBlockId(0, 1, 0)), 2)
+  }
+
+  test("Fetch migrated blocks with 1st and 3rd failed of total 3 when fetch failed" +
+      " on a decommissioned executor") {
+    testMigratedBlocksSomeFailed(Set(ShuffleBlockId(0, 0, 0), ShuffleBlockId(0, 2, 0)), 3)
+  }
+
+  private def testMigratedBlocksSomeFailed(failedBlockIds: Set[BlockId], fetchBlockTimes: Int) = {
+    // Make sure remote blocks would return
+    val remoteBmId1 = BlockManagerId("test-client-1", "test-client-1", 2)
+    val remoteBmId2 = BlockManagerId("test-client-2", "test-client-2", 2)
+    val remoteBmId3 = BlockManagerId("test-client-3", "test-client-3", 3)
+    val blockId1 = ShuffleBlockId(0, 0, 0)
+    val blockId2 = ShuffleBlockId(0, 1, 0)
+    val blockId3 = ShuffleBlockId(0, 2, 0)
+    val blocks = Map[BlockId, ManagedBuffer](
+      blockId1 -> createMockManagedBuffer(),
+      blockId2 -> createMockManagedBuffer(),
+      blockId3 -> createMockManagedBuffer()
+    )
+
+    answerFetchBlocks { invocation =>
+      val host = invocation.getArgument[String](0)
+      val blockIds = invocation.getArgument[Array[String]](3)
+      val listener = invocation.getArgument[BlockFetchingListener](4)
+      if (host == remoteBmId1.host) {
+        blockIds.foreach(blockId =>
+          if (failedBlockIds.map(_.name).contains(blockId)) {
+            listener.onBlockFetchFailure(blockId,
+              ExecutorDeadException(true, ""))
+          } else {
+            listener.onBlockFetchSuccess(blockId, blocks(BlockId(blockId)))
+          })
+      } else {
+        blockIds.foreach(blockId =>
+          listener.onBlockFetchSuccess(blockId, blocks(BlockId(blockId))))
+      }
+    }
+
+    when(mapOutputTracker.getMapSizesByExecutorId(0, 0))
+        .thenReturn(
+          Seq((remoteBmId2, toBlockList(
+            Seq(blockId1), 1L, 1)),
+            (remoteBmId3, toBlockList(
+              Seq(blockId2, blockId3), 1L, 1))
+          ).iterator
+        )
+
+    val iterator = createShuffleBlockIteratorWithDefaults(
+      Map(remoteBmId1 -> toBlockList(blocks.keys, 1L, 1)),
+      fetchMigratedBlocks = true
+    )
+
+    verifyMigratedBlocksFetch(iterator, blocks, fetchBlocksTimes = fetchBlockTimes)
+    verifyAllInFlightBeingZero(iterator)
+  }
+
+  private def verifyAllInFlightBeingZero(iterator: ShuffleBlockFetcherIterator) = {
+    assert(iterator.getBytesInFlight == 0)
+    assert(iterator.getReqsInFlight == 0)
+    assert(iterator.getNumBlocksInFlightPerAddress.values.sum == 0)
+    assert(iterator.getResults.isEmpty)
+  }
+
+  private def verifyMigratedBlocksFetch(iterator: ShuffleBlockFetcherIterator,
+      blocks: Map[BlockId, ManagedBuffer],
+      fetchMaoOutputTimes: Int = 1,
+      fetchBlocksTimes: Int = 1,
+      failed: Boolean = false
+  ): Unit = {
+    if (!failed) {
+      val blockLeft = blocks.keys.to[collection.mutable.Set]
+      while (blockLeft.nonEmpty) {
+        val (blockId, inputStream) = iterator.next()
+        assert(blockLeft.remove(blockId))
+        verifyBufferRelease(blocks(blockId), inputStream)
+      }
+      assert(!iterator.hasNext)
+    }
+
+    verify(mapOutputTracker, times(fetchMaoOutputTimes))
+        .getMapSizesByExecutorId(any(), any())
+    verify(mapOutputTracker, times(fetchMaoOutputTimes))
+        .incrementEpoch()
+    verify(transfer, times(fetchBlocksTimes))
+        .fetchBlocks(any(), any(), any(), any(), any(), any())
+    assert(iterator.getNumBlocksToFetch == blocks.size)
   }
 }
