@@ -32,7 +32,7 @@ import io.netty.util.internal.OutOfDirectMemoryError
 import org.apache.commons.io.IOUtils
 import org.roaringbitmap.RoaringBitmap
 
-import org.apache.spark.{MapOutputTracker, TaskContext}
+import org.apache.spark.{ExecutorDeadException, MapOutputTracker, TaskContext}
 import org.apache.spark.MapOutputTracker.SHUFFLE_PUSH_MAP_ID
 import org.apache.spark.errors.SparkCoreErrors
 import org.apache.spark.internal.Logging
@@ -99,7 +99,9 @@ final class ShuffleBlockFetcherIterator(
     checksumEnabled: Boolean,
     checksumAlgorithm: String,
     shuffleMetrics: ShuffleReadMetricsReporter,
-    doBatchFetch: Boolean)
+    doBatchFetch: Boolean,
+    fetchMigratedBlocks: Boolean = false
+)
   extends Iterator[(BlockId, InputStream)] with DownloadFileManager with Logging {
 
   import ShuffleBlockFetcherIterator._
@@ -176,6 +178,15 @@ final class ShuffleBlockFetcherIterator(
    */
   @GuardedBy("this")
   private[this] var isZombie = false
+
+  /** Should be called by [[getUpdatedBlocksByAddress()]], not use directly */
+  @GuardedBy("updatedBlocksByAddress")
+  private[this] var currentEpoch = -1L
+
+  /** Should be called by [[getUpdatedBlocksByAddress()]], not use directly */
+  @GuardedBy("updatedBlocksByAddress")
+  private[this] val updatedBlocksByAddress =
+    mutable.Map[BlockManagerId, Seq[(BlockId, Long, Int)]]()
 
   /**
    * A set to store the files used for shuffling remote huge blocks. Files in this set will be
@@ -266,6 +277,7 @@ final class ShuffleBlockFetcherIterator(
       case FetchBlockInfo(blockId, size, mapIndex) => (blockId.toString, (size, mapIndex))
     }.toMap
     val remainingBlocks = new HashSet[String]() ++= infoMap.keys
+    val failedDecommissionedBlocks = new mutable.HashSet[String]()
     val deferredBlocks = new ArrayBuffer[String]()
     val blockIds = req.blocks.map(_.blockId.toString)
     val address = req.address
@@ -278,6 +290,57 @@ final class ShuffleBlockFetcherIterator(
         }
         results.put(DeferFetchRequestResult(FetchRequest(address, blocks.toSeq)))
         deferredBlocks.clear()
+      }
+    }
+
+    @inline def handleMigratedBlock(executorId: String,
+      blockId: String, isNetworkReqDone: Boolean): Unit = {
+
+      val startTime = System.nanoTime()
+      val block = BlockId(blockId)
+
+      // Only re-fetch map output when all below conditions satisfied:
+      // 1. is shuffle block
+      // 2. no remaining blocks
+      // 3. has failed decommissioned blocks
+      if (!block.isShuffle || remainingBlocks.nonEmpty || failedDecommissionedBlocks.isEmpty) {
+        return
+      }
+
+      val shuffleBlockId = block.asInstanceOf[ShuffleBlockId]
+      val latestBlocksByAddress = getUpdatedBlocksByAddress(address,
+        shuffleBlockId.shuffleId, shuffleBlockId.reduceId)
+
+      if (latestBlocksByAddress.contains(address)) {
+        results.put(FailureFetchResult(block, infoMap(blockId)._2, address,
+          ExecutorDeadException(isDecommissioned = true,
+            s"Executor $executorId is decommissioned and dead")))
+        return
+      }
+
+      val decommissionedBlocksByAddress = latestBlocksByAddress
+          .mapValues(blocks => blocks.filter(b => failedDecommissionedBlocks.contains(b._1.name)))
+          .filter { case (_, blocks) => blocks.nonEmpty }
+          .toMap
+      val migratedBlocks = decommissionedBlocksByAddress
+          .values
+          .flatMap { blocks => blocks.map(b => b._1.name) }
+          .toSet
+
+      if (migratedBlocks.size < failedDecommissionedBlocks.size) {
+        val missingBlock = failedDecommissionedBlocks.find(b => !migratedBlocks.contains(b)).get
+        results.put(FailureFetchResult(BlockId(missingBlock), infoMap(missingBlock)._2, address,
+          ExecutorDeadException(isDecommissioned = true,
+            s"Executor $executorId is decommissioned and dead")))
+      } else {
+        val failedBlocksSize = failedDecommissionedBlocks.toSeq.map(b => infoMap(b)._1).sum.toInt
+        results.put(BlockMigratedFailureResult(address,
+          failedBlocksSize,
+          migratedBlocks.size,
+          decommissionedBlocksByAddress,
+          isNetworkReqDone))
+        logInfo(s"Handled migrated blocks for executor $executorId $address" +
+            s" in ${Utils.getUsedTimeNs(startTime)}")
       }
     }
 
@@ -296,6 +359,7 @@ final class ShuffleBlockFetcherIterator(
               address, infoMap(blockId)._1, buf, remainingBlocks.isEmpty))
             logDebug("remainingBlocks: " + remainingBlocks)
             enqueueDeferredFetchRequestIfNecessary()
+            handleMigratedBlock(address.executorId, blockId, false)
           }
         }
         logTrace(s"Got remote block $blockId after ${Utils.getUsedTimeNs(startTimeNs)}")
@@ -337,6 +401,11 @@ final class ShuffleBlockFetcherIterator(
                 deferredBlocks += blockId
                 enqueueDeferredFetchRequestIfNecessary()
               }
+
+            case e: ExecutorDeadException if fetchMigratedBlocks && e.isDecommissioned =>
+              failedDecommissionedBlocks += blockId
+              remainingBlocks -= blockId
+              handleMigratedBlock(address.executorId, blockId, true)
 
             case _ =>
               val block = BlockId(blockId)
@@ -775,7 +844,7 @@ final class ShuffleBlockFetcherIterator(
           if (isNetworkReqDone) {
             reqsInFlight -= 1
             resetNettyOOMFlagIfPossible(maxReqSizeShuffleToMem)
-            logDebug("Number of requests in flight " + reqsInFlight)
+            logRequestsInFight
           }
 
           val in = if (buf.size == 0) {
@@ -923,10 +992,23 @@ final class ShuffleBlockFetcherIterator(
             numBlocksInFlightPerAddress(address) - request.blocks.size
           bytesInFlight -= request.size
           reqsInFlight -= 1
-          logDebug("Number of requests in flight " + reqsInFlight)
+          logRequestsInFight
           val defReqQueue =
-            deferredFetchRequests.getOrElseUpdate(address, new Queue[FetchRequest]())
+            deferredFetchRequests.getOrElseUpdate(address, new mutable.Queue[FetchRequest]())
           defReqQueue.enqueue(request)
+          result = null
+
+        case BlockMigratedFailureResult(address, size, numBlocks, blocksByAddress,
+        isNetworkReqDone) =>
+          numBlocksInFlightPerAddress(address) =
+            numBlocksInFlightPerAddress(address) - numBlocks
+          bytesInFlight -= size
+          if (isNetworkReqDone) {
+            reqsInFlight -= 1
+          }
+          logRequestsInFight
+          numBlocksToFetch -= numBlocks
+          fallbackFetch(blocksByAddress.iterator)
           result = null
 
         case FallbackOnPushMergedFailureResult(blockId, address, size, isNetworkReqDone) =>
@@ -943,7 +1025,7 @@ final class ShuffleBlockFetcherIterator(
           }
           if (isNetworkReqDone) {
             reqsInFlight -= 1
-            logDebug("Number of requests in flight " + reqsInFlight)
+            logRequestsInFight
           }
           pushBasedFetchHelper.initiateFallbackFetchForPushMergedBlock(blockId, address)
           // Set result to null to trigger another iteration of the while loop to get either
@@ -1026,6 +1108,25 @@ final class ShuffleBlockFetcherIterator(
         detectCorrupt && streamCompressedOrEncrypted,
         currentResult.isNetworkReqDone,
         Option(checkedIn)))
+  }
+
+  private def logRequestsInFight = {
+    logInfo(s"$reqsInFlight requests(${Utils.bytesToString(bytesInFlight)}) in flight")
+  }
+
+  private def getUpdatedBlocksByAddress(decommissionedAddress: BlockManagerId,
+      shuffleId: Int,
+      reduceId: Int) = updatedBlocksByAddress.synchronized {
+    if (updatedBlocksByAddress.isEmpty || updatedBlocksByAddress.contains(decommissionedAddress)) {
+      // Fetch latest epoch from driver
+      val latestEpoch = mapOutputTracker.getEpoch()
+      if (latestEpoch > currentEpoch) {
+        currentEpoch = latestEpoch
+        updatedBlocksByAddress.clear()
+        updatedBlocksByAddress ++= mapOutputTracker.getMapSizesByExecutorId(shuffleId, reduceId)
+      }
+    }
+    updatedBlocksByAddress
   }
 
   /**
@@ -1195,6 +1296,19 @@ final class ShuffleBlockFetcherIterator(
   private[storage] def decreaseNumBlocksToFetch(blocksFetched: Int): Unit = {
     numBlocksToFetch -= blocksFetched
   }
+
+  private[storage] def getNumBlocksToFetch: Int = numBlocksToFetch
+
+  private[storage] def getNumBlocksProcessed: Int = numBlocksProcessed
+
+  private[storage] def getReqsInFlight: Int = reqsInFlight
+
+  private[storage] def getBytesInFlight: Long = bytesInFlight
+
+  private[storage] def getNumBlocksInFlightPerAddress: Map[BlockManagerId, Int] =
+    numBlocksInFlightPerAddress.toMap
+
+  private[storage] def getResults = results
 
   /**
    * Currently used by [[PushBasedFetchHelper]] to fetch fallback blocks when there is a fetch
@@ -1542,6 +1656,14 @@ object ShuffleBlockFetcherIterator {
       address: BlockManagerId,
       size: Long,
       isNetworkReqDone: Boolean) extends FetchResult
+
+  private[storage] case class BlockMigratedFailureResult(
+      address: BlockManagerId,
+      size: Int,
+      numBlocks: Int,
+      updatedBlocksByAddress: Map[BlockManagerId, Seq[(BlockId, Long, Int)]],
+      isNetworkReqDone: Boolean)
+      extends FetchResult
 
   /**
    * Result of a successful fetch of meta information for a remote push-merged block.
