@@ -645,6 +645,11 @@ private[spark] abstract class MapOutputTracker(conf: SparkConf) extends Logging 
   def unregisterShuffle(shuffleId: Int): Unit
 
   def stop(): Unit = {}
+
+  def incrementEpoch(): Unit
+
+  /** Called to get current epoch number. */
+  def getEpoch: Long
 }
 
 /**
@@ -1135,7 +1140,7 @@ private[spark] class MapOutputTrackerMaster(
     }
   }
 
-  def incrementEpoch(): Unit = {
+  override def incrementEpoch(): Unit = {
     epochLock.synchronized {
       epoch += 1
       logDebug("Increasing epoch to " + epoch)
@@ -1143,7 +1148,7 @@ private[spark] class MapOutputTrackerMaster(
   }
 
   /** Called to get current epoch number. */
-  def getEpoch: Long = {
+  override def getEpoch: Long = {
     epochLock.synchronized {
       return epoch
     }
@@ -1475,6 +1480,16 @@ private[spark] class MapOutputTrackerWorker(conf: SparkConf) extends MapOutputTr
         shufflePushMergerLocations.clear()
       }
     }
+  }
+
+  override def getEpoch: Long = {
+    epochLock.synchronized{
+      epoch
+    }
+  }
+
+  override def incrementEpoch(): Unit = {
+    updateEpoch(getEpoch + 1)
   }
 }
 
