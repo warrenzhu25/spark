@@ -74,6 +74,9 @@ class BlockManagerMasterEndpoint(
   // Set of block managers which are decommissioning
   private val decommissioningBlockManagerSet = new mutable.HashSet[BlockManagerId]
 
+  // Set of executors which are decommissioned
+  private val decommissionedExecutorIdSet = new mutable.HashSet[String]
+
   // Mapping from block id to the set of block managers that have the block.
   private val blockLocations = new JHashMap[BlockId, mutable.HashSet[BlockManagerId]]
 
@@ -169,7 +172,8 @@ class BlockManagerMasterEndpoint(
       context.reply(removeShufflePushMergerLocation(host))
 
     case IsExecutorAlive(executorId) =>
-      context.reply(blockManagerIdByExecutor.contains(executorId))
+      context.reply((blockManagerIdByExecutor.contains(executorId),
+          decommissionedExecutorIdSet.contains(executorId)))
 
     case GetMatchingBlockIds(filter, askStorageEndpoints) =>
       context.reply(getMatchingBlockIds(filter, askStorageEndpoints))
@@ -394,6 +398,7 @@ class BlockManagerMasterEndpoint(
     // Remove the block manager from blockManagerIdByExecutor.
     blockManagerIdByExecutor -= blockManagerId.executorId
     decommissioningBlockManagerSet.remove(blockManagerId)
+    decommissionedExecutorIdSet.add(blockManagerId.executorId)
 
     // Remove it from blockManagerInfo and remove all the blocks.
     blockManagerInfo.remove(blockManagerId)
