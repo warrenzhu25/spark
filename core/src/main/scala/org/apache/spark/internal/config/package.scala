@@ -477,6 +477,16 @@ package object config {
       .booleanConf
       .createWithDefault(false)
 
+  private[spark] val STORAGE_DECOMMISSION_FETCH_MIGRATED_SHUFFLE_ENABLED =
+    ConfigBuilder("spark.storage.decommission.fetchMigratedShuffle.enabled")
+      .doc("Whether to fetch migrated shuffle when fetch failed from a decommissioned executor. " +
+        "When enabled, this will reduce ExecutorDeadException caused by shuffle block migration " +
+        "from decommissioned executor to live executors. Furthermore, reducing stage retries " +
+        "caused by FetchFailedException. Unsupported in external shuffle service.")
+      .version("3.3.0")
+      .booleanConf
+      .createWithDefault(false)
+
   private[spark] val STORAGE_DECOMMISSION_MAX_REPLICATION_FAILURE_PER_BLOCK =
     ConfigBuilder("spark.storage.decommission.maxReplicationFailuresPerBlock")
       .internal()
