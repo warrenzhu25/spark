@@ -2039,7 +2039,8 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite with PrivateMethodT
       failed: Boolean = false
   ): Unit = {
     if (!failed) {
-      val blockLeft = blocks.keys.to[collection.mutable.Set]
+      val blockLeft = mutable.Set[BlockId]()
+      blockLeft ++= blocks.keys
       while (blockLeft.nonEmpty) {
         val (blockId, inputStream) = iterator.next()
         assert(blockLeft.remove(blockId))
@@ -2051,7 +2052,7 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite with PrivateMethodT
     verify(mapOutputTracker, times(fetchMapOutputTimes))
         .getMapSizesByExecutorId(any(), any())
     verify(mapOutputTracker, times(fetchMapOutputTimes))
-        .getEpoch
+        .getEpoch()
     verify(transfer, times(fetchBlocksTimes))
         .fetchBlocks(any(), any(), any(), any(), any(), any())
     assert(iterator.getNumBlocksToFetch == blocks.size)
