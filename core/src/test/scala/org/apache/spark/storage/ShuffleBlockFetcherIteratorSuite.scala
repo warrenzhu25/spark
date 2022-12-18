@@ -17,6 +17,8 @@
 
 package org.apache.spark.storage
 
+import org.apache.spark.ExecutorDeadException
+
 import java.io._
 import java.nio.ByteBuffer
 import java.util.UUID
@@ -33,7 +35,7 @@ import com.google.common.io.ByteStreams
 import io.netty.util.internal.OutOfDirectMemoryError
 import org.apache.logging.log4j.Level
 import org.mockito.ArgumentMatchers.{any, eq => meq}
-import org.mockito.Mockito.{doThrow, mock, times, verify, when}
+import org.mockito.Mockito.{doNothing, doThrow, mock, times, verify, when}
 import org.mockito.invocation.InvocationOnMock
 import org.mockito.stubbing.Answer
 import org.roaringbitmap.RoaringBitmap
@@ -61,6 +63,7 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite with PrivateMethodT
     mapOutputTracker = mock(classOf[MapOutputTracker])
     when(mapOutputTracker.getMapSizesForMergeResult(any(), any(), any()))
       .thenReturn(Seq.empty.iterator)
+    doNothing().when(mapOutputTracker).incrementEpoch()
   }
 
   private def doReturn(value: Any) = org.mockito.Mockito.doReturn(value, Seq.empty: _*)
@@ -1827,4 +1830,45 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite with PrivateMethodT
       blockManager = Some(blockManager), streamWrapperLimitSize = Some(100))
     verifyLocalBlocksFromFallback(iterator)
   }
-}
+
+  test("Update map output and fetch migrated blocks when fetch failed" +
+    " on a decommissioned executor") {
+    // Make sure remote blocks would return
+    val remoteBmId1 = BlockManagerId("test-client-1", "test-client-1", 2)
+    val remoteBmId2 = BlockManagerId("test-client-2", "test-client-2", 2)
+    val blockId = ShuffleBlockId(0, 0, 0)
+    val blocks = Map[BlockId, ManagedBuffer](
+      blockId -> createMockManagedBuffer()
+    )
+    answerFetchBlocks { invocation =>
+      val host = invocation.getArgument[String](0)
+      val listener = invocation.getArgument[BlockFetchingListener](4)
+      if (host == remoteBmId1.host) {
+        listener.onBlockFetchFailure(blockId.toString,
+          ExecutorDeadException(true, ""))
+      } else {
+        listener.onBlockFetchSuccess(blockId.name, blocks(blockId))
+      }
+    }
+
+    when(mapOutputTracker.getMapSizesByExecutorId(0, 0)).thenReturn(
+        Seq((remoteBmId2, toBlockList(
+        Seq(blockId), 1L, 1))).iterator
+    )
+
+    val iterator = createShuffleBlockIteratorWithDefaults(
+      Map(remoteBmId1 -> toBlockList(blocks.keys, 1L, 0)),
+      streamWrapperLimitSize = Some(100)
+    )
+
+    val (id1, _) = iterator.next()
+    assert(id1 === blockId)
+
+    verify(mapOutputTracker, times(1))
+      .getMapSizesByExecutorId(any(), any())
+    // The block will be fetched twice due to retry
+    verify(transfer, times(2))
+      .fetchBlocks(any(), any(), any(), any(), any(), any())
+    // only diagnose once
+    }
+  }
