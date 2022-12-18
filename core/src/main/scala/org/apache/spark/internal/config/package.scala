@@ -477,6 +477,13 @@ package object config {
       .booleanConf
       .createWithDefault(false)
 
+  private[spark] val STORAGE_DECOMMISSION_FETCH_MIGRATED_BLOCKS_ENABLED =
+    ConfigBuilder("spark.storage.decommission.fetchMigratedBlocks.enabled")
+      .doc("Whether to fetch migrated blocks during block manager decommissioning.")
+      .version("3.4.0")
+      .booleanConf
+      .createWithDefault(false)
+
   private[spark] val STORAGE_DECOMMISSION_MAX_REPLICATION_FAILURE_PER_BLOCK =
     ConfigBuilder("spark.storage.decommission.maxReplicationFailuresPerBlock")
       .internal()
