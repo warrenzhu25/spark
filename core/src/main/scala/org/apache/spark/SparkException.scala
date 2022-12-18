@@ -65,7 +65,7 @@ private[spark] case class SparkUserAppException(exitCode: Int)
 /**
  * Exception thrown when the relative executor to access is dead.
  */
-private[spark] case class ExecutorDeadException(message: String)
+private[spark] case class ExecutorDeadException(isDecommissioned: Boolean, message: String)
   extends SparkException(message)
 
 /**
