@@ -42,6 +42,7 @@ import other.supplier.{CustomPersistenceEngine, CustomRecoveryModeFactory}
 import org.apache.spark.{SecurityManager, SparkConf, SparkFunSuite}
 import org.apache.spark.deploy._
 import org.apache.spark.deploy.DeployMessages._
+import org.apache.spark.deploy.master.WorkerState.{ALIVE, DECOMMISSIONED_IDLE, IDLE}
 import org.apache.spark.internal.config._
 import org.apache.spark.internal.config.Deploy._
 import org.apache.spark.internal.config.UI._
@@ -968,7 +969,8 @@ class MasterSuite extends SparkFunSuite
   def testWorkerDecommissioning(
       numWorkers: Int,
       numWorkersExpectedToDecom: Int,
-      hostnames: Seq[String]): Unit = {
+      hostnames: Seq[String] = Seq.empty,
+      idleOnly: Boolean = false): Unit = {
     val conf = new SparkConf()
     val master = makeAliveMaster(conf)
     val workers = (1 to numWorkers).map { idx =>
@@ -990,11 +992,22 @@ class MasterSuite extends SparkFunSuite
     eventually(timeout(10.seconds)) {
       val masterState = master.self.askSync[MasterStateResponse](RequestMasterState)
       assert(masterState.workers.length === numWorkers)
-      assert(masterState.workers.forall(_.state == WorkerState.ALIVE))
+      assert(masterState.workers.forall(_.state == ALIVE))
+      assert(masterState.workers.forall(_.getState == IDLE))
       assert(masterState.workers.map(_.id).toSet == workers.map(_.id).toSet)
     }
 
-    val decomWorkersCount = master.self.askSync[Integer](DecommissionWorkersOnHosts(hostnames))
+    val driver = DeployTestUtils.createDriverDesc().copy(supervise = true)
+    master.self.askSync[SubmitDriverResponse](RequestSubmitDriver(driver))
+
+    eventually(timeout(10.seconds)) {
+      val masterState = master.self.askSync[MasterStateResponse](RequestMasterState)
+      val nonIdleWorkers = masterState.workers.filter(!_.isIdle)
+      assert(nonIdleWorkers.length == 1)
+    }
+
+    val decomWorkersCount = master.self.askSync[Integer](
+      DecommissionWorkersOnHosts(hostnames, idleOnly))
     assert(decomWorkersCount === numWorkersExpectedToDecom)
 
     // Decommissioning is actually async ... wait for the workers to actually be decommissioned by
@@ -1002,8 +1015,11 @@ class MasterSuite extends SparkFunSuite
     eventually(timeout(30.seconds)) {
       val masterState = master.self.askSync[MasterStateResponse](RequestMasterState)
       assert(masterState.workers.length === numWorkers)
-      val workersActuallyDecomed = masterState.workers
-        .filter(_.state == WorkerState.DECOMMISSIONED).map(_.id)
+      val workerInfoDecommissioned = masterState.workers
+        .filter(_.isIdle || !idleOnly)
+        .filter(_.state == WorkerState.DECOMMISSIONED)
+      workerInfoDecommissioned.forall(w => w.getState == DECOMMISSIONED_IDLE)
+      val workersActuallyDecomed = workerInfoDecommissioned.map(_.id)
       val decommissionedWorkers = workers.filter(w => workersActuallyDecomed.contains(w.id))
       assert(workersActuallyDecomed.length === numWorkersExpectedToDecom)
       assert(decommissionedWorkers.forall(_.decommissioned))
@@ -1011,7 +1027,8 @@ class MasterSuite extends SparkFunSuite
 
     // Decommissioning a worker again should return the same answer since we want this call to be
     // idempotent.
-    val decomWorkersCountAgain = master.self.askSync[Integer](DecommissionWorkersOnHosts(hostnames))
+    val decomWorkersCountAgain = master.self
+      .askSync[Integer](DecommissionWorkersOnHosts(hostnames, idleOnly))
     assert(decomWorkersCountAgain === numWorkersExpectedToDecom)
   }
 
@@ -1025,6 +1042,14 @@ class MasterSuite extends SparkFunSuite
 
   test("Only worker on host should be decommissioned") {
     testWorkerDecommissioning(1, 1, Seq("lOcalHost", "NoSuchHost"))
+  }
+
+  test("Only idle worker on host should be decommissioned when idleOnly is true") {
+    testWorkerDecommissioning(2, 1, Seq("LoCalHost", "localHOST"), true)
+  }
+
+  test("Decommission workers with empty hostnames and idleOnly is true") {
+    testWorkerDecommissioning(2, 1, idleOnly = true)
   }
 
   test("SPARK-19900: there should be a corresponding driver for the app after relaunching driver") {

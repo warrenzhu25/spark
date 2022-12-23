@@ -25,6 +25,7 @@ import java.util.Date
 import scala.collection.mutable.HashMap
 
 import org.mockito.Mockito.{mock, times, verify, when}
+import org.scalatest.BeforeAndAfterAll
 
 import org.apache.spark.{SecurityManager, SparkConf, SparkFunSuite}
 import org.apache.spark.deploy.DeployMessages.{DecommissionWorkersOnHosts, KillDriverResponse, RequestKillDriver}
@@ -34,8 +35,7 @@ import org.apache.spark.internal.config.DECOMMISSION_ENABLED
 import org.apache.spark.rpc.{RpcEndpointRef, RpcEnv}
 import org.apache.spark.util.Utils
 
-class MasterWebUISuite extends SparkFunSuite {
-  import MasterWebUISuite._
+class MasterWebUISuite extends SparkFunSuite with BeforeAndAfterAll {
 
   val conf = new SparkConf().set(DECOMMISSION_ENABLED, true)
   val securityMgr = new SecurityManager(conf)
@@ -89,14 +89,17 @@ class MasterWebUISuite extends SparkFunSuite {
     verify(masterEndpointRef, times(1)).ask[KillDriverResponse](RequestKillDriver(activeDriverId))
   }
 
-  private def testKillWorkers(hostnames: Seq[String]): Unit = {
+  private def testKillWorkers(hostnames: Seq[String], idleOnly: Option[Boolean] = None): Unit = {
     val url = s"http://${Utils.localHostNameForURI()}:${masterWebUI.boundPort}/workers/kill/"
-    val body = convPostDataToString(hostnames.map(("host", _)))
+    val params = hostnames.map(("host", _)).toArray.toBuffer
+    idleOnly.foreach(i => params += (("idleOnly", i.toString)))
+    val body = convPostDataToString(params.toSeq)
     val conn = sendHttpRequest(url, "POST", body)
     // The master is mocked here, so cannot assert on the response code
     conn.getResponseCode
     // Verify that master was asked to kill driver with the correct id
-    verify(masterEndpointRef).askSync[Integer](DecommissionWorkersOnHosts(hostnames))
+    verify(masterEndpointRef).askSync[Integer](
+      DecommissionWorkersOnHosts(hostnames, idleOnly.getOrElse(false)))
   }
 
   test("Kill one host") {
@@ -107,6 +110,10 @@ class MasterWebUISuite extends SparkFunSuite {
     testKillWorkers(Seq("noSuchHost", "LocalHost"))
   }
 
+  test("Kill multiple hosts with idleOnly") {
+    testKillWorkers(Seq("noSuchHost", "LocalHost"), idleOnly = Some(true))
+  }
+
   private def convPostDataToString(data: Seq[(String, String)]): String = {
     (for ((name, value) <- data) yield s"$name=$value").mkString("&")
   }
@@ -114,14 +121,12 @@ class MasterWebUISuite extends SparkFunSuite {
   private def convPostDataToString(data: Map[String, String]): String = {
     convPostDataToString(data.toSeq)
   }
-}
 
-object MasterWebUISuite {
   /**
    * Send an HTTP request to the given URL using the method and the body specified.
    * Return the connection object.
    */
-  private[ui] def sendHttpRequest(
+  private def sendHttpRequest(
       url: String,
       method: String,
       body: String = ""): HttpURLConnection = {

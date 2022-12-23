@@ -130,7 +130,7 @@ object JsonConstants {
       |{"name":"fpga","addresses":[]}},"resourcesfree":
       |{"gpu":{"name":"gpu","addresses":["0","1","2"]},
       |"fpga":{"name":"fpga","addresses":["3","4","5"]}},
-      |"state":"ALIVE","lastheartbeat":%d}
+      |"state":"IDLE","lastheartbeat":%d}
     """.format(currTimeInMillis).stripMargin
 
   val appDescJsonStr =
