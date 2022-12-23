@@ -75,7 +75,7 @@ private[deploy] object JsonProtocol {
     ("resources" -> writeResourcesInfo(obj.resourcesInfo)) ~
     ("resourcesused" -> writeResourcesInfo(obj.resourcesInfoUsed)) ~
     ("resourcesfree" -> writeResourcesInfo(obj.resourcesInfoFree)) ~
-    ("state" -> obj.state.toString) ~
+    ("state" -> obj.getState.toString) ~
     ("lastheartbeat" -> obj.lastHeartbeat)
   }
 

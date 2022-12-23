@@ -27,8 +27,8 @@ import org.scalatest.concurrent.Eventually._
 
 import org.apache.spark._
 import org.apache.spark.deploy.DeployMessages._
-import org.apache.spark.deploy.master.ApplicationInfo
-import org.apache.spark.deploy.master.Master
+import org.apache.spark.deploy.master.{ApplicationInfo, Master, WorkerInfo}
+import org.apache.spark.deploy.master.WorkerState._
 import org.apache.spark.deploy.worker.Worker
 import org.apache.spark.internal.config
 import org.apache.spark.resource.ResourceProfile
@@ -531,6 +531,30 @@ class StandaloneDynamicAllocationSuite
     }
   }
 
+  test("Worker state idle") {
+    sc = new SparkContext(appConf)
+    val appId = sc.applicationId
+    eventually(timeout(10.seconds), interval(10.millis)) {
+      val apps = getApplications()
+      assert(apps.size === 1)
+      assert(apps.head.id === appId)
+      assert(apps.head.executors.size === 2)
+      assert(apps.head.getExecutorLimit === Int.MaxValue)
+    }
+
+    // Kill all executors so all workers should be idle
+    assert(killAllExecutors(sc))
+    var workers = getWorkers()
+    assert(workers.forall(_.isIdle))
+    assert(workers.forall(_.getState == IDLE))
+
+    // Request more executors than usable cores, so all workers should be not idle
+    assert(sc.requestExecutors(1000))
+    workers = getWorkers()
+    assert(workers.forall(!_.isIdle))
+    assert(workers.forall(_.getState == ALIVE))
+  }
+
   // ===============================
   // | Utility methods for testing |
   // ===============================
@@ -573,6 +597,11 @@ class StandaloneDynamicAllocationSuite
   /** Get the applications that are active from Master */
   private def getApplications(): Seq[ApplicationInfo] = {
     getMasterState.activeApps
+  }
+
+  /** Get the workers from Master */
+  private def getWorkers(): Seq[WorkerInfo] = {
+    getMasterState.workers
   }
 
   /** Kill all executors belonging to this application. */

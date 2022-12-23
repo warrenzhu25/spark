@@ -19,6 +19,7 @@ package org.apache.spark.deploy.master
 
 import scala.collection.mutable
 
+import org.apache.spark.deploy.master.WorkerState.{ALIVE, IDLE, WorkerState}
 import org.apache.spark.resource.{ResourceAllocator, ResourceInformation, ResourceRequirement}
 import org.apache.spark.rpc.RpcEndpointRef
 import org.apache.spark.util.Utils
@@ -142,7 +143,15 @@ private[spark] class WorkerInfo(
     this.state = state
   }
 
+  /** External state exposed by master ui */
+  def getState: WorkerState = state match {
+    case ALIVE if isIdle => IDLE
+    case s => s
+  }
+
   def isAlive(): Boolean = this.state == WorkerState.ALIVE
+
+  def isIdle: Boolean = coresUsed == 0
 
   /**
    * acquire specified amount resources for driver/executor from the worker

@@ -41,6 +41,7 @@ import other.supplier.{CustomPersistenceEngine, CustomRecoveryModeFactory}
 import org.apache.spark.{SecurityManager, SparkConf, SparkFunSuite}
 import org.apache.spark.deploy._
 import org.apache.spark.deploy.DeployMessages._
+import org.apache.spark.deploy.master.WorkerState.{ALIVE, IDLE}
 import org.apache.spark.internal.config._
 import org.apache.spark.internal.config.Deploy._
 import org.apache.spark.internal.config.UI._
@@ -969,7 +970,8 @@ class MasterSuite extends SparkFunSuite
     eventually(timeout(10.seconds)) {
       val masterState = master.self.askSync[MasterStateResponse](RequestMasterState)
       assert(masterState.workers.length === numWorkers)
-      assert(masterState.workers.forall(_.state == WorkerState.ALIVE))
+      assert(masterState.workers.forall(_.state == ALIVE))
+      assert(masterState.workers.forall(_.getState == IDLE))
       assert(masterState.workers.map(_.id).toSet == workers.map(_.id).toSet)
     }
 
