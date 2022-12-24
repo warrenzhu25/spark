@@ -18,6 +18,7 @@
 package org.apache.spark.deploy
 
 import scala.collection.immutable.List
+import scala.concurrent.duration.Duration
 
 import org.apache.spark.deploy.ExecutorState.ExecutorState
 import org.apache.spark.deploy.master.{ApplicationInfo, DriverInfo, WorkerInfo}
@@ -144,10 +145,13 @@ private[deploy] object DeployMessages {
    * any of the given hostnames.
    * @param hostnames: A list of hostnames without the ports. Like "localhost", "foo.bar.com" etc
    * @param idleOnly: only decommission idle workers
+   * @param recommissionTimeout timeout to recommission decommissioned workers
    */
   case class DecommissionWorkersOnHosts(
     hostnames: Seq[String],
-    idleOnly: Boolean = false)
+    idleOnly: Boolean = false,
+    recommissionTimeout: Option[Duration] = None
+  )
 
   /**
    * Used by the MasterWebUI to request the master to recommission all workers

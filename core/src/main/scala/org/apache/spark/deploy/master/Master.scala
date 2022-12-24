@@ -22,6 +22,7 @@ import java.util.{Date, Locale}
 import java.util.concurrent.{ScheduledFuture, TimeUnit}
 
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
+import scala.concurrent.duration.Duration
 import scala.util.Random
 
 import org.apache.spark.{SecurityManager, SparkConf, SparkException}
@@ -503,9 +504,9 @@ private[deploy] class Master(
       val formattedExecutorIds = formatExecutorIds(executorIds)
       context.reply(handleKillExecutors(appId, formattedExecutorIds))
 
-    case DecommissionWorkersOnHosts(hostnames, idleOnly) =>
+    case DecommissionWorkersOnHosts(hostnames, idleOnly, recommissionTimeout) =>
       if (state != RecoveryState.STANDBY) {
-        context.reply(decommissionWorkersOnHosts(hostnames, idleOnly))
+        context.reply(decommissionWorkersOnHosts(hostnames, idleOnly, recommissionTimeout))
       } else {
         context.reply(0)
       }
@@ -935,7 +936,9 @@ private[deploy] class Master(
    * Returns the number of workers that matched the hostnames.
    */
   private def decommissionWorkersOnHosts(hostnames: Seq[String],
-    idleOnly: Boolean = false): Integer = {
+    idleOnly: Boolean = false,
+    recommissionTimeout: Option[Duration] = None
+  ): Integer = {
     val hostnamesSet = hostnames.map(_.toLowerCase(Locale.ROOT)).toSet
     val workersToRemove = addressToWorker
       .filterKeys(addr => hostnamesSet.contains(addr.host.toLowerCase(Locale.ROOT)))
@@ -945,9 +948,15 @@ private[deploy] class Master(
     val workersToRemoveHostPorts = workersToRemove.map(_.hostPort)
     logInfo(s"Decommissioning the workers with host:ports ${workersToRemoveHostPorts}")
 
+    val workerIdsToRemove = workersToRemove.map(_.id).toSeq
     // The workers are removed async to avoid blocking the receive loop for the entire batch
-    self.send(DecommissionWorkers(workersToRemove.map(_.id).toSeq))
+    self.send(DecommissionWorkers(workerIdsToRemove))
 
+    recommissionTimeout.foreach(t => forwardMessageThread.schedule(new Runnable {
+      override def run(): Unit = Utils.tryLogNonFatalError {
+        self.send(RecommissionWorkers(workerIdsToRemove))
+      }
+    }, t.toSeconds, TimeUnit.SECONDS))
     // Return the count of workers actually removed
     workersToRemove.size
   }

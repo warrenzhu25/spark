@@ -23,6 +23,7 @@ import java.nio.charset.StandardCharsets
 import java.util.Date
 
 import scala.collection.mutable.HashMap
+import scala.concurrent.duration.Duration
 
 import org.mockito.Mockito.{mock, times, verify, when}
 
@@ -87,14 +88,19 @@ class MasterWebUISuite extends SparkFunSuite {
     verify(masterEndpointRef, times(1)).ask[KillDriverResponse](RequestKillDriver(activeDriverId))
   }
 
-  private def testKillWorkers(hostnames: Seq[String]): Unit = {
+  private def testKillWorkers(hostnames: Seq[String], idleOnly: Option[Boolean] = None,
+    recommissionTimeout: Option[Duration] = None): Unit = {
     val url = s"http://${Utils.localHostNameForURI()}:${masterWebUI.boundPort}/workers/kill/"
-    val body = convPostDataToString(hostnames.map(("host", _)))
+    val params = hostnames.map(("host", _)).toArray.toBuffer
+    idleOnly.foreach(i => params += (("idleOnly", i.toString)))
+    recommissionTimeout.foreach(d => params += (("recommissionTimeout", d.toSeconds.toString)))
+    val body = convPostDataToString(params)
     val conn = sendHttpRequest(url, "POST", body)
     // The master is mocked here, so cannot assert on the response code
     conn.getResponseCode
     // Verify that master was asked to kill driver with the correct id
-    verify(masterEndpointRef).askSync[Integer](DecommissionWorkersOnHosts(hostnames))
+    verify(masterEndpointRef).askSync[Integer](
+      DecommissionWorkersOnHosts(hostnames, idleOnly.getOrElse(false), recommissionTimeout))
   }
 
   test("Kill one host") {
@@ -103,6 +109,20 @@ class MasterWebUISuite extends SparkFunSuite {
 
   test("Kill multiple hosts") {
     testKillWorkers(Seq("noSuchHost", "LocalHost"))
+  }
+
+  test("Kill multiple hosts with idleOnly") {
+    testKillWorkers(Seq("noSuchHost", "LocalHost"), idleOnly = Some(true))
+  }
+
+  test("Kill multiple hosts with recommissionTimeout") {
+    testKillWorkers(Seq("noSuchHost", "LocalHost"),
+      recommissionTimeout = Some(Duration("5 second")))
+  }
+
+  test("Kill multiple hosts with idleOnly and recommissionTimeout") {
+    testKillWorkers(Seq("noSuchHost", "LocalHost"), idleOnly = Some(true),
+      recommissionTimeout = Some(Duration("5 second")))
   }
 
   private def convPostDataToString(data: Seq[(String, String)]): String = {

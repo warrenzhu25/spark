@@ -26,6 +26,7 @@ import scala.collection.mutable
 import scala.collection.mutable.{HashMap, HashSet}
 import scala.concurrent.duration._
 import scala.io.Source
+import scala.language.postfixOps
 import scala.reflect.ClassTag
 
 import org.json4s._
@@ -38,7 +39,7 @@ import org.scalatest.matchers.must.Matchers
 import org.scalatest.matchers.should.Matchers._
 import other.supplier.{CustomPersistenceEngine, CustomRecoveryModeFactory}
 
-import org.apache.spark.{SecurityManager, SparkConf, SparkFunSuite}
+import org.apache.spark.{serializer, SecurityManager, SparkConf, SparkFunSuite}
 import org.apache.spark.deploy._
 import org.apache.spark.deploy.DeployMessages._
 import org.apache.spark.deploy.master.WorkerState.{ALIVE, IDLE}
@@ -50,7 +51,6 @@ import org.apache.spark.resource.{ResourceInformation, ResourceProfile, Resource
 import org.apache.spark.resource.ResourceProfile.DEFAULT_RESOURCE_PROFILE_ID
 import org.apache.spark.resource.ResourceUtils.{FPGA, GPU}
 import org.apache.spark.rpc.{RpcAddress, RpcEndpoint, RpcEndpointRef, RpcEnv}
-import org.apache.spark.serializer
 import org.apache.spark.util.Utils
 
 object MockWorker {
@@ -951,7 +951,8 @@ class MasterSuite extends SparkFunSuite
     numWorkers: Int,
     numWorkersExpectedToDecom: Int,
     hostnames: Seq[String],
-    idleOnly: Boolean = false): Unit = {
+    idleOnly: Boolean = false,
+    recommissionTimeout: Option[Duration] = None): Unit = {
     val conf = new SparkConf()
     val master = makeAliveMaster(conf)
     val workers = (1 to numWorkers).map { idx =>
@@ -987,8 +988,9 @@ class MasterSuite extends SparkFunSuite
       assert(nonIdleWorkers.length == 1)
     }
 
-    val decomWorkersCount = master.self.askSync[Integer](
-      DecommissionWorkersOnHosts(hostnames, idleOnly))
+    val decommissionWorkersOnHosts = DecommissionWorkersOnHosts(hostnames,
+      idleOnly, recommissionTimeout)
+    val decomWorkersCount = master.self.askSync[Integer](decommissionWorkersOnHosts)
     assert(decomWorkersCount === numWorkersExpectedToDecom)
 
     // Decommissioning is actually async ... wait for the workers to actually be decommissioned by
@@ -1004,9 +1006,23 @@ class MasterSuite extends SparkFunSuite
       assert(decommissionedWorkers.forall(_.decommissioned))
     }
 
+    recommissionTimeout.foreach(t => {
+      Thread.sleep(t.toMillis)
+      eventually(timeout(5.seconds)) {
+        val masterState = master.self.askSync[MasterStateResponse](RequestMasterState)
+        assert(masterState.workers.length === numWorkers)
+        val workersActuallyRecomed = masterState.workers
+          .filterNot(idleOnly && !_.isIdle)
+          .filter(_.state == WorkerState.ALIVE).map(_.id)
+        val recommissionedWorkers = workers.filter(w => workersActuallyRecomed.contains(w.id))
+        assert(workersActuallyRecomed.length === numWorkersExpectedToDecom)
+        assert(recommissionedWorkers.forall(!_.decommissioned))
+      }
+    })
+
     // Decommissioning a worker again should return the same answer since we want this call to be
     // idempotent.
-    val decomWorkersCountAgain = master.self.askSync[Integer](DecommissionWorkersOnHosts(hostnames, idleOnly))
+    val decomWorkersCountAgain = master.self.askSync[Integer](decommissionWorkersOnHosts)
     assert(decomWorkersCountAgain === numWorkersExpectedToDecom)
 
     // Recommissioning is actually async ... wait for the workers to actually be recommissioned by
@@ -1040,6 +1056,15 @@ class MasterSuite extends SparkFunSuite
 
   test("Only idle worker on host should be decommissioned when idleOnly is true") {
     testWorkerDecommissioning(2, 1, Seq("LoCalHost", "localHOST"), true)
+  }
+
+  test("Decommission workers with recommission timeout should be recommissioned after timeout") {
+    testWorkerDecommissioning(2, 2, Seq("LoCalHost", "localHOST"), false, Some(5 seconds))
+  }
+
+  test("Decommission idle workers with recommission timeout should be recommissioned " +
+    "after timeout") {
+    testWorkerDecommissioning(2, 1, Seq("LoCalHost", "localHOST"), true, Some(5 seconds))
   }
 
   test("SPARK-19900: there should be a corresponding driver for the app after relaunching driver") {

@@ -20,6 +20,8 @@ package org.apache.spark.deploy.master.ui
 import java.net.{InetAddress, NetworkInterface, SocketException}
 import javax.servlet.http.{HttpServlet, HttpServletRequest, HttpServletResponse}
 
+import scala.concurrent.duration.Duration
+
 import org.apache.spark.deploy.DeployMessages.{DecommissionWorkersOnHosts, MasterStateResponse, RequestMasterState}
 import org.apache.spark.deploy.master.Master
 import org.apache.spark.internal.Logging
@@ -59,11 +61,13 @@ class MasterWebUI(
         val hostnames: Seq[String] = Option(req.getParameterValues("host"))
           .getOrElse(Array[String]()).toSeq
         val idleOnly: Boolean = Option(req.getParameter("idleOnly")).exists(_.toBoolean)
+        val recommissionTimeout = Option(req.getParameter("recommissionTimeout"))
+          .map(s => Duration(s"$s second"))
         if (!isDecommissioningRequestAllowed(req)) {
           resp.sendError(HttpServletResponse.SC_METHOD_NOT_ALLOWED)
         } else {
           val removedWorkers = masterEndpointRef.askSync[Integer](
-            DecommissionWorkersOnHosts(hostnames, idleOnly))
+            DecommissionWorkersOnHosts(hostnames, idleOnly, recommissionTimeout))
           logInfo(s"Decommissioning of hosts $hostnames decommissioned $removedWorkers workers")
           if (removedWorkers > 0) {
             resp.setStatus(HttpServletResponse.SC_OK)
