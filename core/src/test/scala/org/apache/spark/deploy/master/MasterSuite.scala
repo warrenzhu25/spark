@@ -42,7 +42,7 @@ import other.supplier.{CustomPersistenceEngine, CustomRecoveryModeFactory}
 import org.apache.spark.{serializer, SecurityManager, SparkConf, SparkFunSuite}
 import org.apache.spark.deploy._
 import org.apache.spark.deploy.DeployMessages._
-import org.apache.spark.deploy.master.WorkerState.{ALIVE, IDLE}
+import org.apache.spark.deploy.master.WorkerState.{ALIVE, DECOMMISSIONED, IDLE}
 import org.apache.spark.internal.config._
 import org.apache.spark.internal.config.Deploy._
 import org.apache.spark.internal.config.UI._
@@ -1065,6 +1065,65 @@ class MasterSuite extends SparkFunSuite
   test("Decommission idle workers with recommission timeout should be recommissioned " +
     "after timeout") {
     testWorkerDecommissioning(2, 1, Seq("LoCalHost", "localHOST"), true, Some(5 seconds))
+  }
+
+  test("Driver should be relaunched after recommissioning worker") {
+    val master = makeAliveMaster()
+    var worker1: MockWorker = null
+    try {
+      worker1 = new MockWorker(master.self)
+      worker1.rpcEnv.setupEndpoint("worker", worker1)
+      val worker1Reg = RegisterWorker(
+        worker1.id,
+        "localhost",
+        9998,
+        worker1.self,
+        10,
+        1024,
+        "http://localhost:8080",
+        RpcAddress("localhost", 10000))
+      master.self.send(worker1Reg)
+
+      eventually(timeout(10.seconds)) {
+        val masterState = master.self.askSync[MasterStateResponse](RequestMasterState)
+        assert(masterState.workers(0).state == WorkerState.ALIVE)
+        assert(masterState.workers(0).getState == WorkerState.IDLE)
+      }
+
+      val decomedWorkers = master.self.askSync[Integer](
+        DecommissionWorkersOnHosts(Seq("localhost")))
+      assert(decomedWorkers == 1)
+
+      val driver = DeployTestUtils.createDriverDesc().copy(supervise = true)
+      master.self.askSync[SubmitDriverResponse](RequestSubmitDriver(driver))
+
+      eventually(timeout(10.seconds)) {
+        val masterState = master.self.askSync[MasterStateResponse](RequestMasterState)
+        assert(masterState.workers(0).state == DECOMMISSIONED)
+        assert(worker1.apps.isEmpty)
+      }
+
+      val recommed = master.self.askSync[Integer](RecommissionWorkersOnHosts(Seq("localhost")))
+      assert(recommed == 1)
+
+      eventually(timeout(10.seconds)) {
+        val masterState = master.self.askSync[MasterStateResponse](RequestMasterState)
+
+        val worker = masterState.workers.filter(w => w.id == worker1.id)
+        assert(worker.length == 1)
+        // make sure the `DriverStateChanged` arrives at Master.
+        assert(masterState.workers(0).state == ALIVE)
+        assert(masterState.workers(0).getState == ALIVE)
+        assert(worker1.apps.size == 1)
+        assert(worker1.drivers.size == 1)
+        assert(masterState.activeDrivers.length == 1)
+        assert(masterState.activeApps.length == 1)
+      }
+    } finally {
+      if (worker1 != null) {
+        worker1.rpcEnv.shutdown()
+      }
+    }
   }
 
   test("SPARK-19900: there should be a corresponding driver for the app after relaunching driver") {
