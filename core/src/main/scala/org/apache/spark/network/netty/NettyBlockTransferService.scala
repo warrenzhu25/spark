@@ -17,7 +17,6 @@
 
 package org.apache.spark.network.netty
 
-import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.{HashMap => JHashMap, Map => JMap}
 
@@ -131,7 +130,7 @@ private[spark] class NettyBlockTransferService(
             new OneForOneBlockFetcher(client, appId, execId, blockIds,
               listener.asInstanceOf[BlockFetchingListener], transportConf, tempFileManager).start()
           } catch {
-            case e: IOException =>
+            case e: Exception =>
               Try {
                 // Return value is (isExecutorAlive, isExecutorDecommissioned)
                 driverEndPointRef.askSync[(Boolean, Boolean)](IsExecutorAlive(execId))

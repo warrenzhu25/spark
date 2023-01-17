@@ -92,10 +92,17 @@ class NettyBlockTransferServiceSuite
   }
 
   test("SPARK-41954: test fetch block with executor decommissioned and dead") {
-    verifyExecutorDeadException(true)
+    verifyExecutorDeadException(isDecommissioned = true)
   }
 
-  def verifyExecutorDeadException(isDecommissioned: Boolean = false): Unit = {
+  test("SPARK-42104: test fetch block with executor dead when failed to create client") {
+    verifyExecutorDeadException(throwExceptionWhenCreateClient = true)
+  }
+
+  def verifyExecutorDeadException(
+      isDecommissioned: Boolean = false,
+      throwExceptionWhenCreateClient: Boolean = false
+  ): Unit = {
     implicit val executionContext = ExecutionContext.global
     val port = 17634 + Random.nextInt(10000)
     logInfo("random port for test: " + port)
@@ -124,7 +131,11 @@ class NettyBlockTransferServiceSuite
     var createClientCount = 0
     when(clientFactory.createClient(any(), any(), any())).thenAnswer(_ => {
       createClientCount += 1
-      client
+      if (throwExceptionWhenCreateClient) {
+        throw new RuntimeException("Failed to create client")
+      } else {
+        client
+      }
     })
 
     val listener = mock(classOf[BlockFetchingListener])
