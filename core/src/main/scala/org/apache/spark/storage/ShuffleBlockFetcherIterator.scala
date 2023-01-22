@@ -26,6 +26,8 @@ import javax.annotation.concurrent.GuardedBy
 
 import scala.collection.mutable
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet, Queue}
+import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.Future
 import scala.util.{Failure, Success}
 
 import io.netty.util.internal.OutOfDirectMemoryError
@@ -289,14 +291,20 @@ final class ShuffleBlockFetcherIterator(
       }
     }
 
-    @inline def handleMigratedBlock(executorId: String, isNetworkReqDone: Boolean): Unit = {
+    @inline def handleMigratedBlock(address: BlockManagerId, blockId: String,
+      isNetworkReqDone: Boolean): Unit = {
       // Only re-fetch map output after all blocks processed and has failed decommissioned blocks
       if (remainingBlocks.isEmpty && failedDecommissionedBlocks.nonEmpty) {
+
         val failedSize = failedDecommissionedBlocks.toSeq.map(b => infoMap(b)._1).sum.toInt
         results.put(BlockMigratedFailureResult(address,
           failedSize,
           failedDecommissionedBlocks.toSet,
           isNetworkReqDone))
+        Future {
+          val shuffleBlockId = BlockId(blockId).asInstanceOf[ShuffleBlockId]
+          getUpdatedBlocksByAddress(address, shuffleBlockId.shuffleId, shuffleBlockId.reduceId)
+        }
       }
     }
 
@@ -315,7 +323,7 @@ final class ShuffleBlockFetcherIterator(
               address, infoMap(blockId)._1, buf, remainingBlocks.isEmpty))
             logDebug("remainingBlocks: " + remainingBlocks)
             enqueueDeferredFetchRequestIfNecessary()
-            handleMigratedBlock(address.executorId, false)
+            handleMigratedBlock(address, blockId, false)
           }
         }
         logTrace(s"Got remote block $blockId after ${Utils.getUsedTimeNs(startTimeNs)}")
@@ -361,7 +369,7 @@ final class ShuffleBlockFetcherIterator(
             case e: ExecutorDeadException if fetchMigratedBlocks && e.isDecommissioned =>
               failedDecommissionedBlocks += blockId
               remainingBlocks -= blockId
-              handleMigratedBlock(address.executorId, true)
+              handleMigratedBlock(address, blockId, true)
 
             case _ =>
               val block = BlockId(blockId)
