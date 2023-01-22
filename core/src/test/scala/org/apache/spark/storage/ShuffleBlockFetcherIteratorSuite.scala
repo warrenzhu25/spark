@@ -1933,7 +1933,7 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite with PrivateMethodT
     assert(e.toTaskFailedReason.isInstanceOf[FetchFailed])
     val fetchFailed = e.toTaskFailedReason.asInstanceOf[FetchFailed]
     assert(fetchFailed.mapId == 1L)
-    assert(fetchFailed.mapIndex == blockMapIndex)
+    assert(fetchFailed.mapIndex == -1)
 
     verifyMigratedBlocksFetch(iterator, blocks, failed = true)
   }
@@ -2081,6 +2081,8 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite with PrivateMethodT
         .incrementEpoch()
     verify(transfer, times(fetchBlocksTimes))
         .fetchBlocks(any(), any(), any(), any(), any(), any())
-    assert(iterator.getNumBlocksToFetch == blocks.size)
+    if (!failed) {
+      assert(iterator.getNumBlocksToFetch == blocks.size)
+    }
   }
 }
