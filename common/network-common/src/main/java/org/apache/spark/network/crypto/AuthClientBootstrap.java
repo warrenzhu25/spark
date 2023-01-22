@@ -76,27 +76,32 @@ public class AuthClientBootstrap implements TransportClientBootstrap {
       return;
     }
 
-    try {
-      doSparkAuth(client, channel);
-      client.setClientId(appId);
-    } catch (GeneralSecurityException | IOException e) {
-      throw Throwables.propagate(e);
-    } catch (RuntimeException e) {
-      // There isn't a good exception that can be caught here to know whether it's really
-      // OK to switch back to SASL (because the server doesn't speak the new protocol). So
-      // try it anyway, unless it's a timeout, which is locally fatal. In the worst case
-      // things will fail again.
-      if (!conf.saslFallback() || e.getCause() instanceof TimeoutException) {
-        throw e;
-      }
+    for (int i = 0; i < 3; i++) {
+      try {
+        doSparkAuth(client, channel);
+        client.setClientId(appId);
+        return;
+      } catch (GeneralSecurityException | IOException e) {
+        throw Throwables.propagate(e);
+      } catch (RuntimeException e) {
+        // There isn't a good exception that can be caught here to know whether it's really
+        // OK to switch back to SASL (because the server doesn't speak the new protocol). So
+        // try it anyway, unless it's a timeout, which is locally fatal. In the worst case
+        // things will fail again.
+        if (!conf.saslFallback() || (e.getCause() instanceof TimeoutException && i == 2)) {
+          throw e;
+        }
 
-      if (LOG.isDebugEnabled()) {
-        Throwable cause = e.getCause() != null ? e.getCause() : e;
-        LOG.debug("New auth protocol failed, trying SASL.", cause);
-      } else {
-        LOG.info("New auth protocol failed, trying SASL.");
+        if (LOG.isDebugEnabled()) {
+          Throwable cause = e.getCause() != null ? e.getCause() : e;
+          LOG.debug("New auth protocol failed, trying SASL.", cause);
+        } else {
+          LOG.info("New auth protocol failed, trying SASL.");
+        }
+        if (conf.saslFallback()) {
+          doSaslAuth(client, channel);
+        }
       }
-      doSaslAuth(client, channel);
     }
   }
 
