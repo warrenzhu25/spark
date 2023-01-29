@@ -24,7 +24,6 @@ import java.util.concurrent.atomic.AtomicLong
 
 import scala.collection.mutable
 import scala.collection.mutable.{ArrayBuffer, Buffer, HashMap, HashSet}
-import scala.util.Random
 
 import com.google.common.cache.CacheBuilder
 
@@ -423,23 +422,39 @@ private[spark] class TaskSchedulerImpl(
                 (barrierTask.taskLocality, barrierTask.assignedResources)
               }
 
-              minLaunchedLocality = minTaskLocality(minLaunchedLocality, Some(locality))
-              availableCpus(i) -= taskCpus
-              assert(availableCpus(i) >= 0)
-              resources.foreach { case (rName, rInfo) =>
-                // Remove the first n elements from availableResources addresses, these removed
-                // addresses are the same as that we allocated in taskResourceAssignments since it's
-                // synchronized. We don't remove the exact addresses allocated because the current
-                // approach produces the identical result with less time complexity.
-                availableResources(i)(rName).remove(0, rInfo.addresses.size)
+              taskScheduled = taskDescOption.nonEmpty
+
+              for (task <- taskDescOption) {
+                val (locality, resources) = if (task != null) {
+                  tasks(i) += task
+                  addRunningTask(task.taskId, execId, taskSet)
+                  (taskSet.taskInfos(task.taskId).taskLocality, task.resources)
+                } else {
+                  assert(taskSet.isBarrier, "TaskDescription can only be null for barrier task")
+                  val barrierTask = taskSet.barrierPendingLaunchTasks(index)
+                  barrierTask.assignedOfferIndex = i
+                  barrierTask.assignedCores = taskCpus
+                  (barrierTask.taskLocality, barrierTask.assignedResources)
+                }
+
+                minLaunchedLocality = minTaskLocality(minLaunchedLocality, Some(locality))
+                availableCpus(i) -= taskCpus
+                assert(availableCpus(i) >= 0)
+                resources.foreach { case (rName, rInfo) =>
+                  // Remove the first n elements from availableResources addresses, these removed
+                  // addresses are the same as that we allocated in taskResourceAssignments since it's
+                  // synchronized. We don't remove the exact addresses allocated because the current
+                  // approach produces the identical result with less time complexity.
+                  availableResources(i)(rName).remove(0, rInfo.addresses.size)
+                }
               }
+            } catch {
+              case e: TaskNotSerializableException =>
+                logError(s"Resource offer failed, task set ${taskSet.name} was not serializable")
+                // Do not offer resources for this task, but don't throw an error to allow other
+                // task sets to be submitted.
+                return (noDelayScheduleRejects, minLaunchedLocality)
             }
-          } catch {
-            case e: TaskNotSerializableException =>
-              logError(s"Resource offer failed, task set ${taskSet.name} was not serializable")
-              // Do not offer resources for this task, but don't throw an error to allow other
-              // task sets to be submitted.
-              return (noDelayScheduleRejects, minLaunchedLocality)
           }
         }
       }
@@ -451,6 +466,7 @@ private[spark] class TaskSchedulerImpl(
    * Add the running task to TaskScheduler's related structures
    */
   private def addRunningTask(tid: Long, execId: String, taskSet: TaskSetManager): Unit = {
+    logInfo(s"Schedule task $tid on executor $execId")
     taskIdToTaskSetManager.put(tid, taskSet)
     taskIdToExecutorId(tid) = execId
     executorIdToRunningTaskIds(execId).add(tid)
@@ -798,7 +814,10 @@ private[spark] class TaskSchedulerImpl(
    * overriding in tests, so it can be deterministic.
    */
   protected def shuffleOffers(offers: IndexedSeq[WorkerOffer]): IndexedSeq[WorkerOffer] = {
-    Random.shuffle(offers)
+//    Random.shuffle(offers)
+    val sortedOffers = offers.sortBy(_.cores)
+//    logInfo(s"Sorted offers is ${sortedOffers}")
+    sortedOffers
   }
 
   def statusUpdate(tid: Long, state: TaskState, serializedData: ByteBuffer): Unit = {
