@@ -24,7 +24,6 @@ import java.util.concurrent.atomic.AtomicLong
 
 import scala.collection.mutable
 import scala.collection.mutable.{ArrayBuffer, Buffer, HashMap, HashSet}
-import scala.util.Random
 
 import org.apache.spark._
 import org.apache.spark.TaskState.TaskState
@@ -386,15 +385,18 @@ private[spark] class TaskSchedulerImpl(
       val taskSetRpID = taskSet.taskSet.resourceProfileId
       // make the resource profile id a hard requirement for now - ie only put tasksets
       // on executors where resource profile exactly matches.
-      if (taskSetRpID == shuffledOffers(i).resourceProfileId) {
+      var hasTaskScheduled = true
+      while (taskSetRpID == shuffledOffers(i).resourceProfileId && hasTaskScheduled) {
         val taskResAssignmentsOpt = resourcesMeetTaskRequirements(taskSet, availableCpus(i),
           availableResources(i))
+        hasTaskScheduled = taskResAssignmentsOpt.nonEmpty
         taskResAssignmentsOpt.foreach { taskResAssignments =>
           try {
             val prof = sc.resourceProfileManager.resourceProfileFromId(taskSetRpID)
             val taskCpus = ResourceProfile.getTaskCpusOrDefaultForProfile(prof, conf)
             val (taskDescOption, didReject, index) =
               taskSet.resourceOffer(execId, host, maxLocality, taskCpus, taskResAssignments)
+            hasTaskScheduled = taskDescOption.nonEmpty
             noDelayScheduleRejects &= !didReject
             for (task <- taskDescOption) {
               val (locality, resources) = if (task != null) {
@@ -784,7 +786,7 @@ private[spark] class TaskSchedulerImpl(
    * overriding in tests, so it can be deterministic.
    */
   protected def shuffleOffers(offers: IndexedSeq[WorkerOffer]): IndexedSeq[WorkerOffer] = {
-    Random.shuffle(offers)
+    offers.sortBy(_.cores)
   }
 
   def statusUpdate(tid: Long, state: TaskState, serializedData: ByteBuffer): Unit = {
