@@ -20,6 +20,7 @@ package org.apache.spark.network.netty
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.{HashMap => JHashMap, Map => JMap}
+import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.JavaConverters._
 import scala.concurrent.{Future, Promise}
@@ -28,15 +29,14 @@ import scala.util.{Success, Try}
 
 import com.codahale.metrics.{Metric, MetricSet}
 
-import org.apache.spark.{SecurityManager, SparkConf}
-import org.apache.spark.ExecutorDeadException
+import org.apache.spark.{ExecutorDeadException, SecurityManager, SparkConf}
 import org.apache.spark.internal.config
 import org.apache.spark.network._
 import org.apache.spark.network.buffer.{ManagedBuffer, NioManagedBuffer}
 import org.apache.spark.network.client.{RpcResponseCallback, TransportClientBootstrap}
 import org.apache.spark.network.crypto.{AuthClientBootstrap, AuthServerBootstrap}
 import org.apache.spark.network.server._
-import org.apache.spark.network.shuffle.{BlockFetchingListener, BlockTransferListener, DownloadFileManager, OneForOneBlockFetcher, RetryingBlockTransferor}
+import org.apache.spark.network.shuffle._
 import org.apache.spark.network.shuffle.protocol.{UploadBlock, UploadBlockStream}
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.rpc.RpcEndpointRef
@@ -61,6 +61,9 @@ private[spark] class NettyBlockTransferService(
   // TODO: Don't use Java serialization, use a more cross-version compatible serialization format.
   private val serializer = new JavaSerializer(conf)
   private val authEnabled = securityManager.isAuthenticationEnabled()
+  // dead executors executorId -> isDecommissioned
+  private val deadExecutors = new ConcurrentHashMap[String, Boolean]
+  private val checkExecutorAlive = conf.get(config.REDUCER_CHECK_EXECUTOR_ALIVE)
 
   private[this] var transportContext: TransportContext = _
   private[this] var server: TransportServer = _
@@ -116,6 +119,9 @@ private[spark] class NettyBlockTransferService(
       logger.trace(s"Fetch blocks from $host:$port (executor id $execId)")
     }
     try {
+      if (checkExecutorAlive) {
+        ensureExecutorAlive(execId)
+      }
       val maxRetries = transportConf.maxIORetries()
       val blockFetchStarter = new RetryingBlockTransferor.BlockTransferStarter {
         override def createAndStart(blockIds: Array[String],
@@ -133,10 +139,8 @@ private[spark] class NettyBlockTransferService(
                 driverEndPointRef.askSync[(Boolean, Boolean)](IsExecutorAlive(execId))
               } match {
                 case Success((isAlive, isDecommissioned)) if !isAlive =>
-                  throw ExecutorDeadException(isDecommissioned,
-                    s"The relative remote executor(Id: $execId)," +
-                    s" which maintains the block data to fetch is" +
-                      s"${if (isDecommissioned) " decommissioned and" else ""} dead.")
+                  deadExecutors.put(execId, isDecommissioned)
+                  throwExecutorDeadException(execId, isDecommissioned)
                 case _ => throw e
               }
           }
@@ -215,5 +219,30 @@ private[spark] class NettyBlockTransferService(
     if (transportContext != null) {
       transportContext.close()
     }
+  }
+
+  def ensureExecutorAlive(executorId: String): Unit = {
+    val startTime = System.currentTimeMillis()
+
+    if (deadExecutors.contains(executorId)) {
+      throwExecutorDeadException(executorId, deadExecutors.get(executorId))
+    }
+
+    Try {
+      // Return value is (isExecutorAlive, isExecutorDecommissioned)
+      driverEndPointRef.askSync[(Boolean, Boolean)](IsExecutorAlive(executorId))
+    } match {
+      case Success((isAlive, isDecommissioned)) if !isAlive =>
+        deadExecutors.put(executorId, isDecommissioned)
+        throwExecutorDeadException(executorId, isDecommissioned)
+      case _ =>
+    }
+    logger.info(s"Spent ${System.currentTimeMillis() - startTime} ms checking executor live")
+  }
+
+  private def throwExecutorDeadException(executorId: String, isDecommissioned: Boolean) = {
+    throw ExecutorDeadException(isDecommissioned,
+        s"Executor $executorId is" +
+        s"${if (isDecommissioned) " decommissioned and" else ""} dead.")
   }
 }

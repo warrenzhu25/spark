@@ -30,6 +30,7 @@ import org.scalatest.matchers.must.Matchers
 import org.scalatest.matchers.should.Matchers._
 
 import org.apache.spark.{ExecutorDeadException, SecurityManager, SparkConf, SparkFunSuite}
+import org.apache.spark.internal.config
 import org.apache.spark.network.BlockDataManager
 import org.apache.spark.network.client.{TransportClient, TransportClientFactory}
 import org.apache.spark.network.shuffle.{BlockFetchingListener, DownloadFileManager}
@@ -95,7 +96,12 @@ class NettyBlockTransferServiceSuite
     verifyExecutorDeadException(true)
   }
 
-  def verifyExecutorDeadException(isDecommissioned: Boolean = false): Unit = {
+  test("SPARK-42925: test fetch block when spark.reducer.checkExecutorAlive enabled") {
+    verifyExecutorDeadException(checkExecutorAlive = true)
+  }
+
+  def verifyExecutorDeadException(isDecommissioned: Boolean = false,
+    checkExecutorAlive: Boolean = false): Unit = {
     implicit val executionContext = ExecutionContext.global
     val port = 17634 + Random.nextInt(10000)
     logInfo("random port for test: " + port)
@@ -129,7 +135,8 @@ class NettyBlockTransferServiceSuite
 
     val listener = mock(classOf[BlockFetchingListener])
     var hitExecutorDeadException = false
-    when(listener.onBlockTransferFailure(any(), any(classOf[ExecutorDeadException])))
+    when(listener.onBlockTransferFailure(any(), any())).thenCallRealMethod()
+    when(listener.onBlockFetchFailure(any(), any(classOf[ExecutorDeadException])))
       .thenAnswer(input => {
         hitExecutorDeadException = true
         val executorDeadException = input.getArgument(1, classOf[ExecutorDeadException])
@@ -139,7 +146,7 @@ class NettyBlockTransferServiceSuite
         }
       })
 
-    service0 = createService(port, driverEndpointRef)
+    service0 = createService(port, driverEndpointRef, checkExecutorAlive)
     val clientFactoryField = service0.getClass
       .getSuperclass.getSuperclass.getDeclaredField("clientFactory")
     clientFactoryField.setAccessible(true)
@@ -147,7 +154,11 @@ class NettyBlockTransferServiceSuite
 
     service0.fetchBlocks("localhost", port, "exec1",
       Array("block1"), listener, mock(classOf[DownloadFileManager]))
-    assert(createClientCount === 1)
+    if (checkExecutorAlive) {
+      assert(createClientCount === 0)
+    } else {
+      assert(createClientCount === 1)
+    }
     assert(hitExecutorDeadException)
   }
 
@@ -161,9 +172,11 @@ class NettyBlockTransferServiceSuite
 
   private def createService(
       port: Int,
-      rpcEndpointRef: RpcEndpointRef = null): NettyBlockTransferService = {
+      rpcEndpointRef: RpcEndpointRef = null,
+      checkExecutorAlive: Boolean = false): NettyBlockTransferService = {
     val conf = new SparkConf()
       .set("spark.app.id", s"test-${getClass.getName}")
+      .set(config.REDUCER_CHECK_EXECUTOR_ALIVE, checkExecutorAlive)
     val securityManager = new SecurityManager(conf)
     val blockDataManager = mock(classOf[BlockDataManager])
     val service = new NettyBlockTransferService(conf, securityManager, "localhost", "localhost",

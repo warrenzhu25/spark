@@ -1285,6 +1285,14 @@ package object config {
       .checkValue(_ > 0, "The max no. of blocks in flight cannot be non-positive.")
       .createWithDefault(Int.MaxValue)
 
+  private[spark] val REDUCER_CHECK_EXECUTOR_ALIVE =
+    ConfigBuilder("spark.reducer.checkExecutorAlive")
+      .doc("Whether to check executor liveness from driver. This can fail fast instead of " +
+        s"waiting spark.shuffle.io.connectionTimeout when executor is dead.")
+      .version("3.3.0")
+      .booleanConf
+      .createWithDefault(false)
+
   private[spark] val MAX_REMOTE_BLOCK_SIZE_FETCH_TO_MEM =
     ConfigBuilder("spark.network.maxRemoteBlockSizeFetchToMem")
       .doc("Remote block will be fetched to disk when size of the block is above this threshold " +
