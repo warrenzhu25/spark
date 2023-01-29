@@ -26,7 +26,7 @@ import org.apache.spark.metrics.GarbageCollectionMetrics
 import org.apache.spark.network.shuffle.Constants
 import org.apache.spark.network.shuffledb.DBBackend
 import org.apache.spark.network.util.ByteUnit
-import org.apache.spark.scheduler.{EventLoggingListener, SchedulingMode}
+import org.apache.spark.scheduler.{EventLoggingListener, SchedulingMode, TaskAssignPolicy}
 import org.apache.spark.shuffle.sort.io.LocalDiskShuffleDataIO
 import org.apache.spark.storage.{DefaultTopologyMapper, RandomBlockReplicationPolicy}
 import org.apache.spark.unsafe.array.ByteArrayMethods
@@ -2082,6 +2082,72 @@ package object config {
       .version("0.8.1")
       .timeConf(TimeUnit.MILLISECONDS)
       .createOptional
+
+  private[spark] val SCHEDULER_TASK_ASSIGN_POLICY =
+    ConfigBuilder("spark.scheduler.taskAssignPolicy")
+      .doc(s"Policy for scheduler to assign task to executors." +
+        s" Supported [${TaskAssignPolicy.values.map(_.toString).mkString(",")}]")
+      .version("3.5.0")
+      .stringConf
+      .transform(_.toUpperCase(Locale.ROOT))
+      .checkValues(TaskAssignPolicy.values.map(_.toString))
+      .createWithDefault(TaskAssignPolicy.ROUND_ROBIN.toString)
+
+  private[spark] val SCHEDULER_EXCLUDE_SHUFFLE_SKEW_EXECUTORS =
+    ConfigBuilder("spark.scheduler.excludeShuffleSkewExecutors")
+      .doc(s"Exclude shuffle map skewed executors when scheduling. " +
+        s"This can reduce long shuffle fetch wait caused by shuffle write skew.")
+      .version("3.5.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  private[spark] val SHUFFLE_SKEW_MIN_FINISHED_TASKS =
+    ConfigBuilder("spark.scheduler.shuffleSkew.minFinishedTasks")
+      .doc("Minimum number of finished shuffle map tasks on one executor before " +
+        "being considered as skew.")
+      .version("3.5.0")
+      .intConf
+      .createWithDefault(10)
+
+  private[spark] val SHUFFLE_SKEW_MAX_EXECUTORS_NUM =
+    ConfigBuilder("spark.scheduler.shuffleSkew.maxExecutorsNumber")
+      .doc("Maximum number of executors being considered as skew. " +
+        "Skewed executors will be excluded when scheduling")
+      .version("3.5.0")
+      .intConf
+      .createWithDefault(5)
+
+  private[spark] val SHUFFLE_SKEW_MAX_EXECUTORS_RATIO =
+    ConfigBuilder("spark.scheduler.shuffleSkew.maxExecutorsRatio")
+      .doc("Maximum ratio of total executors being considered as skew. " +
+        "Skewed executors will be excluded when scheduling")
+      .version("3.5.0")
+      .doubleConf
+      .createWithDefault(0.05)
+
+  private[spark] val SHUFFLE_SKEW_RATIO =
+    ConfigBuilder("spark.scheduler.shuffleSkew.ratio")
+      .doc("How many times larger than average finished shuffle map task number on executor" +
+        " to be considered as skewed.")
+      .version("3.5.0")
+      .doubleConf
+      .createWithDefault(1.5)
+
+  private[spark] val HANG_DETECTION_ENABLE =
+    ConfigBuilder("spark.diagnostic.hangDetect.enabled")
+      .doc("When set to true, spark will detect hanging tasks. " +
+        "If detected, hang tasks will be killed and application will fail. " +
+        "This can help auto detect hang and diagnosis root cause of task hang.")
+      .version("3.3.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  private[spark] val HANG_DETECTION_TASK_DURATION_THRESHOLD =
+    ConfigBuilder("spark.diagnostic.hangDetect.taskDurationThreshold")
+      .doc("How long a task running for considered as hang")
+      .version("3.3.0")
+      .timeConf(TimeUnit.MINUTES)
+      .createWithDefault(30)
 
   private[spark] val SPECULATION_ENABLED =
     ConfigBuilder("spark.speculation")

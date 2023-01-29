@@ -118,6 +118,13 @@ private[spark] class TaskSchedulerImpl(
   // CPUs to request per task
   val CPUS_PER_TASK = conf.get(config.CPUS_PER_TASK)
 
+  private val useBinPack = TaskAssignPolicy.withName(conf.get(SCHEDULER_TASK_ASSIGN_POLICY)) ==
+    TaskAssignPolicy.BIN_PACK
+
+  // Set of executor IDs that should use round-robin scheduling (limited to minExecutors)
+  // Executors not in this set use bin-pack scheduling
+  private var roundRobinExecutors: Set[String] = Set.empty
+
   // TaskSetManagers are not thread safe, so any access to one should be synchronized
   // on this class.  Protected by `this`
   private val taskSetsByStageIdAndAttempt = new HashMap[Int, HashMap[Int, TaskSetManager]]
@@ -400,41 +407,75 @@ private[spark] class TaskSchedulerImpl(
       val execId = shuffledOffers(i).executorId
       val host = shuffledOffers(i).host
       val taskSetRpID = taskSet.taskSet.resourceProfileId
+      // make the resource profile id a hard requirement for now - ie only put tasksets
+      // on executors where resource profile exactly matches.
 
+      var continueScheduling = true
       // check whether the task can be scheduled to the executor base on resource profile.
-      if (sc.resourceProfileManager
-        .canBeScheduled(taskSetRpID, shuffledOffers(i).resourceProfileId)) {
+      while (sc.resourceProfileManager
+        .canBeScheduled(taskSetRpID, shuffledOffers(i).resourceProfileId) && continueScheduling) {
         val taskResAssignmentsOpt = resourcesMeetTaskRequirements(taskSet, availableCpus(i),
           availableResources(i))
+        // if no task meet requirement, stop scheduling
+        continueScheduling &= taskResAssignmentsOpt.nonEmpty
         taskResAssignmentsOpt.foreach { taskResAssignments =>
           try {
             val prof = sc.resourceProfileManager.resourceProfileFromId(taskSetRpID)
             val taskCpus = ResourceProfile.getTaskCpusOrDefaultForProfile(prof, conf)
-            val (taskDescOption, didReject, index) =
-              taskSet.resourceOffer(execId, host, maxLocality, taskCpus, taskResAssignments)
-            noDelayScheduleRejects &= !didReject
-            for (task <- taskDescOption) {
-              val (locality, resources) = if (task != null) {
-                tasks(i) += task
-                addRunningTask(task.taskId, execId, taskSet)
-                (taskSet.taskInfos(task.taskId).taskLocality, task.resources)
-              } else {
-                assert(taskSet.isBarrier, "TaskDescription can only be null for barrier task")
-                val barrierTask = taskSet.barrierPendingLaunchTasks(index)
-                barrierTask.assignedOfferIndex = i
-                barrierTask.assignedCores = taskCpus
-                (barrierTask.taskLocality, barrierTask.assignedResources)
-              }
 
-              minLaunchedLocality = minTaskLocality(minLaunchedLocality, Some(locality))
-              availableCpus(i) -= taskCpus
-              assert(availableCpus(i) >= 0)
-              resources.foreach { case (rName, rInfo) =>
-                // Remove the first n elements from availableResources addresses, these removed
-                // addresses are the same as that we allocated in taskResourceAssignments since it's
-                // synchronized. We don't remove the exact addresses allocated because the current
-                // approach produces the identical result with less time complexity.
-                availableResources(i)(rName).remove(0, rInfo.addresses.size)
+            // Hybrid scheduling: check if we should skip bin-pack executors
+            // Only skip if: we have round-robin executors AND this is a bin-pack executor
+            // AND this is not a barrier taskset (barrier tasks need all executors)
+            val isRR = roundRobinExecutors.contains(execId)
+            val shouldSkipBinPack = if (!isRR && roundRobinExecutors.nonEmpty &&
+                useBinPack && !taskSet.isBarrier) {
+              // Bin-pack executor: check if round-robin executors still have available cores
+              shuffledOffers.zipWithIndex.exists { case (offer, idx) =>
+                roundRobinExecutors.contains(offer.executorId) && availableCpus(idx) > 0
+              }
+            } else {
+              false
+            }
+
+            if (shouldSkipBinPack) {
+              // Skip bin-pack executors while round-robin executors have cores
+              continueScheduling = false  // Stop trying on this executor, but iteration continues
+            } else {
+              val (taskDescOption, didReject, index) =
+                taskSet.resourceOffer(execId, host, maxLocality, taskCpus, taskResAssignments)
+              // if no task meet resource offer, stop scheduling
+              continueScheduling &= taskDescOption.nonEmpty
+
+              if (isRR && taskDescOption.nonEmpty) {
+                // Round-robin: stop after 1 task assigned per executor
+                continueScheduling = false
+              } else {
+                // Bin-pack: continue scheduling multiple tasks per executor
+                continueScheduling &= useBinPack
+              }
+              noDelayScheduleRejects &= !didReject
+              for (task <- taskDescOption) {
+                val (locality, resources) = if (task != null) {
+                  tasks(i) += task
+                  addRunningTask(task.taskId, execId, taskSet)
+                  (taskSet.taskInfos(task.taskId).taskLocality, task.resources)
+                } else {
+                  assert(taskSet.isBarrier, "TaskDescription can only be null for barrier task")
+                  val barrierTask = taskSet.barrierPendingLaunchTasks(index)
+                  barrierTask.assignedOfferIndex = i
+                  barrierTask.assignedCores = taskCpus
+                  (barrierTask.taskLocality, barrierTask.assignedResources)
+                }
+                minLaunchedLocality = minTaskLocality(minLaunchedLocality, Some(locality))
+                availableCpus(i) -= taskCpus
+                assert(availableCpus(i) >= 0)
+                resources.foreach { case (rName, rInfo) =>
+                  // Remove the first n elements from availableResources addresses, these removed
+                  // addresses are the same as that we allocated in taskResourceAssignments since
+                  // it's synchronized. We don't remove the exact addresses allocated because the
+                  // current approach produces the identical result with less time complexity.
+                  availableResources(i)(rName).remove(0, rInfo.addresses.size)
+                }
               }
             }
           } catch {
@@ -552,6 +593,8 @@ private[spark] class TaskSchedulerImpl(
     }.getOrElse(offers)
 
     val shuffledOffers = shuffleOffers(filteredOffers)
+    // roundRobinExecutors is set by shuffleOffers()
+
     // Build a list of tasks to assign to each worker.
     // Note the size estimate here might be off with different ResourceProfiles but should be
     // close estimate
@@ -797,11 +840,66 @@ private[spark] class TaskSchedulerImpl(
   }
 
   /**
+   * Select executors for round-robin scheduling based on minimum executor count.
+   * Returns (round-robin offers, bin-pack offers).
+   */
+  private def selectMinExecutorsForRoundRobin(
+      offers: IndexedSeq[WorkerOffer]): (IndexedSeq[WorkerOffer], IndexedSeq[WorkerOffer]) = {
+    val minExecutors = conf.get(DYN_ALLOCATION_MIN_EXECUTORS)
+
+    if (minExecutors <= 0) {
+      // If minExecutors is 0, pure bin-pack: no round-robin, all go to bin-pack
+      return (IndexedSeq.empty, offers)
+    }
+
+    if (offers.size <= minExecutors) {
+      // If we have fewer executors than min, all go to round-robin
+      return (offers, IndexedSeq.empty)
+    }
+
+    // Separate busy and idle executors
+    val busyOffers = offers.filter(o => isExecutorBusy(o.executorId))
+    val idleOffers = offers.filterNot(o => isExecutorBusy(o.executorId))
+
+    val roundRobinOffers = if (busyOffers.size >= minExecutors) {
+      // Have enough busy executors: select top N by available cores (most cores available)
+      busyOffers.sortBy(-_.cores).take(minExecutors)
+    } else {
+      // Not enough busy executors: take all busy + idle to reach minExecutors
+      // Sort idle by executor ID for deterministic selection, then take first N needed
+      val needed = minExecutors - busyOffers.size
+      val sortedIdle = idleOffers.sortBy(_.executorId)
+      busyOffers ++ sortedIdle.take(needed)
+    }
+
+    val binPackOffers = offers.filterNot(o => roundRobinOffers.exists(_.executorId == o.executorId))
+
+    (roundRobinOffers, binPackOffers)
+  }
+
+  /**
    * Shuffle offers around to avoid always placing tasks on the same workers.  Exposed to allow
    * overriding in tests, so it can be deterministic.
+   *
+   * When bin-pack is enabled, this implements a hybrid strategy:
+   * - First N (minExecutors) executors use round-robin (shuffled for even distribution)
+   * - Remaining executors use bin-pack (sorted by cores ascending)
+   * - Tasks are assigned to round-robin set first, then overflow to bin-pack set
    */
   protected def shuffleOffers(offers: IndexedSeq[WorkerOffer]): IndexedSeq[WorkerOffer] = {
-    Random.shuffle(offers)
+    if (useBinPack) {
+      val (rrOffers, bpOffers) = selectMinExecutorsForRoundRobin(offers)
+      // Store round-robin executor IDs for hybrid scheduling
+      roundRobinExecutors = rrOffers.map(_.executorId).toSet
+      // Both sets use bin-pack: sort by cores ascending, then by executor ID for determinism
+      // This ensures tasks fill the round-robin set first, then overflow to bin-pack set
+      val sortedRR = rrOffers.sortBy(o => (o.cores, o.executorId))
+      val sortedBP = bpOffers.sortBy(o => (o.cores, o.executorId))
+      sortedRR ++ sortedBP
+    } else {
+      roundRobinExecutors = Set.empty
+      Random.shuffle(offers)
+    }
   }
 
   def statusUpdate(tid: Long, state: TaskState, serializedData: ByteBuffer): Unit = {

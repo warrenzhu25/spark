@@ -193,6 +193,121 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext
     assert(!failedTaskSet)
   }
 
+  test("SPARK-43086: Scheduler should schedule task on fewest executors" +
+    " when bin pack enabled") {
+    val taskScheduler = setupScheduler(config.SCHEDULER_TASK_ASSIGN_POLICY.key ->
+      TaskAssignPolicy.BIN_PACK.toString)
+    val numFreeCores = 4
+    val workerOffers = IndexedSeq(WorkerOffer("executor0", "host0", numFreeCores),
+      WorkerOffer("executor1", "host1", numFreeCores - 1))
+    val numTasks = 3
+    val taskSet = FakeTask.createTaskSet(3)
+    taskScheduler.submitTasks(taskSet)
+    val taskDescriptions = taskScheduler.resourceOffers(workerOffers).flatten
+    assert(numTasks === taskDescriptions.length)
+    assert(taskDescriptions.forall(t => t.executorId == "executor1"))
+    assert(!failedTaskSet)
+  }
+
+  test("Hybrid bin-pack with minExecutors: bin-pack within min executors") {
+    val taskScheduler = setupScheduler(
+      config.SCHEDULER_TASK_ASSIGN_POLICY.key -> TaskAssignPolicy.BIN_PACK.toString,
+      config.DYN_ALLOCATION_MIN_EXECUTORS.key -> "2")
+    val numFreeCores = 4
+    val workerOffers = IndexedSeq(
+      WorkerOffer("executor0", "host0", numFreeCores),
+      WorkerOffer("executor1", "host1", numFreeCores - 1),  // Unequal cores to test bin-pack
+      WorkerOffer("executor2", "host2", numFreeCores),
+      WorkerOffer("executor3", "host3", numFreeCores))
+    val numTasks = 6
+    val taskSet = FakeTask.createTaskSet(numTasks)
+    taskScheduler.submitTasks(taskSet)
+    val taskDescriptions = taskScheduler.resourceOffers(workerOffers).flatten
+    assert(numTasks === taskDescriptions.length)
+    // With minExecutors=2, bin-pack within first 2 executors (exec0 has 4 cores, exec1 has 3)
+    // Bin-pack fills executor with fewer cores first: exec1 gets 3 tasks, exec0 gets 3 tasks
+    // executor2 and executor3 should remain idle
+    val tasksByExecutor = taskDescriptions.groupBy(_.executorId).mapValues(_.size)
+    assert(tasksByExecutor.size == 2, s"Expected 2 executors used, got ${tasksByExecutor.size}")
+    assert(tasksByExecutor("executor1") == 3 && tasksByExecutor("executor0") == 3,
+      s"Expected executor1(3) and executor0(3), got ${tasksByExecutor}")
+    assert(!failedTaskSet)
+  }
+
+  test("Hybrid bin-pack with minExecutors: overflow to bin-pack executors") {
+    val taskScheduler = setupScheduler(
+      config.SCHEDULER_TASK_ASSIGN_POLICY.key -> TaskAssignPolicy.BIN_PACK.toString,
+      config.DYN_ALLOCATION_MIN_EXECUTORS.key -> "2")
+    val numFreeCores = 4
+    val workerOffers = IndexedSeq(
+      WorkerOffer("executor0", "host0", numFreeCores),
+      WorkerOffer("executor1", "host1", numFreeCores),
+      WorkerOffer("executor2", "host2", numFreeCores))
+    val numTasks = 10
+    val taskSet = FakeTask.createTaskSet(numTasks)
+    taskScheduler.submitTasks(taskSet)
+    val taskDescriptions = taskScheduler.resourceOffers(workerOffers).flatten
+    assert(numTasks === taskDescriptions.length)
+    // First 2 executors (round-robin) get 1 task each
+    // Remaining 8 tasks should bin-pack into executor2
+    val tasksByExecutor = taskDescriptions.groupBy(_.executorId).mapValues(_.size)
+    // executor2 should get multiple tasks (bin-pack behavior)
+    assert(tasksByExecutor.values.exists(_ > 1))
+    assert(!failedTaskSet)
+  }
+
+  test("Hybrid bin-pack with minExecutors=0: pure bin-pack behavior") {
+    val taskScheduler = setupScheduler(
+      config.SCHEDULER_TASK_ASSIGN_POLICY.key -> TaskAssignPolicy.BIN_PACK.toString,
+      config.DYN_ALLOCATION_MIN_EXECUTORS.key -> "0")
+    val numFreeCores = 4
+    val workerOffers = IndexedSeq(
+      WorkerOffer("executor0", "host0", numFreeCores),
+      WorkerOffer("executor1", "host1", numFreeCores))
+    val numTasks = 4
+    val taskSet = FakeTask.createTaskSet(numTasks)
+    taskScheduler.submitTasks(taskSet)
+    val taskDescriptions = taskScheduler.resourceOffers(workerOffers).flatten
+    assert(numTasks === taskDescriptions.length)
+    // With minExecutors=0, should behave as pure bin-pack
+    // All tasks should go to the executor with fewest cores initially
+    val tasksByExecutor = taskDescriptions.groupBy(_.executorId).mapValues(_.size)
+    assert(tasksByExecutor.size <= 2)
+    assert(!failedTaskSet)
+  }
+
+  test("Hybrid bin-pack: 10 tasks, 5 min executors, 6 total executors") {
+    val taskScheduler = setupScheduler(
+      config.SCHEDULER_TASK_ASSIGN_POLICY.key -> TaskAssignPolicy.BIN_PACK.toString,
+      config.DYN_ALLOCATION_MIN_EXECUTORS.key -> "5")
+    val numFreeCores = 4
+    val workerOffers = IndexedSeq(
+      WorkerOffer("executor0", "host0", numFreeCores),
+      WorkerOffer("executor1", "host1", numFreeCores),
+      WorkerOffer("executor2", "host2", numFreeCores),
+      WorkerOffer("executor3", "host3", numFreeCores),
+      WorkerOffer("executor4", "host4", numFreeCores),
+      WorkerOffer("executor5", "host5", numFreeCores))
+    val numTasks = 10
+    val taskSet = FakeTask.createTaskSet(numTasks)
+    taskScheduler.submitTasks(taskSet)
+    val taskDescriptions = taskScheduler.resourceOffers(workerOffers).flatten
+    assert(numTasks === taskDescriptions.length)
+    // With minExecutors=5, round-robin on first 5 executors distributes evenly:
+    // Each of executor0-4 gets 2 tasks (10 tasks / 5 executors)
+    // executor5 remains idle
+    val tasksByExecutor = taskDescriptions.groupBy(_.executorId).mapValues(_.size)
+    assert(tasksByExecutor.size == 5,
+      s"Expected 5 executors used, got ${tasksByExecutor.size}")
+    assert(tasksByExecutor("executor0") == 2 && tasksByExecutor("executor1") == 2 &&
+      tasksByExecutor("executor2") == 2 && tasksByExecutor("executor3") == 2 &&
+      tasksByExecutor("executor4") == 2,
+      s"Expected each of first 5 executors to have 2 tasks, got ${tasksByExecutor}")
+    assert(!tasksByExecutor.contains("executor5"),
+      s"executor5 should be idle but got ${tasksByExecutor.get("executor5")}")
+    assert(!failedTaskSet)
+  }
+
   test("Scheduler correctly accounts for multiple CPUs per task") {
     val taskCpus = 2
     val taskScheduler = setupSchedulerWithMaster(
