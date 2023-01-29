@@ -231,6 +231,29 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
       numShuffles = Option(1))
   }
 
+  test("spark.storage.decommission.shuffleBlocks.waitCleaned moves forward") {
+    // Set up the mocks so we return one shuffle block
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+    // First call get blocks, then empty list simulating a delete.
+    when(migratableShuffleBlockResolver.getStoredShuffles())
+      .thenReturn(Seq(ShuffleBlockInfo(1, 1)))
+      .thenReturn(Seq())
+
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks())
+      .thenReturn(Seq())
+    when(bm.getPeers(mc.any()))
+      .thenReturn(Seq(BlockManagerId("exec2", "host2", 12345)))
+
+    // Verify the decom manager handles this correctly
+    val conf = sparkConf.clone().set(config.STORAGE_DECOMMISSION_SHUFFLE_BLOCKS_WAIT_CLEANED.key, "true")
+    val bmDecomManager = new BlockManagerDecommissioner(conf, bm)
+    validateDecommissionTimestampsOnManager(
+      bmDecomManager,
+      numShuffles = Option(0))
+  }
+
   test("block decom manager handles IO failures") {
     // Set up the mocks so we return one shuffle block
     val bm = mock(classOf[BlockManager])

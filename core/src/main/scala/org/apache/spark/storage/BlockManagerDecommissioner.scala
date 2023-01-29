@@ -44,6 +44,8 @@ private[storage] class BlockManagerDecommissioner(
   private val maxReplicationFailuresForDecommission =
     conf.get(config.STORAGE_DECOMMISSION_MAX_REPLICATION_FAILURE_PER_BLOCK)
 
+  private val shuffleBlocksWaitClean = conf.get(config.STORAGE_DECOMMISSION_SHUFFLE_BLOCKS_WAIT_CLEANED)
+
   // Used for tracking if our migrations are complete. Readable for testing
   @volatile private[storage] var lastRDDMigrationTime: Long = 0
   @volatile private[storage] var lastShuffleMigrationTime: Long = 0
@@ -274,8 +276,11 @@ private[storage] class BlockManagerDecommissioner(
    */
   private[storage] def refreshMigratableShuffleBlocks(): Boolean = {
     // Update the queue of shuffles to be migrated
-    logInfo("Start refreshing migratable shuffle blocks")
     val localShuffles = bm.migratableResolver.getStoredShuffles().toSet
+    logInfo(s"Start refreshing migratable shuffle blocks with $localShuffles local shuffles")
+    if (shuffleBlocksWaitClean) {
+      return localShuffles.nonEmpty
+    }
     val newShufflesToMigrate = (localShuffles.diff(migratingShuffles)).toSeq
       .sortBy(b => (b.shuffleId, b.mapId))
     shufflesToMigrate.addAll(newShufflesToMigrate.map(x => (x, 0)).asJava)

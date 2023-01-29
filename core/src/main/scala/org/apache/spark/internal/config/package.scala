@@ -463,6 +463,15 @@ package object config {
       .booleanConf
       .createWithDefault(true)
 
+  private[spark] val STORAGE_DECOMMISSION_SHUFFLE_BLOCKS_WAIT_CLEANED =
+    ConfigBuilder("spark.storage.decommission.shuffleBlocks.waitCleaned")
+      .doc("Whether to wait shuffle blocks to be cleaned by ContextCleaner. " +
+        "When enabled, no shuffle blocks will be migrated to alive peers. " +
+        "This can avoid the stage retries caused by shuffle data location change")
+      .version("3.2.0")
+      .booleanConf
+      .createWithDefault(false)
+
   private[spark] val STORAGE_DECOMMISSION_SHUFFLE_MAX_THREADS =
     ConfigBuilder("spark.storage.decommission.shuffleBlocks.maxThreads")
       .doc("Maximum number of threads to use in migrating shuffle files.")
