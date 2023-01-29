@@ -19,14 +19,11 @@ package org.apache.spark.network.netty
 
 import java.nio.ByteBuffer
 import java.util.{HashMap => JHashMap, Map => JMap}
-
 import scala.collection.JavaConverters._
 import scala.concurrent.{Future, Promise}
 import scala.reflect.ClassTag
 import scala.util.{Success, Try}
-
 import com.codahale.metrics.{Metric, MetricSet}
-
 import org.apache.spark.{SecurityManager, SparkConf}
 import org.apache.spark.ExecutorDeadException
 import org.apache.spark.internal.config
@@ -120,6 +117,7 @@ private[spark] class NettyBlockTransferService(
     }
     val startTime = System.currentTimeMillis()
     try {
+      ensureExecutorAlive(execId)
       val maxRetries = transportConf.maxIORetries()
       val blockFetchStarter = new RetryingBlockTransferor.BlockTransferStarter {
         override def createAndStart(blockIds: Array[String],
@@ -219,6 +217,20 @@ private[spark] class NettyBlockTransferService(
     }
     if (transportContext != null) {
       transportContext.close()
+    }
+  }
+
+  def ensureExecutorAlive(executorId: String): Unit = {
+    Try {
+      // Return value is (isExecutorAlive, isExecutorDecommissioned)
+      driverEndPointRef.askSync[(Boolean, Boolean)](IsExecutorAlive(executorId))
+    } match {
+      case Success((isAlive, isDecommissioned)) if !isAlive =>
+        throw ExecutorDeadException(isDecommissioned,
+          s"The relative remote executor(Id: $executorId)," +
+            s" which maintains the block data to fetch is " +
+            s"${if (isDecommissioned) "decommissioned and" else ""} dead.")
+      case _ =>
     }
   }
 }
