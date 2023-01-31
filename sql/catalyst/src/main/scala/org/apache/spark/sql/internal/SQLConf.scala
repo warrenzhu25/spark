@@ -6656,6 +6656,40 @@ object SQLConf {
       .booleanConf
       .createWithDefault(Utils.isTesting)
 
+  val DATAPROC_ENHANCED_OPTIMIZER_ENABLED =
+    buildConf("spark.dataproc.enhanced.optimizer.enabled")
+      .doc("Enables all dataproc custom spark optimizer improvements")
+      .version("3.1.3")
+      .booleanConf
+      .createWithDefault(false)
+
+  val DATAPROC_ENHANCED_EXECUTION_ENABLED =
+    buildConf("spark.dataproc.enhanced.execution.enabled")
+      .doc("Enables all dataproc custom spark execution improvements")
+      .version("3.1.3")
+      .booleanConf
+      .createWithDefault(false)
+
+  val CATALOG_FILE_INDEX_STATS_ENABLED =
+    buildConf("spark.dataproc.sql.catalog.file.index.stats.enabled")
+      .doc("Enables fetching stats from file listing for catalog tables")
+      .version("3.1.3")
+      .booleanConf
+      .createWithDefault(false)
+
+  val JOIN_CONDITION_REORDER_ENABLED =
+    buildConf("spark.dataproc.sql.joinConditionReorder.enabled")
+      .doc("Enables join condition reorder.")
+      .version("3.1.3")
+      .booleanConf
+      .createWithDefault(false)
+
+  val LEFT_SEMI_JOIN_CONVERSION_ENABLED =
+    buildConf("spark.dataproc.sql.optimizer.leftsemijoin.conversion.enabled")
+      .doc("Enables conversion of inner join to left semi join.")
+      .version("3.1.3")
+      .booleanConf
+      .createWithDefault(false)
   /**
    * Holds information about keys that have been deprecated.
    *
@@ -6847,8 +6881,15 @@ class SQLConf extends Serializable with Logging with SqlApiConf {
   def runtimeFilterBloomFilterEnabled: Boolean =
     getConf(RUNTIME_BLOOM_FILTER_ENABLED)
 
-  def runtimeFilterCreationSideThreshold: Long =
-    getConf(RUNTIME_BLOOM_FILTER_CREATION_SIDE_THRESHOLD)
+  def runtimeFilterCreationSideThreshold: Long = {
+    if (getConf(SQLConf.DATAPROC_ENHANCED_OPTIMIZER_ENABLED) &&
+      getConf(AUTO_BROADCASTJOIN_THRESHOLD)/4 >
+        getConf(RUNTIME_BLOOM_FILTER_CREATION_SIDE_THRESHOLD)) {
+      getConf(AUTO_BROADCASTJOIN_THRESHOLD)/4
+    } else {
+      getConf(RUNTIME_BLOOM_FILTER_CREATION_SIDE_THRESHOLD)
+    }
+  }
 
   def runtimeRowLevelOperationGroupFilterEnabled: Boolean =
     getConf(RUNTIME_ROW_LEVEL_OPERATION_GROUP_FILTER_ENABLED)
@@ -7821,6 +7862,16 @@ class SQLConf extends Serializable with Logging with SqlApiConf {
 
   def isTimeTypeEnabled: Boolean = getConf(SQLConf.TIME_TYPE_ENABLED)
 
+  /** ********************** Custom Optimizations ************ */
+
+  def joinConditionReorderEnabled: Boolean = getConf(SQLConf.JOIN_CONDITION_REORDER_ENABLED) ||
+    getConf(SQLConf.DATAPROC_ENHANCED_OPTIMIZER_ENABLED)
+
+  def leftSemiJoinConversionEnabled: Boolean = getConf(SQLConf.LEFT_SEMI_JOIN_CONVERSION_ENABLED) ||
+    getConf(SQLConf.DATAPROC_ENHANCED_OPTIMIZER_ENABLED)
+
+  def catalogFileIndexStatsEnabled: Boolean = getConf(SQLConf.CATALOG_FILE_INDEX_STATS_ENABLED) ||
+    getConf(SQLConf.DATAPROC_ENHANCED_OPTIMIZER_ENABLED)
   /** ********************** SQLConf functionality methods ************ */
 
   /** Set Spark SQL configuration properties. */
