@@ -118,6 +118,7 @@ private[spark] class NettyBlockTransferService(
     if (logger.isTraceEnabled) {
       logger.trace(s"Fetch blocks from $host:$port (executor id $execId)")
     }
+    val startTime = System.currentTimeMillis()
     try {
       val maxRetries = transportConf.maxIORetries()
       val blockFetchStarter = new RetryingBlockTransferor.BlockTransferStarter {
@@ -155,7 +156,8 @@ private[spark] class NettyBlockTransferService(
       }
     } catch {
       case e: Exception =>
-        logger.error("Exception while beginning fetchBlocks", e)
+        logger.error(s"Exception while beginning fetchBlocks from executor" +
+          s" $execId after ${System.currentTimeMillis() - startTime} ms", e)
         blockIds.foreach(listener.onBlockFetchFailure(_, e))
     }
   }
