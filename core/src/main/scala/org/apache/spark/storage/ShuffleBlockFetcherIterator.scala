@@ -27,10 +27,13 @@ import javax.annotation.concurrent.GuardedBy
 import scala.collection
 import scala.collection.mutable
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet, Queue}
+import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.Future
 import scala.util.{Failure, Success}
 
 import io.netty.util.internal.OutOfDirectMemoryError
 import org.apache.commons.io.IOUtils
+import org.apache.spark.{ExecutorDeadException, MapOutputTracker, TaskContext}
 import org.roaringbitmap.RoaringBitmap
 
 import org.apache.spark.{MapOutputTracker, TaskContext}
@@ -270,6 +273,7 @@ final class ShuffleBlockFetcherIterator(
     val deferredBlocks = new ArrayBuffer[String]()
     val blockIds = req.blocks.map(_.blockId.toString)
     val address = req.address
+    val requestStartTime = System.nanoTime()
 
     @inline def enqueueDeferredFetchRequestIfNecessary(): Unit = {
       if (remainingBlocks.isEmpty && deferredBlocks.nonEmpty) {
@@ -281,6 +285,50 @@ final class ShuffleBlockFetcherIterator(
         deferredBlocks.clear()
       }
     }
+
+    @inline def handleMigratedBlock(executorId: String,
+                                    blockId: String, isNetworkReqDone: Boolean): Unit = {
+      // Only re-fetch map output after all blocks processed and has failed decommissioned blocks
+      if (remainingBlocks.isEmpty && failedDecommissionedBlocks.nonEmpty) {
+        Future {
+          val startTime = System.currentTimeMillis()
+          val block = BlockId(blockId)
+          val shuffleBlockId = block.asInstanceOf[ShuffleBlockId]
+          val decommissionedBlocksByAddress = getUpdatedBlocksByAddress(address,
+            shuffleBlockId.shuffleId, shuffleBlockId.reduceId)
+            .filter { case (bm, _) => bm != address }
+            .map { case (bm, blocks) =>
+              (bm, blocks.filter(b => failedDecommissionedBlocks.contains(b._1.name)))
+            }
+            .filter { case (_, blocks) => blocks.nonEmpty }
+            .toMap
+          val migratedBlocks = decommissionedBlocksByAddress
+            .values
+            .flatMap { blocks => blocks.map(b => b._1.name) }
+          if (migratedBlocks.size < failedDecommissionedBlocks.size) {
+            val missingBlocks = failedDecommissionedBlocks.diff(migratedBlocks.toSet)
+            //            logInfo(s"Executor decommissioned. " +
+            //                s"Blocks ${missingBlocks} missing")
+            val missingBlock = missingBlocks.head
+            results.put(FailureFetchResult(BlockId(missingBlock), infoMap(missingBlock)._2, address,
+              ExecutorDeadException(true, s"Executor $executorId is decommissioned and dead")))
+          } else {
+            //            logInfo(s"Executor decommissioned. Latest location for $address" +
+            //                s" is ${decommissionedBlocksByAddress.size}")
+            val failedSize = failedDecommissionedBlocks.toSeq.map(b => infoMap(b)._1).sum.toInt
+            failedDecommissionedBlocks.clear()
+            results.put(BlockMigratedFailureResult(address,
+              failedSize,
+              migratedBlocks.size,
+              decommissionedBlocksByAddress,
+              isNetworkReqDone))
+          }
+          logInfo(s"Handle migrated blocks for executor $address in" +
+            s" ${System.currentTimeMillis() - startTime} ms")
+        }
+      }
+    }
+
 
     val blockFetchingListener = new BlockFetchingListener {
       override def onBlockFetchSuccess(blockId: String, buf: ManagedBuffer): Unit = {
@@ -299,7 +347,8 @@ final class ShuffleBlockFetcherIterator(
             enqueueDeferredFetchRequestIfNecessary()
           }
         }
-        logInfo(s"Got remote block $blockId after ${Utils.getUsedTimeNs(startTimeNs)}")
+        logInfo(s"Got remote block $blockId from ${req.address.hostPort}" +
+          s" after ${Utils.getUsedTimeNs(requestStartTime)}")
       }
 
       override def onBlockFetchFailure(blockId: String, e: Throwable): Unit = {
