@@ -17,7 +17,7 @@
 
 package org.apache.spark.network.server;
 
-import java.net.SocketAddress;
+import static org.apache.spark.network.util.NettyUtils.getRemoteAddress;
 
 import com.google.common.base.Throwables;
 import io.netty.channel.Channel;
@@ -25,17 +25,15 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
+import java.net.SocketAddress;
 import org.apache.spark.network.buffer.ManagedBuffer;
 import org.apache.spark.network.client.TransportClient;
 import org.apache.spark.network.protocol.ChunkFetchFailure;
 import org.apache.spark.network.protocol.ChunkFetchRequest;
 import org.apache.spark.network.protocol.ChunkFetchSuccess;
 import org.apache.spark.network.protocol.Encodable;
-
-import static org.apache.spark.network.util.NettyUtils.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A dedicated ChannelHandler for processing ChunkFetchRequest messages. When sending response
@@ -84,10 +82,9 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
 
   public void processFetchRequest(
       final Channel channel, final ChunkFetchRequest msg) throws Exception {
-    if (logger.isTraceEnabled()) {
-      logger.trace("Received req from {} to fetch block {}", getRemoteAddress(channel),
+    logger.info("Received req from {} to fetch block {}", getRemoteAddress(channel),
         msg.streamChunkId);
-    }
+
     if (maxChunksBeingTransferred < Long.MAX_VALUE) {
       long chunksBeingTransferred = streamManager.chunksBeingTransferred();
       if (chunksBeingTransferred >= maxChunksBeingTransferred) {
@@ -143,7 +140,7 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
     }
     return channelFuture.addListener((ChannelFutureListener) future -> {
       if (future.isSuccess()) {
-        logger.trace("Sent result {} to client {}", result, remoteAddress);
+        logger.info("Sent result {} to client {}", result, remoteAddress);
       } else {
         logger.error(String.format("Error sending result %s to %s; closing connection",
           result, remoteAddress), future.cause());

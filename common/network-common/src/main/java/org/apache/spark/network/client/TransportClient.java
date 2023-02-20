@@ -17,14 +17,7 @@
 
 package org.apache.spark.network.client;
 
-import java.io.Closeable;
-import java.io.IOException;
-import java.net.SocketAddress;
-import java.nio.ByteBuffer;
-import java.util.UUID;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import javax.annotation.Nullable;
+import static org.apache.spark.network.util.NettyUtils.getRemoteAddress;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
@@ -33,16 +26,29 @@ import com.google.common.util.concurrent.SettableFuture;
 import io.netty.channel.Channel;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
+import java.io.Closeable;
+import java.io.IOException;
+import java.net.SocketAddress;
+import java.nio.ByteBuffer;
+import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import javax.annotation.Nullable;
 import org.apache.commons.lang3.builder.ToStringBuilder;
 import org.apache.commons.lang3.builder.ToStringStyle;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import org.apache.spark.network.buffer.ManagedBuffer;
 import org.apache.spark.network.buffer.NioManagedBuffer;
-import org.apache.spark.network.protocol.*;
-
-import static org.apache.spark.network.util.NettyUtils.getRemoteAddress;
+import org.apache.spark.network.protocol.ChunkFetchRequest;
+import org.apache.spark.network.protocol.MergedBlockMetaRequest;
+import org.apache.spark.network.protocol.MergedBlockMetaSuccess;
+import org.apache.spark.network.protocol.OneWayMessage;
+import org.apache.spark.network.protocol.RpcFailure;
+import org.apache.spark.network.protocol.RpcRequest;
+import org.apache.spark.network.protocol.StreamChunkId;
+import org.apache.spark.network.protocol.StreamRequest;
+import org.apache.spark.network.protocol.UploadStream;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Client for fetching consecutive chunks of a pre-negotiated stream. This API is intended to allow
@@ -134,9 +140,7 @@ public class TransportClient implements Closeable {
       long streamId,
       int chunkIndex,
       ChunkReceivedCallback callback) {
-    if (logger.isDebugEnabled()) {
-      logger.debug("Sending fetch chunk request {} to {}", chunkIndex, getRemoteAddress(channel));
-    }
+    logger.info("Sending fetch chunk request {} {} to {}", streamId, chunkIndex, getRemoteAddress(channel));
 
     StreamChunkId streamChunkId = new StreamChunkId(streamId, chunkIndex);
     StdChannelListener listener = new StdChannelListener(streamChunkId) {
@@ -164,9 +168,8 @@ public class TransportClient implements Closeable {
         callback.onFailure(streamId, new IOException(errorMsg, cause));
       }
     };
-    if (logger.isDebugEnabled()) {
-      logger.debug("Sending stream request for {} to {}", streamId, getRemoteAddress(channel));
-    }
+
+    logger.info("Sending stream request for {} to {}", streamId, getRemoteAddress(channel));
 
     // Need to synchronize here so that the callback is added to the queue and the RPC is
     // written to the socket atomically, so that callbacks are called in the right order
@@ -355,11 +358,9 @@ public class TransportClient implements Closeable {
     @Override
     public void operationComplete(Future<? super Void> future) throws Exception {
       if (future.isSuccess()) {
-        if (logger.isTraceEnabled()) {
-          long timeTaken = System.currentTimeMillis() - startTime;
-          logger.trace("Sending request {} to {} took {} ms", requestId,
-              getRemoteAddress(channel), timeTaken);
-        }
+        long timeTaken = System.currentTimeMillis() - startTime;
+        logger.info("Sending request {} to {} took {} ms", requestId,
+            getRemoteAddress(channel), timeTaken);
       } else {
         String errorMsg = String.format("Failed to send RPC %s to %s: %s", requestId,
             getRemoteAddress(channel), future.cause());

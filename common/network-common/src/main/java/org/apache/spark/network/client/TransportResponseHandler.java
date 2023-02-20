@@ -17,20 +17,18 @@
 
 package org.apache.spark.network.client;
 
+import static org.apache.spark.network.util.NettyUtils.getRemoteAddress;
+
+import com.google.common.annotations.VisibleForTesting;
+import io.netty.channel.Channel;
 import java.io.IOException;
 import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
-
-import com.google.common.annotations.VisibleForTesting;
-import io.netty.channel.Channel;
 import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.apache.commons.lang3.tuple.Pair;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import org.apache.spark.network.protocol.ChunkFetchFailure;
 import org.apache.spark.network.protocol.ChunkFetchSuccess;
 import org.apache.spark.network.protocol.MergedBlockMetaSuccess;
@@ -41,8 +39,9 @@ import org.apache.spark.network.protocol.StreamChunkId;
 import org.apache.spark.network.protocol.StreamFailure;
 import org.apache.spark.network.protocol.StreamResponse;
 import org.apache.spark.network.server.MessageHandler;
-import static org.apache.spark.network.util.NettyUtils.getRemoteAddress;
 import org.apache.spark.network.util.TransportFrameDecoder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Handler that processes server responses, in response to requests issued from a
@@ -57,6 +56,8 @@ public class TransportResponseHandler extends MessageHandler<ResponseMessage> {
 
   private final Map<StreamChunkId, ChunkReceivedCallback> outstandingFetches;
 
+  private final Map<StreamChunkId, Long> fetchSentTime;
+
   private final Map<Long, BaseResponseCallback> outstandingRpcs;
 
   private final Queue<Pair<String, StreamCallback>> streamCallbacks;
@@ -68,6 +69,7 @@ public class TransportResponseHandler extends MessageHandler<ResponseMessage> {
   public TransportResponseHandler(Channel channel) {
     this.channel = channel;
     this.outstandingFetches = new ConcurrentHashMap<>();
+    this.fetchSentTime = new ConcurrentHashMap<>();
     this.outstandingRpcs = new ConcurrentHashMap<>();
     this.streamCallbacks = new ConcurrentLinkedQueue<>();
     this.timeOfLastRequestNs = new AtomicLong(0);
@@ -76,10 +78,12 @@ public class TransportResponseHandler extends MessageHandler<ResponseMessage> {
   public void addFetchRequest(StreamChunkId streamChunkId, ChunkReceivedCallback callback) {
     updateTimeOfLastRequest();
     outstandingFetches.put(streamChunkId, callback);
+    fetchSentTime.put(streamChunkId, System.currentTimeMillis());
   }
 
   public void removeFetchRequest(StreamChunkId streamChunkId) {
     outstandingFetches.remove(streamChunkId);
+    fetchSentTime.remove(streamChunkId);
   }
 
   public void addRpcRequest(long requestId, BaseResponseCallback callback) {
@@ -163,6 +167,8 @@ public class TransportResponseHandler extends MessageHandler<ResponseMessage> {
     if (message instanceof ChunkFetchSuccess) {
       ChunkFetchSuccess resp = (ChunkFetchSuccess) message;
       ChunkReceivedCallback listener = outstandingFetches.get(resp.streamChunkId);
+      logger.info("Rev {} from {} in {} ms", resp.streamChunkId,
+          getRemoteAddress(channel), System.currentTimeMillis() - fetchSentTime.get(resp.streamChunkId));
       if (listener == null) {
         logger.warn("Ignoring response for block {} from {} since it is not outstanding",
           resp.streamChunkId, getRemoteAddress(channel));
