@@ -19,20 +19,23 @@ package org.apache.spark.network.netty
 
 import java.nio.ByteBuffer
 import java.util.{HashMap => JHashMap, Map => JMap}
+import java.util.concurrent.ConcurrentHashMap
+
 import scala.collection.JavaConverters._
 import scala.concurrent.{Future, Promise}
 import scala.reflect.ClassTag
 import scala.util.{Success, Try}
+
 import com.codahale.metrics.{Metric, MetricSet}
-import org.apache.spark.{SecurityManager, SparkConf}
-import org.apache.spark.ExecutorDeadException
+import org.apache.spark.{ExecutorDeadException, SecurityManager, SparkConf}
+
 import org.apache.spark.internal.config
 import org.apache.spark.network._
 import org.apache.spark.network.buffer.{ManagedBuffer, NioManagedBuffer}
 import org.apache.spark.network.client.{RpcResponseCallback, TransportClientBootstrap}
 import org.apache.spark.network.crypto.{AuthClientBootstrap, AuthServerBootstrap}
 import org.apache.spark.network.server._
-import org.apache.spark.network.shuffle.{BlockFetchingListener, BlockTransferListener, DownloadFileManager, OneForOneBlockFetcher, RetryingBlockTransferor}
+import org.apache.spark.network.shuffle._
 import org.apache.spark.network.shuffle.protocol.{UploadBlock, UploadBlockStream}
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.rpc.RpcEndpointRef
@@ -57,6 +60,7 @@ private[spark] class NettyBlockTransferService(
   // TODO: Don't use Java serialization, use a more cross-version compatible serialization format.
   private val serializer = new JavaSerializer(conf)
   private val authEnabled = securityManager.isAuthenticationEnabled()
+  private val executorAlive = new ConcurrentHashMap[String, (Boolean, Boolean)]
 
   private[this] var transportContext: TransportContext = _
   private[this] var server: TransportServer = _
@@ -135,10 +139,7 @@ private[spark] class NettyBlockTransferService(
                 driverEndPointRef.askSync[(Boolean, Boolean)](IsExecutorAlive(execId))
               } match {
                 case Success(v) if !v._1 =>
-                  throw ExecutorDeadException(v._2,
-                    s"The relative remote executor(Id: $execId)," +
-                    s" which maintains the block data to fetch is " +
-                      s"${if (v._2) "decommissioned and" else ""} dead.")
+                  throwExecutorDeadException(execId, v._2)
                 case _ => throw e
               }
           }
@@ -221,16 +222,31 @@ private[spark] class NettyBlockTransferService(
   }
 
   def ensureExecutorAlive(executorId: String): Unit = {
+    val startTime = System.currentTimeMillis()
+
+    if (executorAlive.contains(executorId)) {
+      val executorState = executorAlive.get(executorId)
+      if (!executorState._1) {
+        throwExecutorDeadException(executorId, executorState._2)
+      }
+    }
+
     Try {
       // Return value is (isExecutorAlive, isExecutorDecommissioned)
       driverEndPointRef.askSync[(Boolean, Boolean)](IsExecutorAlive(executorId))
     } match {
       case Success((isAlive, isDecommissioned)) if !isAlive =>
-        throw ExecutorDeadException(isDecommissioned,
-          s"The relative remote executor(Id: $executorId)," +
-            s" which maintains the block data to fetch is " +
-            s"${if (isDecommissioned) "decommissioned and" else ""} dead.")
+        throwExecutorDeadException(executorId, isDecommissioned)
       case _ =>
     }
+    logger.info(s"Spent ${System.currentTimeMillis() - startTime} ms checking executor live")
+  }
+
+  private def throwExecutorDeadException(executorId: String, isDecommissioned: Boolean) = {
+    executorAlive.put(executorId, (false, isDecommissioned))
+    throw ExecutorDeadException(isDecommissioned,
+      s"The relative remote executor(Id: $executorId)," +
+        s" which maintains the block data to fetch is " +
+        s"${if (isDecommissioned) "decommissioned and" else ""} dead.")
   }
 }
