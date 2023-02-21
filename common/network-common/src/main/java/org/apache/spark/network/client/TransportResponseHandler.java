@@ -167,8 +167,11 @@ public class TransportResponseHandler extends MessageHandler<ResponseMessage> {
     if (message instanceof ChunkFetchSuccess) {
       ChunkFetchSuccess resp = (ChunkFetchSuccess) message;
       ChunkReceivedCallback listener = outstandingFetches.get(resp.streamChunkId);
-      logger.info("Rev {} from {} in {} ms", resp.streamChunkId,
-          getRemoteAddress(channel), System.currentTimeMillis() - fetchSentTime.get(resp.streamChunkId));
+      long time = System.currentTimeMillis() - fetchSentTime.get(resp.streamChunkId);
+      if (time > 30 * 1000) {
+        logger.info("Rev block {} from {} in {} ms, pending {}", resp.streamChunkId,
+            getRemoteAddress(channel), time, fetchSentTime.size());
+      }
       if (listener == null) {
         logger.warn("Ignoring response for block {} from {} since it is not outstanding",
           resp.streamChunkId, getRemoteAddress(channel));
