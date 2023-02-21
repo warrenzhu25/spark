@@ -82,8 +82,12 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
 
   public void processFetchRequest(
       final Channel channel, final ChunkFetchRequest msg) throws Exception {
-    logger.info("Received req from {} to fetch block {}", getRemoteAddress(channel),
-        msg.streamChunkId);
+    long waitTime = System.currentTimeMillis() - msg.receiveTime;
+    if (waitTime > 30 * 1000) {
+      logger.info("Received req {} ms from {} to fetch block {}", waitTime,
+          getRemoteAddress(channel),
+          msg.streamChunkId);
+    }
 
     if (maxChunksBeingTransferred < Long.MAX_VALUE) {
       long chunksBeingTransferred = streamManager.chunksBeingTransferred();

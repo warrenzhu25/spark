@@ -27,9 +27,11 @@ import org.apache.commons.lang3.builder.ToStringStyle;
  */
 public final class ChunkFetchRequest extends AbstractMessage implements RequestMessage {
   public final StreamChunkId streamChunkId;
+  public final long receiveTime;
 
   public ChunkFetchRequest(StreamChunkId streamChunkId) {
     this.streamChunkId = streamChunkId;
+    this.receiveTime = System.currentTimeMillis();
   }
 
   @Override
