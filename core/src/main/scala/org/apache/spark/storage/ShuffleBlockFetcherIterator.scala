@@ -347,7 +347,7 @@ final class ShuffleBlockFetcherIterator(
             enqueueDeferredFetchRequestIfNecessary()
           }
         }
-        logInfo(s"Got remote block $blockId from ${req.address.hostPort}" +
+        logTrace(s"Got remote block $blockId from ${req.address.hostPort}" +
           s" after ${Utils.getUsedTimeNs(requestStartTime)}")
       }
 
