@@ -1324,6 +1324,16 @@ package object config {
       .checkValue(_ > 0, "The max no. of blocks in flight cannot be non-positive.")
       .createWithDefault(Int.MaxValue)
 
+  private[spark] val REDUCER_FETCH_MIGRATED_SHUFFLE_ENABLED =
+    ConfigBuilder("spark.reducer.fetchMigratedShuffle.enabled")
+      .doc("Whether to fetch migrated shuffle when fetch failed from a decommissioned executor. " +
+        "When enabled, this will reduce ExecutorDeadException caused by shuffle block migration " +
+        "from decommissioned executor to live executors. Furthermore, reducing stage retries " +
+        "caused by FetchFailedException. Unsupported in external shuffle service.")
+      .version("3.3.0")
+      .booleanConf
+      .createWithDefault(false)
+
   private[spark] val MAX_REMOTE_BLOCK_SIZE_FETCH_TO_MEM =
     ConfigBuilder("spark.network.maxRemoteBlockSizeFetchToMem")
       .doc("Remote block will be fetched to disk when size of the block is above this threshold " +

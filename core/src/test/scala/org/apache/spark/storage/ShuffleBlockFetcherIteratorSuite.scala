@@ -32,18 +32,18 @@ import scala.concurrent.Future
 import com.google.common.io.ByteStreams
 import io.netty.util.internal.OutOfDirectMemoryError
 import org.apache.logging.log4j.Level
-import org.mockito.ArgumentMatchers.{any, eq => meq}
-import org.mockito.Mockito.{doThrow, mock, times, verify, when}
+import org.mockito.ArgumentMatchers.{any, anyInt, eq => meq}
+import org.mockito.Mockito._
 import org.mockito.invocation.InvocationOnMock
 import org.mockito.stubbing.Answer
 import org.roaringbitmap.RoaringBitmap
 import org.scalatest.PrivateMethodTester
 
-import org.apache.spark.{MapOutputTracker, SparkFunSuite, TaskContext}
+import org.apache.spark.{ExecutorDeadException, FetchFailed, MapOutputTracker, SparkFunSuite, TaskContext}
 import org.apache.spark.MapOutputTracker.SHUFFLE_PUSH_MAP_ID
 import org.apache.spark.network._
 import org.apache.spark.network.buffer.{FileSegmentManagedBuffer, ManagedBuffer}
-import org.apache.spark.network.shuffle.{BlockFetchingListener, DownloadFileManager, ExternalBlockStoreClient, MergedBlockMeta, MergedBlocksMetaListener}
+import org.apache.spark.network.shuffle._
 import org.apache.spark.network.util.LimitedInputStream
 import org.apache.spark.shuffle.{FetchFailedException, ShuffleReadMetricsReporter}
 import org.apache.spark.storage.BlockManagerId.SHUFFLE_MERGER_IDENTIFIER
@@ -194,7 +194,9 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite with PrivateMethodT
       checksumEnabled: Boolean = true,
       checksumAlgorithm: String = "ADLER32",
       shuffleMetrics: Option[ShuffleReadMetricsReporter] = None,
-      doBatchFetch: Boolean = false): ShuffleBlockFetcherIterator = {
+      doBatchFetch: Boolean = false,
+      fetchMigratedBlocks: Boolean = false
+  ): ShuffleBlockFetcherIterator = {
     val tContext = taskContext.getOrElse(TaskContext.empty())
     new ShuffleBlockFetcherIterator(
       tContext,
@@ -220,7 +222,9 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite with PrivateMethodT
       checksumEnabled,
       checksumAlgorithm,
       shuffleMetrics.getOrElse(tContext.taskMetrics().createTempShuffleReadMetrics()),
-      doBatchFetch)
+      doBatchFetch,
+      fetchMigratedBlocks
+    )
   }
   // scalastyle:on argcount
 
