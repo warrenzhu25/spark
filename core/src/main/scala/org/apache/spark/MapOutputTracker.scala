@@ -449,6 +449,7 @@ private[spark] case class GetMapAndMergeResultStatuses(shuffleId: Int)
 private[spark] case class GetShufflePushMergerLocations(shuffleId: Int)
   extends MapOutputTrackerMessage
 private[spark] case object StopMapOutputTracker extends MapOutputTrackerMessage
+private[spark] case object GetLatestEpoch extends MapOutputTrackerMessage
 
 private[spark] sealed trait MapOutputTrackerMasterMessage
 private[spark] case class GetMapOutputMessage(shuffleId: Int,
@@ -459,6 +460,8 @@ private[spark] case class GetShufflePushMergersMessage(shuffleId: Int,
   context: RpcCallContext) extends MapOutputTrackerMasterMessage
 private[spark] case class MapSizesByExecutorId(
   iter: Iterator[(BlockManagerId, collection.Seq[(BlockId, Long, Int)])], enableBatchFetch: Boolean)
+private[spark] case class GetLatestEpochMessage(context: RpcCallContext)
+  extends MapOutputTrackerMasterMessage
 
 /** RpcEndpoint class for MapOutputTrackerMaster */
 private[spark] class MapOutputTrackerMasterEndpoint(
@@ -482,6 +485,10 @@ private[spark] class MapOutputTrackerMasterEndpoint(
       logInfo(s"Asked to send shuffle push merger locations for shuffle" +
         s" $shuffleId to ${context.senderAddress.hostPort}")
       tracker.post(GetShufflePushMergersMessage(shuffleId, context))
+
+    case GetLatestEpoch =>
+      logInfo(s"Asked to send latest epoch to ${context.senderAddress.hostPort}")
+      tracker.post(GetLatestEpochMessage(context))
 
     case StopMapOutputTracker =>
       logInfo("MapOutputTrackerMasterEndpoint stopped!")
@@ -638,6 +645,8 @@ private[spark] abstract class MapOutputTracker(conf: SparkConf) extends Logging 
   def unregisterShuffle(shuffleId: Int): Unit
 
   def stop(): Unit = {}
+
+  def getEpoch(): Long
 }
 
 /**
@@ -752,6 +761,10 @@ private[spark] class MapOutputTrackerMaster(
                   s" $shuffleId to ${context.senderAddress.hostPort}")
                 context.reply(shuffleStatuses.get(shuffleId).map(_.getShufflePushMergerLocations)
                   .getOrElse(Seq.empty[BlockManagerId]))
+              case GetLatestEpochMessage(context) =>
+                logDebug(s"Handling request to send latest epoch to" +
+                  s" ${context.senderAddress.hostPort}")
+                context.reply(getEpoch)
             }
           } catch {
             case NonFatal(e) => logError(e.getMessage, e)
@@ -1147,7 +1160,7 @@ private[spark] class MapOutputTrackerMaster(
   }
 
   /** Called to get current epoch number. */
-  def getEpoch: Long = {
+  override def getEpoch: Long = {
     epochLock.synchronized {
       return epoch
     }
@@ -1479,6 +1492,19 @@ private[spark] class MapOutputTrackerWorker(conf: SparkConf) extends MapOutputTr
         shufflePushMergerLocations.clear()
       }
     }
+  }
+
+  /**
+   * Called from executors to fetch latest epoch from driver, potentially clearing old outputs
+   * if latest epoch > current epoch.
+   *
+   * Used to fetch latest map output when shuffle migration is enabled
+   * as shuffle migration might cause local map output out sync with driver
+   */
+  override def getEpoch(): Long = {
+    val latestEpoch = askTracker[Long](GetLatestEpoch)
+    updateEpoch(latestEpoch)
+    latestEpoch
   }
 }
 
