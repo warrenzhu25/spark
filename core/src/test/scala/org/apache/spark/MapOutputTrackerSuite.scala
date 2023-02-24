@@ -972,4 +972,49 @@ class MapOutputTrackerSuite extends SparkFunSuite with LocalSparkContext {
     rpcEnv.shutdown()
     assert(npeCounter.intValue() == 0)
   }
+
+  test("SPARK-41955: Support get latest epoch from executor") {
+    val hostname = "localhost"
+    val rpcEnv = createRpcEnv("spark", hostname, 0, new SecurityManager(conf))
+
+    val masterTracker = newTrackerMaster()
+    masterTracker.trackerEndpoint = rpcEnv.setupEndpoint(MapOutputTracker.ENDPOINT_NAME,
+      new MapOutputTrackerMasterEndpoint(rpcEnv, masterTracker, conf))
+
+    val mapWorkerRpcEnv = createRpcEnv("spark-worker", hostname, 0, new SecurityManager(conf))
+    val mapWorkerTracker = new MapOutputTrackerWorker(conf)
+    mapWorkerTracker.trackerEndpoint =
+      mapWorkerRpcEnv.setupEndpointRef(rpcEnv.address, MapOutputTracker.ENDPOINT_NAME)
+
+    masterTracker.incrementEpoch()
+    val blockMgrId1 = BlockManagerId("a", "hostA", 1000)
+    val blockMgrId2 = BlockManagerId("b", "hostB", 1000)
+    val shuffleId = 1
+    val reduceId = 0
+    val mapId = 0
+    val size1000 = MapStatus.decompressSize(MapStatus.compressSize(1000L))
+    masterTracker.registerShuffle(shuffleId, 1, 1)
+    masterTracker.registerMapOutput(shuffleId, 0, MapStatus(blockMgrId1, Array(1000L), mapId))
+
+    def verifyMapOutput(blockManagerId: BlockManagerId): Unit = {
+      assert(mapWorkerTracker.getEpoch() == masterTracker.getEpoch)
+      val statuses = mapWorkerTracker.getMapSizesByExecutorId(shuffleId, reduceId)
+
+      assert(statuses.toSeq ===
+        Seq((blockManagerId,
+        ArrayBuffer((ShuffleBlockId(shuffleId, mapId, reduceId), size1000, 0)))))
+    }
+
+    verifyMapOutput(blockMgrId1)
+
+    // Simulate shuffle migration, first update map output, then executor exit
+    masterTracker.updateMapOutput(shuffleId, mapId, blockMgrId2)
+    masterTracker.removeOutputsOnExecutor(blockMgrId1.executorId)
+    verifyMapOutput(blockMgrId2)
+
+    masterTracker.stop()
+    mapWorkerTracker.stop()
+    rpcEnv.shutdown()
+    mapWorkerRpcEnv.shutdown()
+  }
 }
