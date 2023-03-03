@@ -25,7 +25,11 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.util.concurrent.EventExecutor;
+import io.netty.util.concurrent.SingleThreadEventExecutor;
 import java.net.SocketAddress;
+import java.util.Iterator;
+import java.util.concurrent.Executor;
 import org.apache.spark.network.buffer.ManagedBuffer;
 import org.apache.spark.network.client.TransportClient;
 import org.apache.spark.network.protocol.ChunkFetchFailure;
@@ -55,6 +59,10 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
   private final long maxChunksBeingTransferred;
   private final boolean syncModeEnabled;
 
+  private volatile int maxTotalQueue = 0;
+
+  private volatile int maxQueue = 0;
+
   public ChunkFetchRequestHandler(
       TransportClient client,
       StreamManager streamManager,
@@ -77,14 +85,30 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
       ChannelHandlerContext ctx,
       final ChunkFetchRequest msg) throws Exception {
     Channel channel = ctx.channel();
+    updateQueueSize(ctx);
     processFetchRequest(channel, msg);
+  }
+
+  private void updateQueueSize(ChannelHandlerContext context) {
+    Iterator<EventExecutor> executors = context.executor().parent().iterator();
+    int totalQueueSize = 0;
+    while (executors.hasNext()) {
+      Executor exe = executors.next();
+      if (exe instanceof SingleThreadEventExecutor) {
+        SingleThreadEventExecutor executor = (SingleThreadEventExecutor) exe;
+        maxQueue = Math.max(maxQueue, executor.pendingTasks());
+        totalQueueSize += executor.pendingTasks();
+      }
+    }
+    maxTotalQueue = Math.max(maxTotalQueue, totalQueueSize);
   }
 
   public void processFetchRequest(
       final Channel channel, final ChunkFetchRequest msg) throws Exception {
     long waitTime = System.currentTimeMillis() - msg.receiveTime;
     if (waitTime > 30 * 1000) {
-      logger.info("Received req {} ms from {} to fetch block {}", waitTime,
+      logger.info("Received req {} ms {}/{} from {} to fetch block {}", waitTime,
+          maxQueue, maxTotalQueue,
           getRemoteAddress(channel),
           msg.streamChunkId);
     }
