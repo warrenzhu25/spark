@@ -19,6 +19,8 @@ package org.apache.spark.network.server;
 
 import static org.apache.spark.network.util.NettyUtils.getRemoteAddress;
 
+import com.codahale.metrics.Meter;
+import com.codahale.metrics.Timer;
 import com.google.common.base.Throwables;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
@@ -30,12 +32,14 @@ import io.netty.util.concurrent.SingleThreadEventExecutor;
 import java.net.SocketAddress;
 import java.util.Iterator;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import org.apache.spark.network.buffer.ManagedBuffer;
 import org.apache.spark.network.client.TransportClient;
 import org.apache.spark.network.protocol.ChunkFetchFailure;
 import org.apache.spark.network.protocol.ChunkFetchRequest;
 import org.apache.spark.network.protocol.ChunkFetchSuccess;
 import org.apache.spark.network.protocol.Encodable;
+import org.apache.spark.network.util.TimerWithCustomTimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -62,6 +66,12 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
   private volatile int maxTotalQueue = 0;
 
   private volatile int maxQueue = 0;
+
+  private final Meter requestRate = new Meter();
+
+  private final Meter requestRateBytes = new Meter();
+
+  private final Timer requestLatency = new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS);
 
   public ChunkFetchRequestHandler(
       TransportClient client,
@@ -107,11 +117,14 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
       final Channel channel, final ChunkFetchRequest msg) throws Exception {
     long waitTime = System.currentTimeMillis() - msg.receiveTime;
     if (waitTime > 30 * 1000) {
-      logger.info("Received req {} ms {}/{} from {} to fetch block {}", waitTime,
+      logger.info("Received req {} ms {}/{} from {} to fetch block {} {} {} {}", waitTime,
           maxQueue, maxTotalQueue,
           getRemoteAddress(channel),
-          msg.streamChunkId);
+          msg.streamChunkId, requestLatency.getOneMinuteRate(), requestRate.getOneMinuteRate(), requestRateBytes.getOneMinuteRate());
     }
+
+    requestRate.mark();
+    final Timer.Context responseContext = requestLatency.time();
 
     if (maxChunksBeingTransferred < Long.MAX_VALUE) {
       long chunksBeingTransferred = streamManager.chunksBeingTransferred();
@@ -139,7 +152,11 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
 
     streamManager.chunkBeingSent(msg.streamChunkId.streamId);
     respond(channel, new ChunkFetchSuccess(msg.streamChunkId, buf)).addListener(
-      (ChannelFutureListener) future -> streamManager.chunkSent(msg.streamChunkId.streamId));
+      (ChannelFutureListener) future -> {
+        streamManager.chunkSent(msg.streamChunkId.streamId);
+        requestRateBytes.mark(msg.body().size());
+        responseContext.stop();
+      });
   }
 
   /**
