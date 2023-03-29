@@ -72,13 +72,11 @@ private[spark] class BlockStoreShuffleReader[K, C](
     val isDecommissionEnabled = conf.get(config.DECOMMISSION_ENABLED)
     val isStorageDecommissionEnabled = conf.get(config.STORAGE_DECOMMISSION_ENABLED)
     val shuffleMigrationEnabled = conf.get(config.STORAGE_DECOMMISSION_SHUFFLE_BLOCKS_ENABLED)
-    val shuffleWaitCleaned = conf.get(config.STORAGE_DECOMMISSION_SHUFFLE_BLOCKS_WAIT_CLEANED)
 
     val doFetchMigratedShuffle = !isExternalShuffleServiceEnabled &&
       isDecommissionEnabled &&
       isStorageDecommissionEnabled &&
       shuffleMigrationEnabled &&
-      !shuffleWaitCleaned &&
       conf.get(config.STORAGE_DECOMMISSION_FETCH_MIGRATED_SHUFFLE_ENABLED)
 
     logInfo(s"FetchMigratedShuffle enabled is $doFetchMigratedShuffle")
