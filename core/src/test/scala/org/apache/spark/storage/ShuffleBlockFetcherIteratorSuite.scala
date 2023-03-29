@@ -26,6 +26,7 @@ import java.util.zip.CheckedInputStream
 import scala.collection.mutable
 
 import org.apache.spark.FetchFailed
+import org.mockito.ArgumentMatchers.anyInt
 // scalastyle:off executioncontextglobal
 import scala.concurrent.ExecutionContext.Implicits.global
 // scalastyle:on executioncontextglobal
@@ -1841,7 +1842,7 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite with PrivateMethodT
 
     when(mapOutputTracker.getEpoch()).thenReturn(1L).thenReturn(2L)
 
-    when(mapOutputTracker.getMapSizesByExecutorId(0, 0))
+    when(mapOutputTracker.getMapSizesByExecutorId(0, 0, Int.MaxValue, 0, 1))
         .thenReturn(
           Seq((remoteBmId2, toBlockList(
             Seq(blockId1), 1L, 1)),
@@ -1889,7 +1890,7 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite with PrivateMethodT
       }
     }
 
-    when(mapOutputTracker.getMapSizesByExecutorId(0, 0)).thenReturn(
+    when(mapOutputTracker.getMapSizesByExecutorId(0, 0, Int.MaxValue, 0, 1)).thenReturn(
       Seq((remoteBmId2, toBlockList(
         Seq(blockId1), 1L, blockMapIndex))
       ).iterator
@@ -1939,7 +1940,7 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite with PrivateMethodT
       }
     }
 
-    when(mapOutputTracker.getMapSizesByExecutorId(0, 0)).thenReturn(
+    when(mapOutputTracker.getMapSizesByExecutorId(0, 0, Int.MaxValue, 0, 1)).thenReturn(
       Seq((remoteBmId2, toBlockList(
         Seq(blockId1), 1L, 1)),
         (localBmId, toBlockList(
@@ -1960,22 +1961,44 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite with PrivateMethodT
     verifyAllInFlightBeingZero(iterator)
   }
 
-  test("SPARK-41956: Fetch Migrated blocks with 1st failed of total 3 when fetch failed" +
+  test("SPARK-41956: Fetch Migrated blocks with 1st failed of total 5 when fetch failed" +
       " on a decommissioned executor") {
     testMigratedBlocksSomeFailed(Set(ShuffleBlockId(0, 0, 0)), 2)
   }
 
-  test("SPARK-41956: Fetch Migrated blocks with 2nd failed of total 3 when fetch failed" +
+  test("SPARK-41956: Fetch Migrated blocks with 2nd failed of total 5 when fetch failed" +
       " on a decommissioned executor") {
     testMigratedBlocksSomeFailed(Set(ShuffleBlockId(0, 1, 0)), 2)
   }
 
-  test("SPARK-41956: Fetch Migrated blocks with 1st and 3rd failed of total 3 when fetch failed" +
+  test("SPARK-41956: Fetch Migrated blocks with 1st and 2nd failed of total 5 when fetch failed" +
+    " on a decommissioned executor") {
+    testMigratedBlocksSomeFailed(Set(ShuffleBlockId(0, 0, 0), ShuffleBlockId(0, 1, 0)), 2)
+  }
+
+  test("SPARK-41956: Fetch Migrated blocks with 1st and 3rd failed of total 5 when fetch failed" +
       " on a decommissioned executor") {
     testMigratedBlocksSomeFailed(Set(ShuffleBlockId(0, 0, 0), ShuffleBlockId(0, 2, 0)), 3)
   }
 
-  private def testMigratedBlocksSomeFailed(failedBlockIds: Set[BlockId], fetchBlockTimes: Int) = {
+  test("SPARK-41956: Fetch Migrated blocks with failed blocks of different reducer when fetch" +
+    " failed on a decommissioned executor") {
+    testMigratedBlocksSomeFailed(Set(ShuffleBlockId(0, 2, 0), ShuffleBlockId(0, 2, 1)), 2)
+  }
+
+  test("SPARK-41956: Fetch Migrated blocks with 1 failed batch fetch blocks when fetch" +
+    " failed on a decommissioned executor") {
+    testMigratedBlocksSomeFailed(Set(ShuffleBlockBatchId(0, 2, 0, 2)), 2, true)
+  }
+
+  test("SPARK-41956: Fetch Migrated blocks with 2 failed batch fetch blocks when fetch" +
+    " failed on a decommissioned executor") {
+    testMigratedBlocksSomeFailed(Set(ShuffleBlockBatchId(0, 1, 0, 1),
+      ShuffleBlockBatchId(0, 2, 0, 2)), 3, true)
+  }
+
+  private def testMigratedBlocksSomeFailed(failedBlockIds: Set[BlockId],
+    fetchBlockTimes: Int, enableBatchFetch: Boolean = false) = {
     // Make sure remote blocks would return
     val remoteBmId1 = BlockManagerId("test-client-1", "test-client-1", 2)
     val remoteBmId2 = BlockManagerId("test-client-2", "test-client-2", 2)
@@ -1983,10 +2006,23 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite with PrivateMethodT
     val blockId1 = ShuffleBlockId(0, 0, 0)
     val blockId2 = ShuffleBlockId(0, 1, 0)
     val blockId3 = ShuffleBlockId(0, 2, 0)
+    val blockId4 = ShuffleBlockId(0, 2, 1)
+    val blockBatchId = ShuffleBlockBatchId(0, 2, 0, 2)
+
     val blocks = Map[BlockId, ManagedBuffer](
       blockId1 -> createMockManagedBuffer(),
       blockId2 -> createMockManagedBuffer(),
-      blockId3 -> createMockManagedBuffer()
+      blockId3 -> createMockManagedBuffer(),
+      blockId4 -> createMockManagedBuffer(),
+      ShuffleBlockBatchId(0, 0, 0, 1) -> createMockManagedBuffer(),
+      ShuffleBlockBatchId(0, 1, 0, 1) -> createMockManagedBuffer(),
+      blockBatchId -> createMockManagedBuffer(),
+    ).filterKeys( b =>
+      if (enableBatchFetch) {
+        b.isInstanceOf[ShuffleBlockBatchId]
+      } else {
+        b.isInstanceOf[ShuffleBlockId]
+      }
     )
 
     answerFetchBlocks { invocation =>
@@ -2007,18 +2043,19 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite with PrivateMethodT
       }
     }
 
-    when(mapOutputTracker.getMapSizesByExecutorId(0, 0))
+    when(mapOutputTracker.getMapSizesByExecutorId(any(), any(), any(), any(), anyInt()))
         .thenReturn(
           Seq((remoteBmId2, toBlockList(
-            Seq(blockId1), 1L, 1)),
+            Seq(blockId1, blockId2), 1L, 1)),
             (remoteBmId3, toBlockList(
-              Seq(blockId2, blockId3), 1L, 1))
+              Seq(blockId3, blockId4), 1L, 1))
           ).iterator
         )
 
     val iterator = createShuffleBlockIteratorWithDefaults(
       Map(remoteBmId1 -> toBlockList(blocks.keys, 1L, 1)),
-      fetchMigratedBlocks = true
+      fetchMigratedBlocks = true,
+      doBatchFetch = enableBatchFetch
     )
 
     verifyMigratedBlocksFetch(iterator, blocks, fetchBlocksTimes = fetchBlockTimes)
@@ -2050,7 +2087,7 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite with PrivateMethodT
     }
 
     verify(mapOutputTracker, times(fetchMapOutputTimes))
-        .getMapSizesByExecutorId(any(), any())
+        .getMapSizesByExecutorId(any(), any(), any(), any(), any())
     verify(mapOutputTracker, times(fetchMapOutputTimes))
         .getEpoch()
     verify(transfer, times(fetchBlocksTimes))
