@@ -943,7 +943,6 @@ private[deploy] class Master(
           // statues located at this host when it receives the executor lost event.
           Some(worker.host)))
         exec.state = ExecutorState.DECOMMISSIONED
-        exec.application.removeExecutor(exec)
       }
       // On recovery do not add a decommissioned executor
       persistenceEngine.removeWorker(worker)
