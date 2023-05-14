@@ -17,6 +17,9 @@
 
 package org.apache.spark.network.server;
 
+import com.codahale.metrics.Metric;
+import com.codahale.metrics.Snapshot;
+import com.codahale.metrics.Timer;
 import java.net.SocketAddress;
 
 import com.google.common.base.Throwables;
@@ -25,6 +28,11 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import org.apache.commons.lang3.ThreadUtils;
+import org.apache.spark.network.util.TimerWithCustomTimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -57,6 +65,15 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
   private final long maxChunksBeingTransferred;
   private final boolean syncModeEnabled;
 
+  private final Timer fetchLatency = new TimerWithCustomTimeUnit(TimeUnit.SECONDS);
+
+  private final ScheduledExecutorService scheduledExecutorService = Executors.newSingleThreadScheduledExecutor(
+      r -> {
+        Thread t = new Thread(r);
+        t.setDaemon(true);
+        return t;
+      });
+
   public ChunkFetchRequestHandler(
       TransportClient client,
       StreamManager streamManager,
@@ -66,6 +83,13 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
     this.streamManager = streamManager;
     this.maxChunksBeingTransferred = maxChunksBeingTransferred;
     this.syncModeEnabled = syncModeEnabled;
+    scheduledExecutorService.scheduleAtFixedRate(this::logFetchLatency, 0, 1, TimeUnit.MINUTES);
+  }
+
+  private void logFetchLatency() {
+    Snapshot snapshot = fetchLatency.getSnapshot();
+    logger.info("fetch latency is min: {}, mean {}, max {}", snapshot.getMin(), snapshot.getMean(),
+        snapshot.getMax());
   }
 
   @Override
@@ -88,6 +112,7 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
       logger.trace("Received req from {} to fetch block {}", getRemoteAddress(channel),
         msg.streamChunkId);
     }
+    final Timer.Context fetchLatencyContext = fetchLatency.time();
     if (maxChunksBeingTransferred < Long.MAX_VALUE) {
       long chunksBeingTransferred = streamManager.chunksBeingTransferred();
       if (chunksBeingTransferred >= maxChunksBeingTransferred) {
@@ -114,7 +139,10 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
 
     streamManager.chunkBeingSent(msg.streamChunkId.streamId);
     respond(channel, new ChunkFetchSuccess(msg.streamChunkId, buf)).addListener(
-      (ChannelFutureListener) future -> streamManager.chunkSent(msg.streamChunkId.streamId));
+      (ChannelFutureListener) future -> {
+        streamManager.chunkSent(msg.streamChunkId.streamId);
+        fetchLatencyContext.stop();
+      });
   }
 
   /**
