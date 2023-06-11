@@ -1028,7 +1028,7 @@ class MasterSuite extends SparkFunSuite
     // Recommissioning is actually async ... wait for the workers to actually be recommissioned by
     // polling the master's state.
     eventually(timeout(10.seconds)) {
-      val recomWorkersCount = master.self.askSync[Integer](RecommissionWorkersOnHosts(hostnames))
+      val recomWorkersCount = master.self.askSync[Integer](RecommissionWorkersOnHosts(Seq.empty))
       assert(recomWorkersCount === numWorkersExpectedToDecom)
 
       val masterState = master.self.askSync[MasterStateResponse](RequestMasterState)

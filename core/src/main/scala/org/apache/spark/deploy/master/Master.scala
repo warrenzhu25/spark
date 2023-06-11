@@ -964,7 +964,8 @@ private[deploy] class Master(
   private def recommissionWorkersOnHosts(hostnames: Seq[String]): Integer = {
     val hostnamesSet = hostnames.map(_.toLowerCase(Locale.ROOT)).toSet
     val workersToRecomm = addressToWorker
-      .filterKeys(addr => hostnamesSet.contains(addr.host.toLowerCase(Locale.ROOT)))
+      .filterKeys(addr => hostnamesSet.isEmpty ||
+        hostnamesSet.contains(addr.host.toLowerCase(Locale.ROOT)))
       .values
       .filter(_.state == WorkerState.DECOMMISSIONED)
 
