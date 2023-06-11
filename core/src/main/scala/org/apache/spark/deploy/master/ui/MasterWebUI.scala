@@ -64,6 +64,9 @@ class MasterWebUI(
           .map(s => Duration(s"$s second"))
         if (!isDecommissioningRequestAllowed(req)) {
           resp.sendError(HttpServletResponse.SC_METHOD_NOT_ALLOWED)
+        } else if (hostnames.isEmpty && !idleOnly) {
+          logWarning("Decommission all workers with idleOnly is false is not allowed")
+          resp.sendError(HttpServletResponse.SC_METHOD_NOT_ALLOWED)
         } else {
           val removedWorkers = masterEndpointRef.askSync[Integer](
             DecommissionWorkersOnHosts(hostnames, idleOnly, recommissionTimeout))

@@ -21,6 +21,7 @@ import java.io.DataOutputStream
 import java.net.{HttpURLConnection, URL}
 import java.nio.charset.StandardCharsets
 import java.util.Date
+import javax.servlet.http.HttpServletResponse
 
 import scala.collection.mutable.HashMap
 import scala.concurrent.duration.Duration
@@ -89,7 +90,7 @@ class MasterWebUISuite extends SparkFunSuite {
   }
 
   private def testKillWorkers(hostnames: Seq[String], idleOnly: Option[Boolean] = None,
-    recommissionTimeout: Option[Duration] = None): Unit = {
+    recommissionTimeout: Option[Duration] = None, expectedCode: Option[Int] = None): Unit = {
     val url = s"http://${Utils.localHostNameForURI()}:${masterWebUI.boundPort}/workers/kill/"
     val params = hostnames.map(("host", _)).toArray.toBuffer
     idleOnly.foreach(i => params += (("idleOnly", i.toString)))
@@ -97,10 +98,13 @@ class MasterWebUISuite extends SparkFunSuite {
     val body = convPostDataToString(params)
     val conn = sendHttpRequest(url, "POST", body)
     // The master is mocked here, so cannot assert on the response code
-    conn.getResponseCode
-    // Verify that master was asked to kill driver with the correct id
-    verify(masterEndpointRef).askSync[Integer](
-      DecommissionWorkersOnHosts(hostnames, idleOnly.getOrElse(false), recommissionTimeout))
+    val code = conn.getResponseCode
+    expectedCode.map(e => assert(code == e))
+    // Verify that master was asked to kill workers
+    if (code != HttpServletResponse.SC_METHOD_NOT_ALLOWED) {
+      verify(masterEndpointRef).askSync[Integer](
+        DecommissionWorkersOnHosts(hostnames, idleOnly.getOrElse(false), recommissionTimeout))
+    }
   }
 
   test("Kill one host") {
@@ -113,6 +117,14 @@ class MasterWebUISuite extends SparkFunSuite {
 
   test("Kill multiple hosts with idleOnly") {
     testKillWorkers(Seq("noSuchHost", "LocalHost"), idleOnly = Some(true))
+  }
+
+  test("Kill all hosts with idleOnly is true") {
+    testKillWorkers(Seq.empty, idleOnly = Some(true))
+  }
+
+  test("Kill all hosts is not allowed") {
+    testKillWorkers(Seq.empty, expectedCode = Some(HttpServletResponse.SC_METHOD_NOT_ALLOWED))
   }
 
   test("Kill multiple hosts with recommissionTimeout") {
