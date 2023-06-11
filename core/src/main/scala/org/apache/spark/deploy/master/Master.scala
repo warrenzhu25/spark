@@ -941,7 +941,8 @@ private[deploy] class Master(
   ): Integer = {
     val hostnamesSet = hostnames.map(_.toLowerCase(Locale.ROOT)).toSet
     val workersToRemove = addressToWorker
-      .filterKeys(addr => hostnamesSet.contains(addr.host.toLowerCase(Locale.ROOT)))
+      .filterKeys(addr => hostnamesSet.isEmpty ||
+        hostnamesSet.contains(addr.host.toLowerCase(Locale.ROOT)))
       .values
       .filterNot(idleOnly && !_.isIdle)
 

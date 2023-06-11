@@ -950,7 +950,7 @@ class MasterSuite extends SparkFunSuite
   def testWorkerDecommissioning(
     numWorkers: Int,
     numWorkersExpectedToDecom: Int,
-    hostnames: Seq[String],
+    hostnames: Seq[String] = Seq.empty,
     idleOnly: Boolean = false,
     recommissionTimeout: Option[Duration] = None): Unit = {
     val conf = new SparkConf()
@@ -1028,7 +1028,7 @@ class MasterSuite extends SparkFunSuite
     // Recommissioning is actually async ... wait for the workers to actually be recommissioned by
     // polling the master's state.
     eventually(timeout(10.seconds)) {
-      val recomWorkersCount = master.self.askSync[Integer](RecommissionWorkersOnHosts(Seq.empty))
+      val recomWorkersCount = master.self.askSync[Integer](RecommissionWorkersOnHosts(hostnames))
       assert(recomWorkersCount === numWorkersExpectedToDecom)
 
       val masterState = master.self.askSync[MasterStateResponse](RequestMasterState)
@@ -1065,6 +1065,10 @@ class MasterSuite extends SparkFunSuite
   test("Decommission idle workers with recommission timeout should be recommissioned " +
     "after timeout") {
     testWorkerDecommissioning(2, 1, Seq("LoCalHost", "localHOST"), true, Some(5 seconds))
+  }
+
+  test("Decommission workers with empty hostnames and idleOnly is true") {
+    testWorkerDecommissioning(2, 1, idleOnly = true)
   }
 
   test("Driver should be relaunched after recommissioning worker") {
