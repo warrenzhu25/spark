@@ -21,6 +21,7 @@ import java.io.DataOutputStream
 import java.net.{HttpURLConnection, URL}
 import java.nio.charset.StandardCharsets
 import java.util.Date
+import javax.servlet.http.HttpServletResponse
 
 import scala.collection.mutable.HashMap
 
@@ -28,7 +29,7 @@ import org.mockito.Mockito.{mock, times, verify, when}
 import org.scalatest.BeforeAndAfterAll
 
 import org.apache.spark.{SecurityManager, SparkConf, SparkFunSuite}
-import org.apache.spark.deploy.DeployMessages.{DecommissionWorkersOnHosts, KillDriverResponse, RequestKillDriver}
+import org.apache.spark.deploy.DeployMessages.{DecommissionWorkersOnHosts, KillDriverResponse, RecommissionWorkersOnHosts, RequestKillDriver}
 import org.apache.spark.deploy.DeployTestUtils._
 import org.apache.spark.deploy.master._
 import org.apache.spark.internal.config.DECOMMISSION_ENABLED
@@ -89,17 +90,26 @@ class MasterWebUISuite extends SparkFunSuite with BeforeAndAfterAll {
     verify(masterEndpointRef, times(1)).ask[KillDriverResponse](RequestKillDriver(activeDriverId))
   }
 
-  private def testKillWorkers(hostnames: Seq[String], idleOnly: Option[Boolean] = None): Unit = {
+  private def testKillWorkers(hostnames: Seq[String],
+    idleOnly: Option[Boolean] = None,
+    expectedCode: Option[Int] = Some(200),
+    numNodesDecommissioned: Int = 1): Unit = {
+    when(masterEndpointRef.askSync[Integer](
+      DecommissionWorkersOnHosts(hostnames, idleOnly.getOrElse(false))))
+      .thenReturn(numNodesDecommissioned)
     val url = s"http://${Utils.localHostNameForURI()}:${masterWebUI.boundPort}/workers/kill/"
     val params = hostnames.map(("host", _)).toArray.toBuffer
     idleOnly.foreach(i => params += (("idleOnly", i.toString)))
     val body = convPostDataToString(params.toSeq)
     val conn = sendHttpRequest(url, "POST", body)
     // The master is mocked here, so cannot assert on the response code
-    conn.getResponseCode
-    // Verify that master was asked to kill driver with the correct id
-    verify(masterEndpointRef).askSync[Integer](
-      DecommissionWorkersOnHosts(hostnames, idleOnly.getOrElse(false)))
+    val code = conn.getResponseCode
+    expectedCode.map(e => assert(code == e))
+    // Verify that master was asked to kill workers
+    if (code != HttpServletResponse.SC_METHOD_NOT_ALLOWED) {
+      verify(masterEndpointRef).askSync[Integer](
+        DecommissionWorkersOnHosts(hostnames, idleOnly.getOrElse(false)))
+    }
   }
 
   test("Kill one host") {
@@ -112,6 +122,28 @@ class MasterWebUISuite extends SparkFunSuite with BeforeAndAfterAll {
 
   test("Kill multiple hosts with idleOnly") {
     testKillWorkers(Seq("noSuchHost", "LocalHost"), idleOnly = Some(true))
+  }
+
+  test("Kill all hosts with idleOnly is true") {
+    testKillWorkers(Seq.empty, idleOnly = Some(true))
+  }
+
+  test("Kill all hosts with idleOnly is true and no hosts decommissioned") {
+    testKillWorkers(Seq("all"), idleOnly = Some(true), numNodesDecommissioned = 0)
+  }
+
+  test("Kill all hosts is not allowed") {
+    testKillWorkers(Seq.empty, expectedCode = Some(HttpServletResponse.SC_METHOD_NOT_ALLOWED))
+  }
+
+  test("Recommission workers") {
+    val url = s"http://${Utils.localHostNameForURI()}:${masterWebUI.boundPort}" +
+      s"/workers/recommission/"
+    val conn = sendHttpRequest(url, "POST")
+    // The master is mocked here, so cannot assert on the response code
+    conn.getResponseCode
+    // Verify that master was asked to recommission workers
+    verify(masterEndpointRef).askSync[Integer](RecommissionWorkersOnHosts(Seq.empty))
   }
 
   private def convPostDataToString(data: Seq[(String, String)]): String = {

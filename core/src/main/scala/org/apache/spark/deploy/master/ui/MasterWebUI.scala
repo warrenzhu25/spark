@@ -20,12 +20,11 @@ package org.apache.spark.deploy.master.ui
 import java.net.{InetAddress, NetworkInterface, SocketException}
 import javax.servlet.http.{HttpServlet, HttpServletRequest, HttpServletResponse}
 
-import org.apache.spark.deploy.DeployMessages.{DecommissionWorkersOnHosts, MasterStateResponse, RequestMasterState}
+import org.apache.spark.deploy.DeployMessages.{DecommissionWorkersOnHosts, MasterStateResponse, RecommissionWorkersOnHosts, RequestMasterState}
 import org.apache.spark.deploy.master.Master
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.DECOMMISSION_ENABLED
-import org.apache.spark.internal.config.UI.MASTER_UI_DECOMMISSION_ALLOW_MODE
-import org.apache.spark.internal.config.UI.UI_KILL_ENABLED
+import org.apache.spark.internal.config.UI.{MASTER_UI_DECOMMISSION_ALLOW_MODE, UI_KILL_ENABLED}
 import org.apache.spark.ui.{SparkUI, WebUI}
 import org.apache.spark.ui.JettyUtils._
 
@@ -63,18 +62,34 @@ class MasterWebUI(
         val idleOnly: Boolean = Option(req.getParameter("idleOnly")).exists(_.toBoolean)
         if (decommissionDisabled || !isDecommissioningRequestAllowed(req)) {
           resp.sendError(HttpServletResponse.SC_METHOD_NOT_ALLOWED)
+        } else if (hostnames.isEmpty && !idleOnly) {
+          logWarning("Decommission all workers with idleOnly is false is not allowed")
+          resp.sendError(HttpServletResponse.SC_METHOD_NOT_ALLOWED)
         } else {
           val removedWorkers = masterEndpointRef.askSync[Integer](
             DecommissionWorkersOnHosts(hostnames, idleOnly))
           logInfo(s"Decommissioning of hosts $hostnames decommissioned $removedWorkers workers")
-          if (removedWorkers > 0) {
+          if (removedWorkers >= 0) {
             resp.setStatus(HttpServletResponse.SC_OK)
-          } else if (removedWorkers == 0) {
-            resp.sendError(HttpServletResponse.SC_NOT_FOUND)
           } else {
             // We shouldn't even see this case.
             resp.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR)
           }
+        }
+      }
+    }, ""))
+    attachHandler(createServletHandler("/workers/recommission", new HttpServlet {
+      override def doPost(req: HttpServletRequest, resp: HttpServletResponse): Unit = {
+        val hostnames: Seq[String] = Option(req.getParameterValues("host"))
+          .getOrElse(Array[String]()).toSeq
+        val recommedWorkers = masterEndpointRef.askSync[Integer](
+          RecommissionWorkersOnHosts(hostnames))
+        logInfo(s"Recommissioning of hosts $hostnames recommissioned $recommedWorkers workers")
+        if (recommedWorkers >= 0) {
+          resp.setStatus(HttpServletResponse.SC_OK)
+        } else {
+          // We shouldn't even see this case.
+          resp.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR)
         }
       }
     }, ""))
