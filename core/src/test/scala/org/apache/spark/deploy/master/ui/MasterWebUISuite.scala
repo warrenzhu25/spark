@@ -28,7 +28,7 @@ import scala.concurrent.duration.Duration
 import org.mockito.Mockito.{mock, times, verify, when}
 
 import org.apache.spark.{SecurityManager, SparkConf, SparkFunSuite}
-import org.apache.spark.deploy.DeployMessages.{DecommissionWorkersOnHosts, KillDriverResponse, RequestKillDriver}
+import org.apache.spark.deploy.DeployMessages.{DecommissionWorkersOnHosts, KillDriverResponse, RecommissionWorkersOnHosts, RequestKillDriver}
 import org.apache.spark.deploy.DeployTestUtils._
 import org.apache.spark.deploy.master._
 import org.apache.spark.rpc.{RpcEndpointRef, RpcEnv}
@@ -123,6 +123,16 @@ class MasterWebUISuite extends SparkFunSuite {
   test("Kill multiple hosts with idleOnly and recommissionTimeout") {
     testKillWorkers(Seq("noSuchHost", "LocalHost"), idleOnly = Some(true),
       recommissionTimeout = Some(Duration("5 second")))
+  }
+
+  test("Recommission workers") {
+    val url = s"http://${Utils.localHostNameForURI()}:${masterWebUI.boundPort}" +
+      s"/workers/recommission/"
+    val conn = sendHttpRequest(url, "POST")
+    // The master is mocked here, so cannot assert on the response code
+    conn.getResponseCode
+    // Verify that master was asked to recommission workers
+    verify(masterEndpointRef).askSync[Integer](RecommissionWorkersOnHosts(Seq.empty))
   }
 
   private def convPostDataToString(data: Seq[(String, String)]): String = {
