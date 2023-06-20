@@ -1780,6 +1780,22 @@ class ExecutorAllocationManagerSuite extends SparkFunSuite {
     assert(numExecutorsTargetForDefaultProfileId(manager) === 1)
   }
 
+  test("SPARK-44084: pending tasks should not include finished ones") {
+    val manager = createManager(createConf())
+    assert(maxNumExecutorsNeededPerResourceProfile(manager, defaultProfile) === 0)
+
+    post(SparkListenerStageSubmitted(createStageInfo(0, 1)))
+    assert(maxNumExecutorsNeededPerResourceProfile(manager, defaultProfile) === 1)
+
+    val taskInfo = createTaskInfo(1, 1, "executor-1")
+    post(SparkListenerTaskStart(0, 0, taskInfo))
+    assert(maxNumExecutorsNeededPerResourceProfile(manager, defaultProfile) === 1)
+
+    // If the task is finished, we expect max needed to be 0.
+    post(SparkListenerTaskEnd(0, 0, null, Success, taskInfo, new ExecutorMetrics, null))
+    assert(maxNumExecutorsNeededPerResourceProfile(manager, defaultProfile) === 0)
+  }
+
   private def createConf(
       minExecutors: Int = 1,
       maxExecutors: Int = 5,

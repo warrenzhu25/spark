@@ -644,6 +644,8 @@ private[spark] class ExecutorAllocationManager(
     // Should be 0 when no stages are active.
     private val stageAttemptToNumRunningTask = new mutable.HashMap[StageAttempt, Int]
     private val stageAttemptToTaskIndices = new mutable.HashMap[StageAttempt, mutable.HashSet[Int]]
+    private val stageAttemptToFinishedTaskIndices =
+      new mutable.HashMap[StageAttempt, mutable.HashSet[Int]]
     // Map from each stageAttempt to a set of running speculative task indexes
     // TODO(SPARK-41192): We simply need an Int for this.
     private val stageAttemptToSpeculativeTaskIndices =
@@ -790,6 +792,7 @@ private[spark] class ExecutorAllocationManager(
             // Remove pending speculative task in case the normal task
             // is finished before starting the speculative task
             stageAttemptToPendingSpeculativeTasks.get(stageAttempt).foreach(_.remove(taskIndex))
+            stageAttemptToFinishedTaskIndices.get(stageAttempt).foreach(_.add(taskIndex))
           case _: TaskKilled =>
           case _ =>
             if (!hasPendingTasks) {
@@ -887,7 +890,8 @@ private[spark] class ExecutorAllocationManager(
     private def getPendingTaskSum(attempt: StageAttempt): Int = {
       val numTotalTasks = stageAttemptToNumTasks.getOrElse(attempt, 0)
       val numRunning = stageAttemptToTaskIndices.get(attempt).map(_.size).getOrElse(0)
-      numTotalTasks - numRunning
+      val numFinished = stageAttemptToFinishedTaskIndices.get(attempt).map(_.size).getOrElse(0)
+      numTotalTasks - numRunning - numFinished
     }
 
     def pendingSpeculativeTasksPerResourceProfile(rp: Int): Int = {
