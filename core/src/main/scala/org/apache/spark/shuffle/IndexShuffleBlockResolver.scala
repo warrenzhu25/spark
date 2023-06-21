@@ -25,13 +25,16 @@ import java.nio.file.Files
 import scala.collection.mutable.ArrayBuffer
 
 import org.apache.spark.{SparkConf, SparkEnv, SparkException}
+
 import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.io.NioBufferedFileInputStream
 import org.apache.spark.network.buffer.{FileSegmentManagedBuffer, ManagedBuffer}
 import org.apache.spark.network.client.StreamCallbackWithID
 import org.apache.spark.network.netty.SparkTransportConf
+import org.apache.spark.network.server.BlockPushNonFatalFailure.ReturnCode
 import org.apache.spark.network.shuffle.{ExecutorDiskUtils, MergedBlockMeta}
 import org.apache.spark.network.shuffle.checksum.ShuffleChecksumHelper
+import org.apache.spark.network.shuffle.protocol.BlockPushReturnCode
 import org.apache.spark.serializer.SerializerManager
 import org.apache.spark.shuffle.IndexShuffleBlockResolver.NOOP_REDUCE_ID
 import org.apache.spark.storage._
@@ -61,7 +64,8 @@ private[spark] class IndexShuffleBlockResolver(
 
   private val remoteShuffleMaxDisk: Option[Long] =
     conf.get(config.STORAGE_DECOMMISSION_SHUFFLE_MAX_DISK_SIZE)
-
+  // ByteBuffer to respond to client upon a successful merge of a pushed block
+  private val SUCCESS_RESPONSE = new BlockPushReturnCode(ReturnCode.SUCCESS.id, "").toByteBuffer.asReadOnlyBuffer
   def getDataFile(shuffleId: Int, mapId: Long): File = getDataFile(shuffleId, mapId, None)
 
   /**
@@ -275,6 +279,8 @@ private[spark] class IndexShuffleBlockResolver(
         channel.close()
         fileTmp.delete()
       }
+
+      override def getCompletionResponse: ByteBuffer = SUCCESS_RESPONSE.duplicate()
     }
   }
 

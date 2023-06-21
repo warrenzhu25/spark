@@ -27,17 +27,19 @@ import scala.reflect.ClassTag
 import scala.util.{Success, Try}
 
 import com.codahale.metrics.{Metric, MetricSet}
-
+import com.google.common.base.Preconditions
 import org.apache.spark.{SecurityManager, SparkConf}
 import org.apache.spark.ExecutorDeadException
+
 import org.apache.spark.internal.config
 import org.apache.spark.network._
 import org.apache.spark.network.buffer.{ManagedBuffer, NioManagedBuffer}
 import org.apache.spark.network.client.{RpcResponseCallback, TransportClientBootstrap}
 import org.apache.spark.network.crypto.{AuthClientBootstrap, AuthServerBootstrap}
 import org.apache.spark.network.server._
+import org.apache.spark.network.server.BlockPushNonFatalFailure.ReturnCode
 import org.apache.spark.network.shuffle.{BlockFetchingListener, BlockTransferListener, DownloadFileManager, OneForOneBlockFetcher, RetryingBlockTransferor}
-import org.apache.spark.network.shuffle.protocol.{UploadBlock, UploadBlockStream}
+import org.apache.spark.network.shuffle.protocol.{BlockPushReturnCode, BlockTransferMessage, UploadBlock, UploadBlockStream}
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.rpc.RpcEndpointRef
 import org.apache.spark.serializer.SerializerManager
@@ -182,10 +184,31 @@ private[spark] class NettyBlockTransferService(
       blockId.isShuffle)
     val callback = new RpcResponseCallback {
       override def onSuccess(response: ByteBuffer): Unit = {
-        if (logger.isTraceEnabled) {
-          logger.trace(s"Successfully uploaded block $blockId${if (asStream) " as stream" else ""}")
+        if (!asStream) {
+          if (logger.isTraceEnabled) {
+            logger.trace(s"Successfully uploaded block" +
+              s" $blockId${if (asStream) " as stream" else ""}")
+          }
+          result.success((): Unit)
+        } else {
+          val pushResponse = BlockTransferMessage.Decoder.fromByteBuffer(response)
+            .asInstanceOf[BlockPushReturnCode]
+          // If the return code is not SUCCESS, the server has responded some error code.
+          // Handle the error accordingly.
+          val returnCode = BlockPushNonFatalFailure.getReturnCode(pushResponse.returnCode)
+
+          if (returnCode ne ReturnCode.SUCCESS) {
+            val blockId = pushResponse.failureBlockId
+            Preconditions.checkArgument(blockId.nonEmpty)
+            result.failure(
+              new BlockPushNonFatalFailure(
+                returnCode, BlockPushNonFatalFailure.getErrorMsg(blockId, returnCode)))
+          }
+          else {
+            // On receipt of a successful block upload
+            result.success((): Unit)
+          }
         }
-        result.success((): Unit)
       }
 
       override def onFailure(e: Throwable): Unit = {

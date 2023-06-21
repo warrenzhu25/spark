@@ -65,6 +65,9 @@ public class BlockPushNonFatalFailure extends RuntimeException {
   public static final String BLOCK_APPEND_COLLISION_MSG_SUFFIX =
     " experienced merge collision on the server side";
 
+  public static final String UPLOAD_BLOCK_ON_DECOMMISSIONED_EXECUTOR_MSG =
+      " upload on decommissioned executor";
+
   /**
    * The error code of the failure, encoded as a ByteBuffer to be responded back to the client.
    * Instead of responding a RPCFailure with the exception stack trace as the payload,
@@ -137,7 +140,9 @@ public class BlockPushNonFatalFailure extends RuntimeException {
      * Indicate the application attempt is not the latest attempt on the server side.
      * When the client gets this code, it will not retry pushing the block.
      */
-    TOO_OLD_ATTEMPT_PUSH(4, TOO_OLD_ATTEMPT_SUFFIX);
+    TOO_OLD_ATTEMPT_PUSH(4, TOO_OLD_ATTEMPT_SUFFIX),
+
+    UPLOAD_ON_DECOMMISSIONED_EXECUTOR(5, UPLOAD_BLOCK_ON_DECOMMISSIONED_EXECUTOR_MSG);
 
     private final byte id;
     // Error message suffix used to generate an error message for a given ReturnCode and
@@ -160,6 +165,7 @@ public class BlockPushNonFatalFailure extends RuntimeException {
       case 2: return ReturnCode.BLOCK_APPEND_COLLISION_DETECTED;
       case 3: return ReturnCode.STALE_BLOCK_PUSH;
       case 4: return ReturnCode.TOO_OLD_ATTEMPT_PUSH;
+      case 5: return ReturnCode.UPLOAD_ON_DECOMMISSIONED_EXECUTOR;
       default: throw new IllegalArgumentException("Unknown block push return code: " + id);
     }
   }

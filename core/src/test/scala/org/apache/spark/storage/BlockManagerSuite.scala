@@ -39,8 +39,8 @@ import org.scalatest.concurrent.{Signaler, ThreadSignaler, TimeLimits}
 import org.scalatest.concurrent.Eventually._
 import org.scalatest.matchers.must.Matchers
 import org.scalatest.matchers.should.Matchers._
-
 import org.apache.spark._
+
 import org.apache.spark.broadcast.BroadcastManager
 import org.apache.spark.executor.DataReadMethod
 import org.apache.spark.internal.config
@@ -52,7 +52,7 @@ import org.apache.spark.network.{BlockDataManager, BlockTransferService, Transpo
 import org.apache.spark.network.buffer.{FileSegmentManagedBuffer, ManagedBuffer, NioManagedBuffer}
 import org.apache.spark.network.client.{RpcResponseCallback, TransportClient}
 import org.apache.spark.network.netty.{NettyBlockTransferService, SparkTransportConf}
-import org.apache.spark.network.server.{NoOpRpcHandler, TransportServer, TransportServerBootstrap}
+import org.apache.spark.network.server.{BlockPushNonFatalFailure, NoOpRpcHandler, TransportServer, TransportServerBootstrap}
 import org.apache.spark.network.shuffle.{BlockFetchingListener, DownloadFileManager, ExecutorDiskUtils, ExternalBlockStoreClient}
 import org.apache.spark.network.shuffle.protocol.{BlockTransferMessage, RegisterExecutor}
 import org.apache.spark.network.util.{MapConfigProvider, TransportConf}
@@ -1329,6 +1329,31 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with PrivateMethodTe
     failAfter(1.second) {
       assert(store.getSingleAndReleaseLock("a1").isEmpty, "a1 should not be in store")
     }
+  }
+
+  test("Decommissioned block manager should return error" +
+    " when put shuffle block") {
+    init(conf)
+    val ioEncryptionKey =
+      if (conf.get(IO_ENCRYPTION_ENABLED)) Some(CryptoStreamUtils.createKey(conf)) else None
+    val securityMgr = new SecurityManager(conf, ioEncryptionKey)
+    val serializerManager = new SerializerManager(serializer, conf, ioEncryptionKey)
+    val transfer = new NettyBlockTransferService(
+      conf, securityMgr, serializerManager, "localhost", "localhost", 0, 1)
+    val memoryManager = UnifiedMemoryManager(conf, numCores = 1)
+    val blockManager = new BlockManager(SparkContext.DRIVER_IDENTIFIER, rpcEnv, master,
+      serializerManager, conf, memoryManager, mapOutputTracker,
+      shuffleManager, transfer, securityMgr, None)
+    blockManager.decommissionSelf()
+    val message = "message"
+    val ser = serializer.newInstance().serialize(message).array()
+    val blockId = ShuffleBlockId(0, 0, 0)
+    val thrown = intercept[BlockPushNonFatalFailure] {
+      blockManager.putBlockDataAsStream(blockId,
+        StorageLevel.MEMORY_ONLY, ClassTag(message.getClass))
+    }
+    assert(thrown.getReturnCode ==
+      BlockPushNonFatalFailure.ReturnCode.UPLOAD_ON_DECOMMISSIONED_EXECUTOR)
   }
 
   def testPutBlockDataAsStream(blockManager: BlockManager, storageLevel: StorageLevel): Unit = {

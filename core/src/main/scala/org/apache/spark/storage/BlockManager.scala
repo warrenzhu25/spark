@@ -18,7 +18,7 @@
 package org.apache.spark.storage
 
 import java.io._
-import java.lang.ref.{ReferenceQueue => JReferenceQueue, WeakReference}
+import java.lang.ref.{WeakReference, ReferenceQueue => JReferenceQueue}
 import java.nio.ByteBuffer
 import java.nio.channels.Channels
 import java.util.Collections
@@ -37,8 +37,8 @@ import com.codahale.metrics.{MetricRegistry, MetricSet}
 import com.esotericsoftware.kryo.KryoException
 import com.google.common.cache.CacheBuilder
 import org.apache.commons.io.IOUtils
-
 import org.apache.spark._
+
 import org.apache.spark.errors.SparkCoreErrors
 import org.apache.spark.executor.DataReadMethod
 import org.apache.spark.internal.Logging
@@ -50,9 +50,10 @@ import org.apache.spark.network._
 import org.apache.spark.network.buffer.{FileSegmentManagedBuffer, ManagedBuffer}
 import org.apache.spark.network.client.StreamCallbackWithID
 import org.apache.spark.network.netty.SparkTransportConf
+import org.apache.spark.network.server.BlockPushNonFatalFailure.ReturnCode
 import org.apache.spark.network.shuffle._
 import org.apache.spark.network.shuffle.checksum.{Cause, ShuffleChecksumHelper}
-import org.apache.spark.network.shuffle.protocol.ExecutorShuffleInfo
+import org.apache.spark.network.shuffle.protocol.{BlockPushReturnCode, ExecutorShuffleInfo}
 import org.apache.spark.network.util.TransportConf
 import org.apache.spark.rpc.RpcEnv
 import org.apache.spark.scheduler.ExecutorCacheTaskLocation
@@ -265,7 +266,8 @@ private[spark] class BlockManager(
       this,
       securityManager.getIOEncryptionKey())
   private val maxRemoteBlockToMem = conf.get(config.MAX_REMOTE_BLOCK_SIZE_FETCH_TO_MEM)
-
+  // ByteBuffer to respond to client upon a successful merge of a pushed block
+  private val SUCCESS_RESPONSE = new BlockPushReturnCode(ReturnCode.SUCCESS.id, "").toByteBuffer.asReadOnlyBuffer
   var hostLocalDirManager: Option[HostLocalDirManager] = None
 
   @inline final private def isDecommissioning() = {
@@ -783,6 +785,8 @@ private[spark] class BlockManager(
         channel.close()
         tmpFile.delete()
       }
+
+      override def getCompletionResponse: ByteBuffer = SUCCESS_RESPONSE.duplicate()
     }
   }
 

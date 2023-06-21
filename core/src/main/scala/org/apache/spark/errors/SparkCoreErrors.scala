@@ -26,9 +26,11 @@ import org.apache.hadoop.fs.Path
 
 import org.apache.spark.{SparkException, SparkRuntimeException, SparkUnsupportedOperationException, TaskNotSerializableException}
 import org.apache.spark.memory.SparkOutOfMemoryError
+import org.apache.spark.network.server.BlockPushNonFatalFailure
+import org.apache.spark.network.server.BlockPushNonFatalFailure.ReturnCode
 import org.apache.spark.scheduler.{BarrierJobRunWithDynamicAllocationException, BarrierJobSlotsNumberCheckFailed, BarrierJobUnsupportedRDDChainException}
 import org.apache.spark.shuffle.{FetchFailedException, ShuffleManager}
-import org.apache.spark.storage.{BlockId, BlockManagerId, BlockNotFoundException, BlockSavedOnDecommissionedBlockManagerException, RDDBlockId, UnrecognizedBlockId}
+import org.apache.spark.storage.{BlockId, BlockManagerId, BlockNotFoundException, RDDBlockId, UnrecognizedBlockId}
 
 /**
  * Object for grouping error messages from (most) exceptions thrown during query execution.
@@ -320,7 +322,9 @@ private[spark] object SparkCoreErrors {
   }
 
   def cannotSaveBlockOnDecommissionedExecutorError(blockId: BlockId): Throwable = {
-    new BlockSavedOnDecommissionedBlockManagerException(blockId)
+    new BlockPushNonFatalFailure(ReturnCode.UPLOAD_ON_DECOMMISSIONED_EXECUTOR,
+      BlockPushNonFatalFailure.getErrorMsg(blockId.toString,
+        ReturnCode.UPLOAD_ON_DECOMMISSIONED_EXECUTOR))
   }
 
   def waitingForReplicationToFinishError(e: Throwable): Throwable = {

@@ -18,6 +18,7 @@
 package org.apache.spark.network.netty
 
 import java.io.IOException
+import java.nio.ByteBuffer
 
 import scala.concurrent.{ExecutionContext, Future}
 import scala.reflect.ClassTag
@@ -28,13 +29,17 @@ import org.mockito.Mockito.{mock, when}
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.matchers.must.Matchers
 import org.scalatest.matchers.should.Matchers._
+import org.apache.spark.{ExecutorDeadException, SecurityManager, SparkConf, SparkException, SparkFunSuite}
 
-import org.apache.spark.{ExecutorDeadException, SecurityManager, SparkConf, SparkFunSuite}
 import org.apache.spark.network.BlockDataManager
+import org.apache.spark.network.buffer.NioManagedBuffer
 import org.apache.spark.network.client.{TransportClient, TransportClientFactory}
+import org.apache.spark.network.server.BlockPushNonFatalFailure
+import org.apache.spark.network.server.BlockPushNonFatalFailure.ReturnCode
 import org.apache.spark.network.shuffle.{BlockFetchingListener, DownloadFileManager}
 import org.apache.spark.rpc.{RpcAddress, RpcEndpointRef, RpcTimeout}
 import org.apache.spark.serializer.{JavaSerializer, SerializerManager}
+import org.apache.spark.storage.{ShuffleBlockId, StorageLevel}
 
 class NettyBlockTransferServiceSuite
   extends SparkFunSuite
@@ -130,6 +135,26 @@ class NettyBlockTransferServiceSuite
     assert(hitExecutorDeadException)
   }
 
+  test("upload blocks from decommissioned executor should return error") {
+    val port = 17634 + Random.nextInt(10000)
+    logInfo("random port for test: " + port)
+    val blockDataManager = mock(classOf[BlockDataManager])
+    service0 = createService(port, blockManager = Some(blockDataManager))
+    val ex = new BlockPushNonFatalFailure(ReturnCode.UPLOAD_ON_DECOMMISSIONED_EXECUTOR,
+      BlockPushNonFatalFailure.getErrorMsg("0",
+        ReturnCode.UPLOAD_ON_DECOMMISSIONED_EXECUTOR))
+    when(blockDataManager.putBlockDataAsStream(any(), any(), any())).thenThrow(ex)
+    val message = "message"
+    val blockId = ShuffleBlockId(0, 0, 0)
+    val buffer = new NioManagedBuffer(ByteBuffer.allocate(0))
+    val thrown = intercept[SparkException]{
+      service0.uploadBlockSync("localhost", port, "exec1", blockId, buffer,
+        StorageLevel.DISK_ONLY, ClassTag(message.getClass))
+    }
+
+    assert(thrown.getCause.isInstanceOf[BlockPushNonFatalFailure])
+  }
+
   private def verifyServicePort(expectedPort: Int, actualPort: Int): Unit = {
     actualPort should be >= expectedPort
     // avoid testing equality in case of simultaneous tests
@@ -140,12 +165,14 @@ class NettyBlockTransferServiceSuite
 
   private def createService(
       port: Int,
-      rpcEndpointRef: RpcEndpointRef = null): NettyBlockTransferService = {
+      rpcEndpointRef: RpcEndpointRef = null,
+      blockManager: Option[BlockDataManager] = None
+  ): NettyBlockTransferService = {
     val conf = new SparkConf()
       .set("spark.app.id", s"test-${getClass.getName}")
     val serializerManager = new SerializerManager(new JavaSerializer(conf), conf)
     val securityManager = new SecurityManager(conf)
-    val blockDataManager = mock(classOf[BlockDataManager])
+    val blockDataManager = blockManager.getOrElse(mock(classOf[BlockDataManager]))
     val service = new NettyBlockTransferService(
       conf, securityManager, serializerManager, "localhost", "localhost", port, 1, rpcEndpointRef)
     service.init(blockDataManager)
