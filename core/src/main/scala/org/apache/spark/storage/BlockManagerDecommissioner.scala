@@ -101,6 +101,7 @@ private[storage] class BlockManagerDecommissioner(
         try {
           val (shuffleBlockInfo, retryCount) = nextShuffleBlockToMigrate()
           val blocks = bm.migratableResolver.getMigrationBlocks(shuffleBlockInfo)
+          var isTargetDecommissioned = false
           // We only migrate a shuffle block when both index file and data file exist.
           if (blocks.isEmpty) {
             logInfo(s"Ignore deleted shuffle block $shuffleBlockInfo")
@@ -143,6 +144,10 @@ private[storage] class BlockManagerDecommissioner(
                     // have been used in the try-block above so there's no point trying again
                     && peer != FallbackStorage.FALLBACK_BLOCK_MANAGER_ID) {
                   fallbackStorage.foreach(_.copy(shuffleBlockInfo, bm))
+                } else if (e.getCause.getMessage
+                  .contains("BlockSavedOnDecommissionedBlockManagerException")) {
+                  isTargetDecommissioned = true
+                  keepRunning = false
                 } else {
                   logError(s"Error occurred during migrating $shuffleBlockInfo", e)
                   keepRunning = false
@@ -156,8 +161,14 @@ private[storage] class BlockManagerDecommissioner(
             numMigratedShuffles.incrementAndGet()
           } else {
             logWarning(s"Stop migrating shuffle blocks to $peer")
+
+            val newRetryCount = if (isTargetDecommissioned) {
+              retryCount
+            } else {
+              retryCount + 1
+            }
             // Do not mark the block as migrated if it still needs retry
-            if (!allowRetry(shuffleBlockInfo, retryCount + 1)) {
+            if (!allowRetry(shuffleBlockInfo, newRetryCount)) {
               numMigratedShuffles.incrementAndGet()
             }
           }
