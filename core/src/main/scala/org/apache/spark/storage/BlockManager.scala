@@ -1773,6 +1773,10 @@ private[spark] class BlockManager(
     }
   }
 
+  private[storage] def getMigrationPeers(
+    fetchBusyId: Option[BlockManagerId] = None): Seq[BlockManagerId] = {
+    master.getMigrationPeers(blockManagerId, fetchBusyId)
+  }
   /**
    * Replicates a block to peer block managers based on existingReplicas and maxReplicas
    *

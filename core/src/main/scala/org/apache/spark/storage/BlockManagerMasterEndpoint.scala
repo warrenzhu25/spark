@@ -75,6 +75,12 @@ class BlockManagerMasterEndpoint(
   // Set of block managers which are decommissioning
   private val decommissioningBlockManagerSet = new mutable.HashSet[BlockManagerId]
 
+  // Set of block managers which are in fetch busy mode
+  private val fetchBusyBlockManagerSet =
+    CacheBuilder.newBuilder()
+      .expireAfterWrite(5, TimeUnit.MINUTES)
+      .build[BlockManagerId, BlockManagerId]()
+
   // Mapping from block id to the set of block managers that have the block.
   private val blockLocations = new JHashMap[BlockId, mutable.HashSet[BlockManagerId]]
 
@@ -161,6 +167,9 @@ class BlockManagerMasterEndpoint(
 
     case GetPeers(blockManagerId) =>
       context.reply(getPeers(blockManagerId))
+
+    case GetMigrationPeers(blockManagerId, fetchBusyId) =>
+      context.reply(getMigrationPeers(blockManagerId, fetchBusyId))
 
     case GetExecutorEndpointRef(executorId) =>
       context.reply(getExecutorEndpointRef(executorId))
@@ -892,6 +901,13 @@ class BlockManagerMasterEndpoint(
     } else {
       Seq.empty
     }
+  }
+
+  private def getMigrationPeers(blockManagerId: BlockManagerId,
+    fetchBusyId: Option[BlockManagerId]): Seq[BlockManagerId] = {
+    fetchBusyId.foreach(i => fetchBusyBlockManagerSet.put(i, i))
+    val fetchBusyIds = fetchBusyBlockManagerSet.asMap().keySet()
+    getPeers(blockManagerId).filter(i => !fetchBusyIds.contains(i))
   }
 
   private def getShufflePushMergerLocations(
