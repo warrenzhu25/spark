@@ -148,6 +148,11 @@ private[storage] class BlockManagerDecommissioner(
                   .contains("BlockSavedOnDecommissionedBlockManagerException")) {
                   isTargetDecommissioned = true
                   keepRunning = false
+                } else if (e.getCause.getMessage.contains("fetch busy")) {
+                  isTargetDecommissioned = true
+                  keepRunning = false
+                  bm.getMigrationPeers(Some(peer))
+                  logInfo(s"$peer is in fetch busy mode. Report to block manager master")
                 } else {
                   logError(s"Error occurred during migrating $shuffleBlockInfo", e)
                   keepRunning = false
@@ -299,7 +304,7 @@ private[storage] class BlockManagerDecommissioner(
       s"are added. In total, $remainedShuffles shuffles are remained.")
 
     // Update the threads doing migrations
-    val livePeerSet = bm.getPeers(false).toSet
+    val livePeerSet = bm.getMigrationPeers().toSet
     val currentPeerSet = migrationPeers.keys.toSet
     val deadPeers = currentPeerSet.diff(livePeerSet)
     // Randomize the orders of the peers to avoid hotspot nodes.
