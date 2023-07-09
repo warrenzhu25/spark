@@ -41,8 +41,7 @@ import org.apache.commons.io.IOUtils
 import org.apache.spark._
 import org.apache.spark.errors.SparkCoreErrors
 import org.apache.spark.executor.DataReadMethod
-import org.apache.spark.internal.Logging
-import org.apache.spark.internal.config
+import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.internal.config.{Network, RDD_CACHE_VISIBILITY_TRACKING_ENABLED}
 import org.apache.spark.memory.{MemoryManager, MemoryMode}
 import org.apache.spark.metrics.source.Source
@@ -2023,8 +2022,8 @@ private[spark] class BlockManager(
    *  Returns the last migration time and a boolean denoting if all the blocks have been migrated.
    *  If there are any tasks running since that time the boolean may be incorrect.
    */
-  private[spark] def lastMigrationInfo(): (Long, Boolean) = {
-    decommissioner.map(_.lastMigrationInfo()).getOrElse((0, false))
+  private[spark] def lastMigrationInfo(): Option[MigrationInfo] = {
+    decommissioner.map(_.lastMigrationInfo())
   }
 
   private[storage] def getMigratableRDDBlocks(): Seq[ReplicateBlock] =

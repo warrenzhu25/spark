@@ -18,7 +18,7 @@
 package org.apache.spark.storage
 
 import java.io.IOException
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable
@@ -26,8 +26,7 @@ import scala.util.control.NonFatal
 
 import org.apache.spark._
 import org.apache.spark.errors.SparkCoreErrors
-import org.apache.spark.internal.Logging
-import org.apache.spark.internal.config
+import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.shuffle.ShuffleBlockInfo
 import org.apache.spark.storage.BlockManagerMessages.ReplicateBlock
 import org.apache.spark.util.{ThreadUtils, Utils}
@@ -126,6 +125,7 @@ private[storage] class BlockManagerDecommissioner(
                   logDebug(s"Migrated sub-block $blockId")
                 }
               }
+              migratedShufflesSize.addAndGet(blocks.map(b => b._2.size()).sum)
               logInfo(s"Migrated $shuffleBlockInfo (" +
                 s"size: ${Utils.bytesToString(blocks.map(b => b._2.size()).sum)}) to $peer " +
                 s"in ${System.currentTimeMillis() - startTime} ms")
@@ -179,6 +179,9 @@ private[storage] class BlockManagerDecommissioner(
   // Shuffles which have migrated. This used to know when we are "done", being done can change
   // if a new shuffle file is created by a running task.
   private[storage] val numMigratedShuffles = new AtomicInteger(0)
+
+  // Total size of migrated shuffle files
+  private[storage] val migratedShufflesSize = new AtomicLong(0)
 
   // Shuffles which are queued for migration & number of retries so far.
   // Visible in storage for testing.
@@ -409,11 +412,12 @@ private[storage] class BlockManagerDecommissioner(
    *  This provides a timeStamp which, if there have been no tasks running since that time
    *  we can know that all potential blocks that can be have been migrated off.
    */
-  private[storage] def lastMigrationInfo(): (Long, Boolean) = {
+  private[storage] def lastMigrationInfo(): MigrationInfo = {
+    val shuffleMigrationStat = buildShuffleStat()
     if (stopped || (stoppedRDD && stoppedShuffle)) {
       // Since we don't have anything left to migrate ever (since we don't restart once
       // stopped), return that we're done with a validity timestamp that doesn't expire.
-      (Long.MaxValue, true)
+      MigrationInfo(Long.MaxValue, true, shuffleMigrationStat)
     } else {
       // Chose the min of the active times. See the function description for more information.
       val lastMigrationTime = if (!stoppedRDD && !stoppedShuffle) {
@@ -427,7 +431,21 @@ private[storage] class BlockManagerDecommissioner(
       // Technically we could have blocks left if we encountered an error, but those blocks will
       // never be migrated, so we don't care about them.
       val blocksMigrated = (!shuffleBlocksLeft || stoppedShuffle) && (!rddBlocksLeft || stoppedRDD)
-      (lastMigrationTime, blocksMigrated)
+      MigrationInfo(lastMigrationTime, blocksMigrated, shuffleMigrationStat)
     }
   }
+
+  private def buildShuffleStat(): MigrationStat = {
+    MigrationStat(migratingShuffles.size - numMigratedShuffles.get(),
+      migratedShufflesSize.get(), numMigratedShuffles.get())
+  }
 }
+
+private[spark] case class MigrationInfo(lastMigrationTime: Long,
+    allBlocksMigrated: Boolean,
+    shuffleMigrationStat: MigrationStat
+)
+
+private[spark] case class MigrationStat(numBlocksLeft: Int,
+    totalMigratedSize: Long,
+    numMigratedBlock: Int)

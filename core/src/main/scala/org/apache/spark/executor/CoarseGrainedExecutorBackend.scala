@@ -44,6 +44,7 @@ import org.apache.spark.resource.ResourceUtils._
 import org.apache.spark.rpc._
 import org.apache.spark.scheduler.{ExecutorLossMessage, ExecutorLossReason, TaskDescription}
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages._
+import org.apache.spark.storage.MigrationInfo
 import org.apache.spark.util.{ChildFirstURLClassLoader, MutableURLClassLoader, SignalUtils, ThreadUtils, Utils}
 
 private[spark] class CoarseGrainedExecutorBackend(
@@ -352,10 +353,11 @@ private[spark] class CoarseGrainedExecutorBackend(
             if (executor == null || executor.numRunningTasks == 0) {
               if (migrationEnabled) {
                 logInfo("No running tasks, checking migrations")
-                val (migrationTime, allBlocksMigrated) = env.blockManager.lastMigrationInfo()
+                val MigrationInfo(migrationTime, done, _) =
+                  env.blockManager.lastMigrationInfo().get
                 // We can only trust allBlocksMigrated boolean value if there were no tasks running
                 // since the start of computing it.
-                if (allBlocksMigrated && (migrationTime > lastTaskRunningTime)) {
+                if (done && (migrationTime > lastTaskRunningTime)) {
                   logInfo("No running tasks, all blocks migrated, stopping.")
                   exitExecutor(0, ExecutorLossMessage.decommissionFinished, notifyDriver = true)
                 } else {
