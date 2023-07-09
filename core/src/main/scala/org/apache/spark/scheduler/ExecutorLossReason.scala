@@ -17,7 +17,10 @@
 
 package org.apache.spark.scheduler
 
+import scala.concurrent.duration.Duration
+
 import org.apache.spark.executor.ExecutorExitCode
+import org.apache.spark.storage.MigrationInfo
 
 /**
  * Represents an explanation for an executor or whole process failing or exiting.
@@ -83,6 +86,13 @@ private [spark] case class ExecutorDecommission(
     workerHost: Option[String] = None,
     reason: String = "")
   extends ExecutorLossReason(ExecutorDecommission.msgPrefix + reason)
+
+private[spark] case class DecommissionSummary(
+  decommissionTime: Duration,
+  migrationTime: Duration,
+  taskWaitingTime: Duration,
+  migrationInfo: MigrationInfo
+)
 
 private[spark] case class ExecutorDecommissionFinished(
     decommissionSummary: String = "")
