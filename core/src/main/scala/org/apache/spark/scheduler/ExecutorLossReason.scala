@@ -41,7 +41,7 @@ private[spark] object ExecutorExited {
 }
 
 private[spark] object ExecutorLossMessage {
-  val decommissionFinished = "Finished decommissioning"
+  val decommissionFinished = "Finished decommissioning. "
 }
 
 private[spark] object ExecutorKilled extends ExecutorLossReason("Executor killed by driver.")
@@ -83,6 +83,10 @@ private [spark] case class ExecutorDecommission(
     workerHost: Option[String] = None,
     reason: String = "")
   extends ExecutorLossReason(ExecutorDecommission.msgPrefix + reason)
+
+private[spark] case class ExecutorDecommissionFinished(
+    decommissionSummary: String = "")
+  extends ExecutorLossReason(ExecutorLossMessage.decommissionFinished + decommissionSummary)
 
 private[spark] object ExecutorDecommission {
   val msgPrefix = "Executor decommission: "
