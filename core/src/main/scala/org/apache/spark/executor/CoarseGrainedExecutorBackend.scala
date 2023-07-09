@@ -23,6 +23,7 @@ import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
 import scala.collection.mutable
+import scala.concurrent.duration.{Duration, NANOSECONDS}
 import scala.util.{Failure, Success}
 import scala.util.control.NonFatal
 
@@ -37,15 +38,14 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config._
 import org.apache.spark.network.netty.SparkTransportConf
 import org.apache.spark.network.util.NettyUtils
-import org.apache.spark.resource.ResourceInformation
-import org.apache.spark.resource.ResourceProfile
+import org.apache.spark.resource.{ResourceInformation, ResourceProfile}
 import org.apache.spark.resource.ResourceProfile._
 import org.apache.spark.resource.ResourceUtils._
 import org.apache.spark.rpc._
 import org.apache.spark.scheduler.{ExecutorLossMessage, ExecutorLossReason, TaskDescription}
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages._
 import org.apache.spark.storage.MigrationInfo
-import org.apache.spark.util.{ChildFirstURLClassLoader, MutableURLClassLoader, SignalUtils, ThreadUtils, Utils}
+import org.apache.spark.util._
 
 private[spark] class CoarseGrainedExecutorBackend(
     override val rpcEnv: RpcEnv,
@@ -76,7 +76,7 @@ private[spark] class CoarseGrainedExecutorBackend(
    */
   private[executor] val taskResources = new mutable.HashMap[Long, Map[String, ResourceInformation]]
 
-  private var decommissioned = false
+  private var decommissionedTime: Option[Long] = None
 
   override def onStart(): Unit = {
     if (env.conf.get(DECOMMISSION_ENABLED)) {
@@ -245,9 +245,9 @@ private[spark] class CoarseGrainedExecutorBackend(
           } else {
             logError("Fail to tell driver that we are starting decommissioning", e)
           }
-          decommissioned = false
+          decommissionedTime = None
       }
-      context.reply(decommissioned)
+      context.reply(decommissionedTime.isDefined)
   }
 
   override def onDisconnected(remoteAddress: RpcAddress): Unit = {
@@ -308,14 +308,14 @@ private[spark] class CoarseGrainedExecutorBackend(
     if (!env.conf.get(DECOMMISSION_ENABLED)) {
       logWarning(s"Receive decommission request, but decommission feature is disabled.")
       return
-    } else if (decommissioned) {
+    } else if (decommissionedTime.isDefined) {
       logWarning(s"Executor $executorId already started decommissioning.")
       return
     }
     val msg = s"Decommission executor $executorId."
     logInfo(msg)
     try {
-      decommissioned = true
+      decommissionedTime = Some(System.nanoTime())
       val migrationEnabled = env.conf.get(STORAGE_DECOMMISSION_ENABLED) &&
         (env.conf.get(STORAGE_DECOMMISSION_RDD_BLOCKS_ENABLED) ||
           env.conf.get(STORAGE_DECOMMISSION_SHUFFLE_BLOCKS_ENABLED))
@@ -349,17 +349,24 @@ private[spark] class CoarseGrainedExecutorBackend(
             Thread.sleep(initialSleepMillis)
           }
           while (true) {
-            logInfo("Checking to see if we can shutdown.")
             if (executor == null || executor.numRunningTasks == 0) {
               if (migrationEnabled) {
-                logInfo("No running tasks, checking migrations")
-                val MigrationInfo(migrationTime, done, _) =
+                val MigrationInfo(migrationTime, allBlocksMigrated, shuffleStat) =
                   env.blockManager.lastMigrationInfo().get
                 // We can only trust allBlocksMigrated boolean value if there were no tasks running
                 // since the start of computing it.
-                if (done && (migrationTime > lastTaskRunningTime)) {
+                if (allBlocksMigrated && (migrationTime > lastTaskRunningTime)) {
                   logInfo("No running tasks, all blocks migrated, stopping.")
-                  exitExecutor(0, ExecutorLossMessage.decommissionFinished, notifyDriver = true)
+                  val taskWaitingTime = Duration(lastTaskRunningTime - decommissionedTime.get,
+                    NANOSECONDS)
+                  val migrationTime = Duration(System.nanoTime() - decommissionedTime.get,
+                    NANOSECONDS)
+                  val migrationSummary = f"Migration finished in ${migrationTime.toMillis}%,d ms" +
+                    f"(including ${taskWaitingTime.toMillis}%,d ms running task waiting time). " +
+                    f"${shuffleStat.numMigratedBlock}%,d blocks of size " +
+                    f"${Utils.bytesToString(shuffleStat.totalMigratedSize)} migrated, " +
+                    f"${shuffleStat.numBlocksLeft} blocks not migrated."
+                  exitExecutor(0, ExecutorLossMessage.decommissionFinished + migrationSummary)
                 } else {
                   logInfo("All blocks not yet migrated.")
                 }
@@ -386,7 +393,7 @@ private[spark] class CoarseGrainedExecutorBackend(
       logInfo("Will exit when finished decommissioning")
     } catch {
       case e: Exception =>
-        decommissioned = false
+        decommissionedTime = None
         logError("Unexpected error while decommissioning self", e)
     }
   }
