@@ -394,6 +394,25 @@ class SparkContext(config: SparkConf) extends Logging {
     Utils.setLogLevel(Level.toLevel(upperCased))
   }
 
+  /** Change logLevel of specific package or class name.
+   *  This overrides any user-defined log settings.
+   *
+   * @param loggerName package or class name such as "org.apache.spark" or
+   *                   "org.apache.spark.SparkContext"
+   * @param logLevel The desired log level as a string.
+   *                 Valid log levels include: ALL, DEBUG, ERROR, FATAL, INFO, OFF, TRACE, WARN
+   *
+   * @since 4.0.0
+   */
+  def setLogLevel(loggerName: String, logLevel: String): Unit = {
+    // let's allow lowercase or mixed case too
+    val upperCased = logLevel.toUpperCase(Locale.ROOT)
+    require(SparkContext.VALID_LOG_LEVELS.contains(upperCased),
+      s"Supplied level $logLevel did not match one of:" +
+        s" ${SparkContext.VALID_LOG_LEVELS.mkString(",")}")
+    Utils.setLogLevel(loggerName, Level.toLevel(upperCased))
+  }
+
   try {
     _conf = config.clone()
     _conf.get(SPARK_LOG_LEVEL).foreach { level =>
