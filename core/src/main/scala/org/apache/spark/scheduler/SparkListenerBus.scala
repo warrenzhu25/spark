@@ -63,6 +63,8 @@ private[spark] trait SparkListenerBus
         listener.onExecutorAdded(executorAdded)
       case executorRemoved: SparkListenerExecutorRemoved =>
         listener.onExecutorRemoved(executorRemoved)
+      case executorDecommissioned: SparkListenerExecutorDecommissioned =>
+        listener.onExecutorDecommissioned(executorDecommissioned)
       case executorBlacklistedForStage: SparkListenerExecutorBlacklistedForStage =>
         listener.onExecutorBlacklistedForStage(executorBlacklistedForStage)
       case nodeBlacklistedForStage: SparkListenerNodeBlacklistedForStage =>

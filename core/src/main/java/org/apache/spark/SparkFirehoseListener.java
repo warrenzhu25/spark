@@ -218,6 +218,11 @@ public class SparkFirehoseListener implements SparkListenerInterface {
   }
 
   @Override
+  public void onExecutorDecommissioned(SparkListenerExecutorDecommissioned executorDecommissioned) {
+    onEvent(executorDecommissioned);
+  }
+
+  @Override
   public void onOtherEvent(SparkListenerEvent event) {
     onEvent(event);
   }

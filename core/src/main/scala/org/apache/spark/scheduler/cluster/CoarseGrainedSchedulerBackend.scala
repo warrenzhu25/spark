@@ -568,6 +568,10 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
       }
     }
 
+    val reasonsByExecutor = executorsAndDecomInfo.map({ case (e, i) => e -> i.message }).toMap
+    listenerBus.post(SparkListenerExecutorDecommissioned(System.currentTimeMillis(),
+      reasonsByExecutor))
+
     if (executorsToDecommission.isEmpty) {
       return executorsToDecommission
     }

@@ -133,6 +133,10 @@ case class SparkListenerExecutorRemoved(time: Long, executorId: String, reason: 
   extends SparkListenerEvent
 
 @DeveloperApi
+case class SparkListenerExecutorDecommissioned(time: Long, reasonByExecutor: Map[String, String])
+  extends SparkListenerEvent
+
+@DeveloperApi
 @deprecated("use SparkListenerExecutorExcluded instead", "3.1.0")
 case class SparkListenerExecutorBlacklisted(
     time: Long,
@@ -310,6 +314,7 @@ case class SparkListenerResourceProfileAdded(resourceProfile: ResourceProfile)
  */
 private[spark] trait SparkListenerInterface {
 
+
   /**
    * Called when a stage completes successfully or fails, with information on the completed stage.
    */
@@ -397,6 +402,12 @@ private[spark] trait SparkListenerInterface {
    * Called when the driver removes an executor.
    */
   def onExecutorRemoved(executorRemoved: SparkListenerExecutorRemoved): Unit
+
+  /**
+   * Called when executor(s) are decommissioned.
+   */
+  def onExecutorDecommissioned(executorDecommissioned: SparkListenerExecutorDecommissioned): Unit
+
 
   /**
    * Called when the driver excludes an executor for a Spark application.
@@ -499,6 +510,7 @@ private[spark] trait SparkListenerInterface {
    * Called when a Resource Profile is added to the manager.
    */
   def onResourceProfileAdded(event: SparkListenerResourceProfileAdded): Unit
+
 }
 
 
@@ -552,6 +564,9 @@ abstract class SparkListener extends SparkListenerInterface {
       executorBlacklisted: SparkListenerExecutorBlacklisted): Unit = { }
   override def onExecutorExcluded(
       executorExcluded: SparkListenerExecutorExcluded): Unit = { }
+
+  override def onExecutorDecommissioned(
+      executorDecommissioned: SparkListenerExecutorDecommissioned): Unit = {}
 
   override def onExecutorBlacklistedForStage(
       executorBlacklistedForStage: SparkListenerExecutorBlacklistedForStage): Unit = { }

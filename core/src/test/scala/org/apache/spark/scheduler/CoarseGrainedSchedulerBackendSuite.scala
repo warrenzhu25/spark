@@ -516,6 +516,36 @@ class CoarseGrainedSchedulerBackendSuite extends SparkFunSuite with LocalSparkCo
     assert(mockEndpointRef.decommissionReceived)
   }
 
+  test("SPARK-41766: when executors are decommissioned" +
+    " SparkListenerExecutorDecommissioned event should be sent") {
+    val conf = new SparkConf()
+      .setMaster("local-cluster[0, 3, 1024]")
+      .setAppName("test")
+      .set(SCHEDULER_MAX_RETAINED_UNKNOWN_EXECUTORS.key, "1")
+
+    @volatile var executorDecommissionedEvent: SparkListenerExecutorDecommissioned = null
+    val listener = new SparkListener() {
+      override def onExecutorDecommissioned(
+        executorDecommissioned: SparkListenerExecutorDecommissioned): Unit = {
+        executorDecommissionedEvent = executorDecommissioned
+      }
+    }
+
+    sc = new SparkContext(conf)
+    sc.addSparkListener(listener)
+    val backend = sc.schedulerBackend.asInstanceOf[CoarseGrainedSchedulerBackend]
+    val executorId = "1"
+    val executorDecommissionInfo = ExecutorDecommissionInfo(
+      s"Executor $executorId is decommissioned")
+
+    backend.decommissionExecutor(executorId, executorDecommissionInfo, false)
+
+    sc.listenerBus.waitUntilEmpty(executorUpTimeout.toMillis)
+    assert(executorDecommissionedEvent != null)
+    assert(executorDecommissionedEvent.reasonByExecutor.getOrElse(executorId, "Unknown")
+      == executorDecommissionInfo.message)
+  }
+
   private def testSubmitJob(sc: SparkContext, rdd: RDD[Int]): Unit = {
     sc.submitJob(
       rdd,
