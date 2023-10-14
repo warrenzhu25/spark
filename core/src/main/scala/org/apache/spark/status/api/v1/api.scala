@@ -40,7 +40,8 @@ case class ApplicationInfo private[spark](
     maxCores: Option[Int],
     coresPerExecutor: Option[Int],
     memoryPerExecutorMB: Option[Int],
-    attempts: collection.Seq[ApplicationAttemptInfo])
+    attempts: collection.Seq[ApplicationAttemptInfo],
+    totalExecutorTime: Option[Long] = None)
 
 @JsonIgnoreProperties(
   value = Array("startTimeEpoch", "endTimeEpoch", "lastUpdatedEpoch"),

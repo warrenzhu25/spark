@@ -19,12 +19,16 @@ package org.apache.spark.ui.exec
 
 import javax.servlet.http.HttpServletRequest
 
-import scala.xml.Node
+import scala.xml.{Node, NodeSeq}
 
 import org.apache.spark.internal.config.UI._
+import org.apache.spark.status.AppStatusStore
 import org.apache.spark.ui.{SparkUI, SparkUITab, UIUtils, WebUIPage}
 
-private[ui] class ExecutorsTab(parent: SparkUI) extends SparkUITab(parent, "executors") {
+private[ui] class ExecutorsTab(parent: SparkUI, store: AppStatusStore)
+  extends SparkUITab(parent, "executors") {
+
+  val sc = parent.sc
 
   init()
 
@@ -34,7 +38,7 @@ private[ui] class ExecutorsTab(parent: SparkUI) extends SparkUITab(parent, "exec
     val heapHistogramEnabled =
       parent.sc.isDefined && parent.conf.get(UI_HEAP_HISTOGRAM_ENABLED)
 
-    attachPage(new ExecutorsPage(this, threadDumpEnabled, heapHistogramEnabled))
+    attachPage(new ExecutorsPage(this, threadDumpEnabled, heapHistogramEnabled, store))
     if (threadDumpEnabled) {
       attachPage(new ExecutorThreadDumpPage(this, parent.sc))
     }
@@ -46,15 +50,30 @@ private[ui] class ExecutorsTab(parent: SparkUI) extends SparkUITab(parent, "exec
 }
 
 private[ui] class ExecutorsPage(
-    parent: SparkUITab,
+    parent: ExecutorsTab,
     threadDumpEnabled: Boolean,
-    heapHistogramEnabled: Boolean)
+    heapHistogramEnabled: Boolean,
+    store: AppStatusStore)
   extends WebUIPage("") {
 
   def render(request: HttpServletRequest): Seq[Node] = {
+    val appInfo = store.applicationInfo()
+
+    val summary: NodeSeq =
+      <div>
+        <ul class="list-unstyled">
+          <li>
+            <strong>Total Executor Uptime:</strong>{
+              appInfo.totalExecutorTime.map(t => UIUtils.formatDuration(t)).getOrElse("N/A")
+            }
+          </li>
+
+        </ul>
+      </div>
+
     val content =
       {
-        <div id="active-executors"></div> ++
+        <div id="active-executors"></div> ++ summary ++
         <script src={UIUtils.prependBaseUri(request, "/static/utils.js")}></script> ++
         <script src={UIUtils.prependBaseUri(request, "/static/executorspage.js")}></script> ++
         <script>setThreadDumpEnabled({threadDumpEnabled})</script>

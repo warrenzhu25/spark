@@ -1930,6 +1930,28 @@ abstract class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter 
     assert(job.numActiveStages == 0)
   }
 
+  test("total executor time") {
+    val listener = new AppStatusListener(store, conf, true)
+
+    val driver = BlockManagerId(SparkContext.DRIVER_IDENTIFIER, "localhost", 42)
+
+    listener.onApplicationStart(SparkListenerApplicationStart(
+      "name",
+      Some("id"),
+      time,
+      "user",
+      Some("attempt"),
+      None))
+    listener.onExecutorAdded(createExecutorAddedEvent(1))
+    listener.onExecutorAdded(createExecutorAddedEvent(2))
+    listener.onExecutorAdded(createExecutorAddedEvent(3))
+    listener.onExecutorRemoved(createExecutorRemovedEvent(1))
+    listener.onApplicationEnd(SparkListenerApplicationEnd(12L))
+
+    assert(listener.totalExecutorTime.get() == 10L)
+    assert(listener.appInfo.totalExecutorTime.get == 34L)
+  }
+
   private def key(stage: StageInfo): Array[Int] = Array(stage.stageId, stage.attemptNumber)
 
   private def check[T: ClassTag](key: Any)(fn: T => Unit): Unit = {

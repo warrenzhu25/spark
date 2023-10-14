@@ -108,7 +108,7 @@ private[spark] class SparkUI private (
         (request: HttpServletRequest) => driverLogTab.getPage.renderLog(request),
         sc.get.conf))
     }
-    attachTab(new ExecutorsTab(this))
+    attachTab(new ExecutorsTab(this, store))
     addStaticHandler(SparkUI.STATIC_RESOURCE_DIR)
     attachHandler(createRedirectHandler("/", "/jobs/", basePath = basePath))
     attachHandler(ApiRootResource.getServletHandler(this))

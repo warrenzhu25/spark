@@ -19,6 +19,7 @@ package org.apache.spark.status
 
 import java.util.Date
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 import scala.collection.mutable.{ArrayBuffer, HashMap}
 import scala.collection.mutable
@@ -51,7 +52,7 @@ private[spark] class AppStatusListener(
     lastUpdateTime: Option[Long] = None) extends SparkListener with Logging {
 
   private var sparkVersion = SPARK_VERSION
-  private var appInfo: v1.ApplicationInfo = null
+  private[spark] var appInfo: v1.ApplicationInfo = null
   private var appSummary = new AppSummary(0, 0)
   private var defaultCpusPerTask: Int = 1
 
@@ -85,6 +86,8 @@ private[spark] class AppStatusListener(
   // Keep the active executor count as a separate variable to avoid having to do synchronization
   // around liveExecutors.
   @volatile private var activeExecutorCount = 0
+
+  private[spark] val totalExecutorTime: AtomicLong = new AtomicLong(0)
 
   /** The last time when flushing `LiveEntity`s. This is to avoid flushing too frequently. */
   private var lastFlushTimeNs = System.nanoTime()
@@ -208,7 +211,10 @@ private[spark] class AppStatusListener(
       None,
       None,
       None,
-      Seq(attempt))
+      Seq(attempt),
+      Option(totalExecutorTime.get() +
+        event.time * liveExecutors.size - liveExecutors.values.map(_.addTime.getTime).sum)
+    )
     kvstore.write(new ApplicationInfoWrapper(appInfo))
   }
 
@@ -239,6 +245,7 @@ private[spark] class AppStatusListener(
       exec.isActive = false
       exec.removeTime = new Date(event.time)
       exec.removeReason = event.reason
+      totalExecutorTime.addAndGet(exec.removeTime.getTime - exec.addTime.getTime)
       update(exec, now, last = true)
 
       // Remove all RDD distributions that reference the removed executor, in case there wasn't
