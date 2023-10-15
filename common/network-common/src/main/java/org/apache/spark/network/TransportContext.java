@@ -205,7 +205,9 @@ public class TransportContext implements Closeable {
         .addLast("handler", channelHandler);
       // Use a separate EventLoopGroup to handle ChunkFetchRequest messages for shuffle rpcs.
       if (chunkFetchWorkers != null) {
-        FetchBusyChecker fetchBusyChecker = new FetchBusyChecker(conf.fetchBusyHighWatermark());
+        FetchBusyChecker fetchBusyChecker = new FetchBusyChecker(conf.fetchBusyHighWatermark(),
+            conf.fetchBusyLowWatermark(),
+            conf.fetchBusyCoolDown());
         ChunkFetchRequestHandler chunkFetchHandler = new ChunkFetchRequestHandler(
           channelHandler.getClient(), rpcHandler.getStreamManager(),
           conf.maxChunksBeingTransferred(), true /* syncModeEnabled */, fetchBusyChecker);
