@@ -66,7 +66,7 @@ private[history] case class LoadedAppUI(ui: SparkUI) {
 
 }
 
-private[history] abstract class ApplicationHistoryProvider {
+private[spark] abstract class ApplicationHistoryProvider {
 
   /**
    * Returns the count of application event logs that the provider is currently still processing.
@@ -108,6 +108,9 @@ private[history] abstract class ApplicationHistoryProvider {
    *         for update probes, or `None` if the application/attempt is not found.
    */
   def getAppUI(appId: String, attemptId: Option[String]): Option[LoadedAppUI]
+
+  def getAppStatusStore(appId: String,
+    attemptId: Option[String] = None): Option[HistoryAppStatusStore]
 
   /**
    * Called when the server is shutting down.

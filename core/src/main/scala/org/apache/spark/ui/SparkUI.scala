@@ -23,6 +23,7 @@ import javax.servlet.http.{HttpServlet, HttpServletRequest, HttpServletResponse}
 import org.eclipse.jetty.servlet.ServletContextHandler
 
 import org.apache.spark.{SecurityManager, SparkConf, SparkContext}
+import org.apache.spark.deploy.history.ApplicationHistoryProvider
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.DRIVER_LOG_LOCAL_DIR
 import org.apache.spark.internal.config.UI._
@@ -46,7 +47,8 @@ private[spark] class SparkUI private (
     var appName: String,
     val basePath: String,
     val startTime: Long,
-    val appSparkVersion: String)
+    val appSparkVersion: String,
+    val historyProvider: Option[ApplicationHistoryProvider] = None)
   extends WebUI(securityManager, securityManager.getSSLOptions("ui"), SparkUI.getUIPort(conf),
     conf, basePath, "SparkUI")
   with Logging
@@ -242,9 +244,11 @@ private[spark] object SparkUI {
       appName: String,
       basePath: String,
       startTime: Long,
-      appSparkVersion: String = org.apache.spark.SPARK_VERSION): SparkUI = {
+      appSparkVersion: String = org.apache.spark.SPARK_VERSION,
+      historyProvider: Option[ApplicationHistoryProvider] = None): SparkUI = {
 
-    new SparkUI(store, sc, conf, securityManager, appName, basePath, startTime, appSparkVersion)
+    new SparkUI(store, sc, conf, securityManager, appName, basePath, startTime, appSparkVersion,
+      historyProvider)
   }
 
 }

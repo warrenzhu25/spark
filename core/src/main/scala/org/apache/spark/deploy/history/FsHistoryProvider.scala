@@ -350,7 +350,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
 
     val ui = SparkUI.create(None, new HistoryAppStatusStore(conf, kvstore), conf, secManager,
       app.info.name, HistoryServer.getAttemptURI(appId, attempt.info.attemptId),
-      attempt.info.startTime.getTime(), attempt.info.appSparkVersion)
+      attempt.info.startTime.getTime(), attempt.info.appSparkVersion, Option(this))
 
     // place the tab in UI based on the display order
     loadPlugins().toSeq.sortBy(_.displayOrder).foreach(_.setupUI(ui))
@@ -1382,6 +1382,26 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   private[history] def getAttempt(appId: String, attemptId: Option[String]): AttemptInfoWrapper = {
     load(appId).attempts.find(_.info.attemptId == attemptId).getOrElse(
       throw new NoSuchElementException(s"Cannot find attempt $attemptId of $appId."))
+  }
+
+  override def getAppStatusStore(appId: String,
+    attemptId: Option[String] = None): Option[HistoryAppStatusStore] = {
+    val attempt = getAttempt(appId, attemptId)
+
+    val kvstore = try {
+      diskManager match {
+        case Some(sm) =>
+          loadDiskStore(sm, appId, attempt)
+
+        case _ =>
+          createInMemoryStore(attempt)
+      }
+    } catch {
+      case _: FileNotFoundException =>
+        return None
+    }
+
+    Some(new HistoryAppStatusStore(conf, kvstore))
   }
 
   private def deleteLog(fs: FileSystem, log: Path): Boolean = {
