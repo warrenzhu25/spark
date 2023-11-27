@@ -33,6 +33,7 @@ import org.apache.spark.status.api.v1._
 import org.apache.spark.ui.JettyUtils._
 import org.apache.spark.ui.env.EnvironmentTab
 import org.apache.spark.ui.exec.ExecutorsTab
+import org.apache.spark.ui.insight.AppDiffTab
 import org.apache.spark.ui.jobs.{JobsTab, StagesTab}
 import org.apache.spark.ui.storage.StorageTab
 
@@ -111,6 +112,7 @@ private[spark] class SparkUI private (
         sc.get.conf))
     }
     attachTab(new ExecutorsTab(this))
+    historyProvider.foreach(p => attachTab(new AppDiffTab(this, p)))
     addStaticHandler(SparkUI.STATIC_RESOURCE_DIR)
     attachHandler(createRedirectHandler("/", "/jobs/", basePath = basePath))
     attachHandler(ApiRootResource.getServletHandler(this))
