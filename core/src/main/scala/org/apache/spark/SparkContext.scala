@@ -429,6 +429,13 @@ class SparkContext(config: SparkConf) extends Logging {
       }
       setLogLevel(level)
     }
+    _conf.getAllWithPrefix(SPARK_LOG_LEVEL.key + ".").foreach { case (logger, level) =>
+      if (Logging.setLogLevelPrinted) {
+        System.err.printf(s"""Setting Spark logger "$logger" level to $level.\n""")
+      }
+
+      setLogLevel(logger, level)
+    }
     _conf.validateSettings()
     _conf.set("spark.app.startTime", startTime.toString)
 

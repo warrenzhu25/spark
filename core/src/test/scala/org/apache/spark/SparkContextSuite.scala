@@ -638,6 +638,15 @@ class SparkContextSuite extends SparkFunSuite with LocalSparkContext with Eventu
     sc.stop()
   }
 
+  test("SPARK-46352: Spark conf to override specific package or class log level") {
+    val logger = "org.apache.spark"
+    val confKey = SPARK_LOG_LEVEL.key + "." + logger
+    sc = new SparkContext(new SparkConf().setAppName("test").setMaster("local")
+      .set(confKey, "ERROR"))
+    assert(Utils.getLoggerLevel(logger).get === Level.ERROR)
+    sc.stop()
+  }
+
   test("register and deregister Spark listener from SparkContext") {
     sc = new SparkContext(new SparkConf().setAppName("test").setMaster("local"))
     val sparkListener1 = new SparkListener { }
