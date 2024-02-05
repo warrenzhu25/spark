@@ -1559,6 +1559,7 @@ private[spark] object MapOutputTracker extends Logging {
       logInfo("Broadcast outputstatuses size = " + outArr.length + ", actual size = " + arrSize)
       (outArr, bcast)
     } else {
+      logInfo(s"Serialized outputstatuses size = $arrSize")
       (chunkedByteBuf.toArray, null)
     }
   }
