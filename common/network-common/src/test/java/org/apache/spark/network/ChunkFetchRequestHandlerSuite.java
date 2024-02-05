@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import io.netty.channel.Channel;
+import org.apache.spark.network.server.FetchBusyChecker;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -67,8 +68,9 @@ public class ChunkFetchRequestHandlerSuite {
     managedBuffers.add(new TestManagedBuffer(40));
     long streamId = streamManager.registerStream("test-app", managedBuffers.iterator(), channel);
     TransportClient reverseClient = mock(TransportClient.class);
+    FetchBusyChecker fetchBusyChecker = new FetchBusyChecker(5);
     ChunkFetchRequestHandler requestHandler = new ChunkFetchRequestHandler(reverseClient,
-      rpcHandler.getStreamManager(), 2L, false);
+      rpcHandler.getStreamManager(), 2L, false, fetchBusyChecker);
 
     RequestMessage request0 = new ChunkFetchRequest(new StreamChunkId(streamId, 0));
     requestHandler.channelRead(context, request0);
