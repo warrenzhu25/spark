@@ -27,6 +27,7 @@ import io.netty.channel.ChannelPipeline;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.handler.timeout.IdleStateHandler;
+import org.apache.spark.network.server.FetchBusyChecker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -204,9 +205,10 @@ public class TransportContext implements Closeable {
         .addLast("handler", channelHandler);
       // Use a separate EventLoopGroup to handle ChunkFetchRequest messages for shuffle rpcs.
       if (chunkFetchWorkers != null) {
+        FetchBusyChecker fetchBusyChecker = new FetchBusyChecker(conf.fetchBusyHighWatermark());
         ChunkFetchRequestHandler chunkFetchHandler = new ChunkFetchRequestHandler(
           channelHandler.getClient(), rpcHandler.getStreamManager(),
-          conf.maxChunksBeingTransferred(), true /* syncModeEnabled */);
+          conf.maxChunksBeingTransferred(), true /* syncModeEnabled */, fetchBusyChecker);
         pipeline.addLast(chunkFetchWorkers, "chunkFetchHandler", chunkFetchHandler);
       }
       return channelHandler;
