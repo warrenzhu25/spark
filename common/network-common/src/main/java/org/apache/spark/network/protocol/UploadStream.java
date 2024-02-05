@@ -45,7 +45,8 @@ public final class UploadStream extends AbstractMessage implements RequestMessag
 
   // this version is called when decoding the bytes on the receiving end.  The body is handled
   // separately.
-  private UploadStream(long requestId, ManagedBuffer meta, long bodyByteCount) {
+  // VisbleForTesting
+  public UploadStream(long requestId, ManagedBuffer meta, long bodyByteCount) {
     super(null, false);
     this.requestId = requestId;
     this.meta = meta;

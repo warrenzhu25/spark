@@ -46,7 +46,7 @@ import static org.apache.spark.network.util.NettyUtils.getRemoteAddress;
 public class TransportRequestHandler extends MessageHandler<RequestMessage> {
 
   private static final Logger logger = LoggerFactory.getLogger(TransportRequestHandler.class);
-
+  public static final String FETCH_BUSY_MSG = "Stream upload rejected as in fetch busy mode";
   /** The Netty channel that this handler is associated with. */
   private final Channel channel;
 
@@ -185,6 +185,11 @@ public class TransportRequestHandler extends MessageHandler<RequestMessage> {
   private void processStreamUpload(final UploadStream req) {
     assert (req.body() == null);
     try {
+      if (chunkFetchRequestHandler != null && chunkFetchRequestHandler.isFetchBusy()) {
+        logger.warn(FETCH_BUSY_MSG);
+        respond(new RpcFailure(req.requestId, FETCH_BUSY_MSG));
+        return;
+      }
       RpcResponseCallback callback = new RpcResponseCallback() {
         @Override
         public void onSuccess(ByteBuffer response) {

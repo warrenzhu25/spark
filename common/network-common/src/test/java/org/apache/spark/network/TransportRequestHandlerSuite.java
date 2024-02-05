@@ -22,10 +22,13 @@ import java.util.ArrayList;
 import java.util.List;
 
 import io.netty.channel.Channel;
+import org.apache.spark.network.server.ChunkFetchRequestHandler;
 import org.junit.Assert;
+import org.junit.Before;
 import org.junit.Test;
 
 import static org.junit.Assert.*;
+import static org.mockito.Answers.RETURNS_SMART_NULLS;
 import static org.mockito.Mockito.*;
 
 import org.apache.commons.lang3.tuple.ImmutablePair;
@@ -39,8 +42,18 @@ import org.apache.spark.network.server.OneForOneStreamManager;
 import org.apache.spark.network.server.RpcHandler;
 import org.apache.spark.network.server.StreamManager;
 import org.apache.spark.network.server.TransportRequestHandler;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
 
 public class TransportRequestHandlerSuite {
+
+  @Mock(answer = RETURNS_SMART_NULLS)
+  ChunkFetchRequestHandler fetchRequestHandler;
+
+  @Before
+  public void init() {
+    MockitoAnnotations.openMocks(this);
+  }
 
   @Test
   public void handleStreamRequest() throws Exception {
@@ -163,5 +176,32 @@ public class TransportRequestHandlerSuite {
     requestHandler.handle(invalidMetaReq);
     assertEquals(2, responseAndPromisePairs.size());
     assertTrue(responseAndPromisePairs.get(1).getLeft() instanceof RpcFailure);
+  }
+
+  @Test
+  public void handleStreamUploadRequestWhenFetchBusy() throws Exception {
+    RpcHandler rpcHandler = new NoOpRpcHandler();
+    OneForOneStreamManager streamManager = (OneForOneStreamManager) (rpcHandler.getStreamManager());
+    Channel channel = mock(Channel.class);
+    List<Pair<Object, ExtendedChannelPromise>> responseAndPromisePairs =
+        new ArrayList<>();
+    when(channel.writeAndFlush(any()))
+        .thenAnswer(invocationOnMock0 -> {
+          Object response = invocationOnMock0.getArguments()[0];
+          ExtendedChannelPromise channelFuture = new ExtendedChannelPromise(channel);
+          responseAndPromisePairs.add(ImmutablePair.of(response, channelFuture));
+          return channelFuture;
+        });
+    TransportClient reverseClient = mock(TransportClient.class);
+    TransportRequestHandler requestHandler = new TransportRequestHandler(channel, reverseClient,
+        rpcHandler, 2L, fetchRequestHandler);
+    when(fetchRequestHandler.isFetchBusy()).thenReturn(true);
+
+    UploadStream uploadStream = new UploadStream(1, new TestManagedBuffer(10), 1L);
+    requestHandler.handle(uploadStream);
+    assertEquals(1, responseAndPromisePairs.size());
+    assertTrue(responseAndPromisePairs.get(0).getLeft() instanceof RpcFailure);
+    assertEquals(TransportRequestHandler.FETCH_BUSY_MSG,
+        ((RpcFailure) (responseAndPromisePairs.getFirst().getLeft())).errorString);
   }
 }
