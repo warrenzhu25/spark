@@ -17,12 +17,13 @@
 
 package org.apache.spark
 
-import java.io.{ByteArrayInputStream, InputStream, IOException, ObjectInputStream, ObjectOutputStream}
+import java.io._
 import java.nio.ByteBuffer
 import java.util.concurrent.{ConcurrentHashMap, LinkedBlockingQueue, ThreadPoolExecutor, TimeUnit}
 import java.util.concurrent.locks.ReentrantReadWriteLock
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable
 import scala.collection.mutable.{HashMap, ListBuffer, Map}
 import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration.Duration
@@ -146,6 +147,8 @@ private class ShuffleStatus(
 
   private[this] var shufflePushMergerLocations: Seq[BlockManagerId] = Seq.empty
 
+  private[this] val mapSummaryByExecutorId: mutable.Map[BlockManagerId, MapSummary] =
+    new mutable.HashMap[BlockManagerId, MapSummary]().withDefaultValue(MapSummary())
   /**
    * Register a map output. If there is already a registered location for the map output then it
    * will be replaced by the new location.
@@ -156,6 +159,7 @@ private class ShuffleStatus(
       invalidateSerializedMapOutputStatusCache()
     }
     mapStatuses(mapIndex) = status
+    mapSummaryByExecutorId(status.location).numOutputs += 1
   }
 
   /**
@@ -408,6 +412,10 @@ private class ShuffleStatus(
     shufflePushMergerLocations
   }
 
+  def getMapSummaryByExecutorId: Map[BlockManagerId, MapSummary] = withReadLock {
+    mapSummaryByExecutorId
+  }
+
   /**
    * Clears the cached serialized map output statuses.
    */
@@ -458,6 +466,8 @@ private[spark] case class GetShufflePushMergersMessage(shuffleId: Int,
   context: RpcCallContext) extends MapOutputTrackerMasterMessage
 private[spark] case class MapSizesByExecutorId(
   iter: Iterator[(BlockManagerId, Seq[(BlockId, Long, Int)])], enableBatchFetch: Boolean)
+private[spark] case class MapSummary(var totalBytes: Long = 0,
+  var numOutputs: Int = 0)
 
 /** RpcEndpoint class for MapOutputTrackerMaster */
 private[spark] class MapOutputTrackerMasterEndpoint(
@@ -912,6 +922,10 @@ private[spark] class MapOutputTrackerMaster(
 
   def getNumAvailableOutputs(shuffleId: Int): Int = {
     shuffleStatuses.get(shuffleId).map(_.numAvailableMapOutputs).getOrElse(0)
+  }
+
+  def getMapSummaryByExecutorId(shuffleId: Int): Map[BlockManagerId, MapSummary] = {
+    shuffleStatuses.get(shuffleId).map(_.getMapSummaryByExecutorId).getOrElse(Map.empty)
   }
 
   /** VisibleForTest. Invoked in test only. */
