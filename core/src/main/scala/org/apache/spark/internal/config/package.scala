@@ -2019,6 +2019,38 @@ package object config {
       .timeConf(TimeUnit.MILLISECONDS)
       .createOptional
 
+  private[spark] val SCHEDULER_EXCLUDE_SHUFFLE_SKEW =
+    ConfigBuilder("spark.scheduler.excludeShuffleSkew")
+      .doc(s"Exclude shuffle map skewed executors when scheduling. " +
+        s"This can reduce long shuffle fetch wait caused by shuffle write skew.")
+      .version("3.5.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  private[spark] val SHUFFLE_SKEW_MIN_FINISHED_TASKS =
+    ConfigBuilder("spark.scheduler.shuffleSkew.minFinishedTasks")
+      .doc("Minimum number of finished shuffle map tasks on one executor before " +
+        "being considered as skew.")
+      .version("3.5.0")
+      .intConf
+      .createWithDefault(10)
+
+  private[spark] val SHUFFLE_SKEW_MAX_EXECUTORS =
+    ConfigBuilder("spark.scheduler.shuffleSkew.maxExecutors")
+      .doc("Maximum number of executors being considered as skew. " +
+        "Skewed executors will be excluded when scheduling")
+      .version("3.5.0")
+      .intConf
+      .createWithDefault(5)
+
+  private[spark] val SHUFFLE_SKEW_RATIO =
+    ConfigBuilder("spark.scheduler.shuffleSkew.ratio")
+      .doc("How many times larger than average finished shuffle map task number on executor" +
+        " to be considered as skewed.")
+      .version("3.5.0")
+      .doubleConf
+      .createWithDefault(1.5)
+
   private[spark] val SPECULATION_ENABLED =
     ConfigBuilder("spark.speculation")
       .version("0.6.0")

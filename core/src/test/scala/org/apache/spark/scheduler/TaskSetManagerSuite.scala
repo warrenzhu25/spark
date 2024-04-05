@@ -1932,6 +1932,31 @@ class TaskSetManagerSuite
     (manager, clock)
   }
 
+  private def testExcludeShuffleSkewSetup(
+    numTasks: Int,
+    numExecutorCores: Int,
+    numCoresPerTask: Int,
+    excludeShuffleSkew: Option[Boolean],
+    shuffleSkewMinFinishedTasks: Option[Int],
+    shuffleSkewMaxExecutors: Option[Int],
+    shuffleSkewRatio: Option[Double]): TaskSetManager = {
+    val conf = new SparkConf()
+    excludeShuffleSkew.map(v => conf.set(config.SCHEDULER_EXCLUDE_SHUFFLE_SKEW, v))
+    shuffleSkewMinFinishedTasks.map(v => conf.set(config.SHUFFLE_SKEW_MIN_FINISHED_TASKS, v))
+    shuffleSkewMaxExecutors.map(v => conf.set(config.SHUFFLE_SKEW_MAX_EXECUTORS, v))
+    shuffleSkewRatio.map(v => conf.set(config.SHUFFLE_SKEW_RATIO, v))
+    conf.set(config.EXECUTOR_CORES.key, numExecutorCores.toString)
+    conf.set(config.CPUS_PER_TASK.key, numCoresPerTask.toString)
+
+    sc = new SparkContext("local", "test", conf)
+    sched = new FakeTaskScheduler(sc, ("exec1", "host1"), ("exec2", "host2"), ("exec3", "host3"))
+    // Create a task set with the given number of tasks
+    val taskSet = FakeTask.createTaskSet(numTasks)
+    val manager = new TaskSetManager(sched, taskSet, MAX_TASK_FAILURES)
+    manager.isZombie = false
+    manager
+  }
+
   private def testSpeculationDurationThreshold(
       speculationThresholdProvided: Boolean,
       numTasks: Int,
@@ -2243,6 +2268,73 @@ class TaskSetManagerSuite
     manager.checkSpeculatableTasks(sched.MIN_TIME_TO_SPECULATION)
     // After 3s have elapsed now the task is marked as speculative task
     assert(sched.speculativeTasks.size == 1)
+  }
+
+  test("getSkewedExecutors only return executors greater than minFinishedTasks") {
+    val numTasks = 4
+    val manager = testExcludeShuffleSkewSetup(
+      numTasks,
+      4,
+      1,
+      Some(true),
+      Some(2),
+      Some(2),
+      Some(1.0))
+
+    val directTaskResult = new DirectTaskResult[String](null, Seq(), Array()) {
+      override def value(resultSer: SerializerInstance): String = ""
+    }
+
+    // Offer resources for the task to start
+    for (i <- 1 to numTasks) {
+      if (i == 1) {
+        val task = manager.resourceOffer(s"exec1", s"host1", NO_PREF)._1.get
+        manager.handleSuccessfulTask(task.taskId, directTaskResult)
+      } else {
+        val task = manager.resourceOffer(s"exec2", s"host2", NO_PREF)._1.get
+        manager.handleSuccessfulTask(task.taskId, directTaskResult)
+      }
+      if (i > 2) {
+        assert(manager.getSkewedExecutors() === Set("exec2"))
+      } else {
+        assert(manager.getSkewedExecutors().isEmpty)
+      }
+    }
+  }
+
+  test("getSkewedExecutors only return executors greater than ratio") {
+    val numTasks = 10
+    val manager = testExcludeShuffleSkewSetup(
+      numTasks,
+      4,
+      1,
+      Some(true),
+      Some(2),
+      Some(2),
+      Some(1.5))
+
+    val directTaskResult = new DirectTaskResult[String](null, Seq(), Array()) {
+      override def value(resultSer: SerializerInstance): String = ""
+    }
+
+    // Offer resources for the task to start
+    for (i <- 1 to numTasks) {
+      if (i % 2 == 0) {
+        val task = manager.resourceOffer(s"exec1", s"host1", NO_PREF)._1.get
+        manager.handleSuccessfulTask(task.taskId, directTaskResult)
+      } else if ( (i / 2) % 2 == 0) {
+        val task = manager.resourceOffer(s"exec2", s"host2", NO_PREF)._1.get
+        manager.handleSuccessfulTask(task.taskId, directTaskResult)
+      } else {
+        val task = manager.resourceOffer(s"exec3", s"host3", NO_PREF)._1.get
+        manager.handleSuccessfulTask(task.taskId, directTaskResult)
+      }
+      if (i >= 6 && i != 9) {
+        assert(manager.getSkewedExecutors() === Set("exec1"), "" + i)
+      } else {
+        assert(manager.getSkewedExecutors().isEmpty, "" + i)
+      }
+    }
   }
 
   test("SPARK-37580: Reset numFailures when one of task attempts succeeds") {
