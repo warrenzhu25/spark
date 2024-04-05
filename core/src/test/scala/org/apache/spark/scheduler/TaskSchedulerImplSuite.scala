@@ -122,6 +122,28 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext
     setupHelper()
   }
 
+  def setupSchedulerWithMockTaskSetShuffleSkewExecutors(
+    confs: (String, String)*): TaskSchedulerImpl = {
+    val conf = new SparkConf().setMaster("local").setAppName("TaskSchedulerImplSuite")
+    conf.set(config.SCHEDULER_EXCLUDE_SHUFFLE_SKEW_EXECUTORS, true)
+    confs.foreach { case (k, v) => conf.set(k, v) }
+
+    sc = new SparkContext(conf)
+    taskScheduler =
+      new TaskSchedulerImpl(sc, sc.conf.get(config.TASK_MAX_FAILURES)) {
+        override def createTaskSetManager(taskSet: TaskSet, maxFailures: Int): TaskSetManager = {
+          val tsm = super.createTaskSetManager(taskSet, maxFailures)
+          // we need to create a spied tsm just so we can set the SkewedExecutors
+          val tsmSpy = spy[TaskSetManager](tsm)
+          when(tsmSpy.getSkewedExecutors()).thenReturn(Set("exe1"))
+          when(tsmSpy.isShuffleMapTasks()).thenReturn(true)
+          stageToMockTaskSetManager(taskSet.stageId) = tsmSpy
+          tsmSpy
+        }
+      }
+    setupHelper()
+  }
+
   def setupHelper(): TaskSchedulerImpl = {
     taskScheduler.initialize(new FakeSchedulerBackend)
     // Need to initialize a DAGScheduler for the taskScheduler to use for callbacks.
@@ -190,6 +212,20 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext
     val count = selectedExecutorIds.count(_ == workerOffers(0).executorId)
     assert(count > 0)
     assert(count < numTrials)
+    assert(!failedTaskSet)
+  }
+
+  test("Scheduler should exclude shuffle skew executors") {
+    val taskScheduler = setupSchedulerWithMockTaskSetShuffleSkewExecutors()
+    val numFreeCores = 4
+    val workerOffers = IndexedSeq(WorkerOffer("exe0", "host0", numFreeCores),
+      WorkerOffer("exe1", "host1", numFreeCores))
+    val numTasks = 4
+    val taskSet = FakeTask.createTaskSet(numTasks)
+    taskScheduler.submitTasks(taskSet)
+    val taskDescriptions = taskScheduler.resourceOffers(workerOffers).flatten
+    assert(numTasks === taskDescriptions.length)
+    assert(taskDescriptions.forall(t => t.executorId == "exe0"))
     assert(!failedTaskSet)
   }
 
@@ -1919,15 +1955,20 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext
     val workerOffers =
       IndexedSeq(WorkerOffer("executor0", "host0", 4, None, resources0),
         WorkerOffer("executor1", "host1", 4, None, resources1))
-    val availableResourcesAmount = workerOffers.map(_.resources).map { resourceMap =>
-        // available addresses already takes into account if there are fractional
-        // task resource requests
-        resourceMap.map { case (name, addresses) => (name, addresses.length) }
-      }
+    val availableResources = workerOffers.map(o => o.executorId -> o.resources).toMap
+    val resourceProfileIds = workerOffers.map(o =>
+      o.executorId -> o.resourceProfileId).toMap
+    val availableCpus = workerOffers.map(o => o.executorId -> o.cores).toMap
+    val availableResourcesAmount = availableResources.mapValues { resourceMap =>
+      // available addresses already takes into account if there are fractional
+      // task resource requests
+      resourceMap.map { case (name, addresses) => (name, addresses.length) }
+    }.toMap
 
     val taskSlotsForRp = TaskSchedulerImpl.calculateAvailableSlots(
-      taskScheduler, taskScheduler.conf, rp.id, workerOffers.map(_.resourceProfileId).toArray,
-      workerOffers.map(_.cores).toArray, availableResourcesAmount.toArray)
+      taskScheduler, taskScheduler.conf, rp.id, resourceProfileIds,
+      availableCpus,
+      availableResourcesAmount)
     assert(taskSlotsForRp === 4)
   }
 

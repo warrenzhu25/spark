@@ -21,7 +21,7 @@ import java.io.NotSerializableException
 import java.nio.ByteBuffer
 import java.util.concurrent.{ConcurrentHashMap, ConcurrentLinkedQueue, TimeUnit}
 
-import scala.collection.immutable.Map
+import scala.collection.mutable
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
 import scala.math.max
 import scala.util.control.NonFatal
@@ -70,7 +70,7 @@ private[spark] class TaskSetManager(
   val ser = env.closureSerializer.newInstance()
 
   val tasks = taskSet.tasks
-  private val isShuffleMapTasks = tasks(0).isInstanceOf[ShuffleMapTask]
+
   // shuffleId is only available when isShuffleMapTasks=true
   private val shuffleId = taskSet.shuffleId
   private[scheduler] val partitionToIndex = tasks.zipWithIndex
@@ -113,6 +113,13 @@ private[spark] class TaskSetManager(
   private val executorDecommissionKillInterval =
     conf.get(EXECUTOR_DECOMMISSION_KILL_INTERVAL).map(TimeUnit.SECONDS.toMillis)
 
+  private val excludeShuffleSkewExecutors = conf.get(SCHEDULER_EXCLUDE_SHUFFLE_SKEW_EXECUTORS)
+  private val shuffleSkewRatio = conf.get(SHUFFLE_SKEW_RATIO)
+  private val shuffleSkewMaxExecutorsNum = conf.get(SHUFFLE_SKEW_MAX_EXECUTORS_NUM)
+  private val shuffleSkewMaxExecutorsRatio = conf.get(SHUFFLE_SKEW_MAX_EXECUTORS_RATIO)
+  private val shuffleSkewMinFinishedTasks = conf.get(SHUFFLE_SKEW_MIN_FINISHED_TASKS)
+  private val filteredSkewExecutors = new mutable.HashMap[String, Int]().withDefaultValue(0)
+
   private[scheduler] val taskProcessRateCalculator =
     if (sched.efficientTaskCalcualtionEnabled) {
       Some(new TaskProcessRateCalculator())
@@ -151,11 +158,16 @@ private[spark] class TaskSetManager(
 
   private[scheduler] val runningTasksSet = new HashSet[Long]
 
+  private val finishedTasksByExecutorId = new HashMap[String, Int]().withDefaultValue(0)
+
   override def runningTasks: Int = runningTasksSet.size
 
   def someAttemptSucceeded(tid: Long): Boolean = {
     successful(taskInfos(tid).index)
   }
+
+  // Exposed for testing
+  def isShuffleMapTasks(): Boolean = tasks(0).isInstanceOf[ShuffleMapTask]
 
   // True once no more tasks should be launched for this task set manager. TaskSetManagers enter
   // the zombie state once at least one attempt of each task has completed successfully, or if the
@@ -579,6 +591,9 @@ private[spark] class TaskSetManager(
   private def maybeFinishTaskSet(): Unit = {
     if (isZombie && runningTasks == 0) {
       sched.taskSetFinished(this)
+      if (filteredSkewExecutors.nonEmpty) {
+        logInfo(s"Filtered shuffle skew executors for stage $stageId is: $filteredSkewExecutors")
+      }
       if (tasksSuccessful == numTasks) {
         healthTracker.foreach(_.updateExcludedForSuccessfulTaskSet(
           taskSet.stageId,
@@ -828,6 +843,7 @@ private[spark] class TaskSetManager(
     }
     if (!successful(index)) {
       tasksSuccessful += 1
+      finishedTasksByExecutorId(info.executorId) += 1
       logInfo(s"Finished ${taskName(info.taskId)} in ${info.duration} ms " +
         s"on ${info.host} (executor ${info.executorId}) ($tasksSuccessful/$numTasks)")
       // Mark successful and stop if all the tasks have succeeded.
@@ -1286,6 +1302,46 @@ private[spark] class TaskSetManager(
 
   def executorAdded(): Unit = {
     recomputeLocality()
+  }
+
+  def getSkewedExecutors(): Set[String] = {
+    if (!excludeShuffleSkewExecutors) {
+      return Set.empty
+    }
+    val averageTaskNum = getAverageTaskNum()
+    val maxSkewedNum = math.min(math.ceil(
+      finishedTasksByExecutorId.size * shuffleSkewMaxExecutorsRatio).toInt,
+      shuffleSkewMaxExecutorsNum)
+    // Filter for executors exceeding the skew threshold
+    val skewedExecutors = finishedTasksByExecutorId.filter { case (_, numOutputs) =>
+      numOutputs >= averageTaskNum * shuffleSkewRatio
+    }.toSeq
+      .sortBy(_._2)(Ordering.Int.reverse)
+      .take(maxSkewedNum)
+
+    if (skewedExecutors.nonEmpty) {
+      logDebug(s"Skewed executors (average $averageTaskNum) for stage " +
+        s"$stageId is $skewedExecutors")
+    }
+    skewedExecutors.map(_._1).toSet
+  }
+
+  def filterShuffleSkewExecutors(
+    shuffledOffers: Seq[WorkerOffer]): Seq[WorkerOffer] = {
+    val skewedExecutors = getSkewedExecutors()
+    if (!isShuffleMapTasks()) {
+      return shuffledOffers
+    }
+    skewedExecutors.foreach(e => filteredSkewExecutors(e) += 1)
+    shuffledOffers.filterNot(e => skewedExecutors.contains(e.executorId))
+  }
+
+  private def getAverageTaskNum() = {
+    if (finishedTasksByExecutorId.nonEmpty) {
+      math.max(tasksSuccessful / finishedTasksByExecutorId.size, shuffleSkewMinFinishedTasks)
+    } else {
+      shuffleSkewMinFinishedTasks
+    }
   }
 
   /**
