@@ -80,6 +80,8 @@ private[spark] class CoarseGrainedExecutorBackend(
 
   private var decommissioned = false
 
+  private val threadDumpReporter = startThreadDumpReporterIfNeeded()
+
   // Track the last time in ns that at least one task is running. If no task is running and all
   // shuffle/RDD data migration are done, the decommissioned executor should exit.
   private var lastTaskFinishTime = new AtomicLong(System.nanoTime())
@@ -134,6 +136,17 @@ private[spark] class CoarseGrainedExecutorBackend(
       new ChildFirstURLClassLoader(urls, currentLoader)
     } else {
       new MutableURLClassLoader(urls, currentLoader)
+    }
+  }
+
+  private def startThreadDumpReporterIfNeeded(): Option[ThreadDumpReporter] = {
+    val threadDumpEnabled = env.conf.get(DIAGNOSTICS_THREAD_DUMP_ENABLED)
+    if (threadDumpEnabled) {
+      val initialDelaySec = env.conf.get(DIAGNOSTICS_THREAD_DUMP_INITIAL_DELAY) * 60
+      val periodSec = env.conf.get(DIAGNOSTICS_THREAD_DUMP_PERIOD) * 60
+      Some(new ThreadDumpReporter(initialDelaySec, periodSec))
+    } else {
+      None
     }
   }
 

@@ -855,6 +855,24 @@ package object config {
       .booleanConf
       .createWithDefault(true)
 
+  private[spark] val DIAGNOSTICS_THREAD_DUMP_ENABLED =
+    ConfigBuilder("spark.diagnostic.threadDump.enabled")
+      .version("3.3.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  private[spark] val DIAGNOSTICS_THREAD_DUMP_INITIAL_DELAY =
+    ConfigBuilder("spark.diagnostic.threadDump.initialDelay")
+      .version("3.3.0")
+      .timeConf(TimeUnit.MINUTES)
+      .createWithDefault(5)
+
+  private[spark] val DIAGNOSTICS_THREAD_DUMP_PERIOD =
+    ConfigBuilder("spark.diagnostic.threadDump.period")
+      .version("3.3.0")
+      .timeConf(TimeUnit.MINUTES)
+      .createWithDefault(5)
+
   private[spark] val EXCLUDE_ON_FAILURE_ENABLED =
     ConfigBuilder("spark.excludeOnFailure.enabled")
       .version("3.1.0")
