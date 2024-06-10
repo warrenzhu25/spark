@@ -29,6 +29,7 @@ import org.apache.spark.annotation.{DeveloperApi, Since}
 import org.apache.spark.executor.{ExecutorMetrics, TaskMetrics}
 import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.scheduler.cluster.ExecutorInfo
+import org.apache.spark.status.api.v1.ThreadStackTrace
 import org.apache.spark.storage.{BlockManagerId, BlockUpdatedInfo}
 
 @DeveloperApi
@@ -302,6 +303,12 @@ case class SparkListenerLogStart(sparkVersion: String) extends SparkListenerEven
 case class SparkListenerResourceProfileAdded(resourceProfile: ResourceProfile)
   extends SparkListenerEvent
 
+@DeveloperApi
+@Since("3.5.0")
+case class SparkListenerThreadDumpAdded(time: Long, executorId: String,
+  threadStackTraces: Array[ThreadStackTrace])
+  extends SparkListenerEvent
+
 /**
  * Interface for listening to events from the Spark scheduler. Most applications should probably
  * extend SparkListener or SparkFirehoseListener directly, rather than implementing this class.
@@ -499,6 +506,8 @@ private[spark] trait SparkListenerInterface {
    * Called when a Resource Profile is added to the manager.
    */
   def onResourceProfileAdded(event: SparkListenerResourceProfileAdded): Unit
+
+  def onThreadDumpAdded(event: SparkListenerThreadDumpAdded): Unit
 }
 
 
@@ -592,4 +601,6 @@ abstract class SparkListener extends SparkListenerInterface {
   override def onOtherEvent(event: SparkListenerEvent): Unit = { }
 
   override def onResourceProfileAdded(event: SparkListenerResourceProfileAdded): Unit = { }
+
+  override def onThreadDumpAdded(event: SparkListenerThreadDumpAdded): Unit = {}
 }
