@@ -33,6 +33,7 @@ import org.apache.spark.rdd.{DeterministicLevel, RDDOperationScope}
 import org.apache.spark.resource.{ExecutorResourceRequest, ResourceInformation, ResourceProfile, TaskResourceRequest}
 import org.apache.spark.scheduler._
 import org.apache.spark.scheduler.cluster.ExecutorInfo
+import org.apache.spark.status.api.v1.{StackTrace, ThreadStackTrace}
 import org.apache.spark.storage._
 import org.apache.spark.util.Utils.weakIntern
 
@@ -282,6 +283,44 @@ private[spark] object JsonProtocol extends JsonUtils {
     executorResourceRequestMapToJson(profileAdded.resourceProfile.executorResources, g)
     g.writeFieldName("Task Resource Requests")
     taskResourceRequestMapToJson(profileAdded.resourceProfile.taskResources, g)
+    g.writeEndObject()
+  }
+
+  def threadDumpAddedToJson(
+    threadDumpAdded: SparkListenerThreadDumpAdded,
+    g: JsonGenerator
+  ): Unit = {
+    g.writeStartObject()
+    g.writeStringField("Event", SPARK_LISTENER_EVENT_FORMATTED_CLASS_NAMES.threadDumpAdded)
+    g.writeNumberField("time", threadDumpAdded.time)
+    g.writeStringField("executorId", threadDumpAdded.executorId)
+    g.writeArrayFieldStart("threadStackTraces")
+    threadDumpAdded.threadStackTraces.foreach(t => threadStackTraceToJson(t, g))
+    g.writeEndArray()
+    g.writeEndObject()
+  }
+
+  def threadStackTraceToJson(threadStackTrace: ThreadStackTrace, g: JsonGenerator): Unit = {
+    g.writeStartObject()
+
+    // Key Fields from ThreadStackTrace
+    g.writeNumberField("threadId", threadStackTrace.threadId)
+    g.writeStringField("threadName", threadStackTrace.threadName)
+    g.writeStringField("threadState", threadStackTrace.threadState.toString)
+
+    // Nested stackTrace Handling
+    g.writeArrayFieldStart("stackTrace")
+    threadStackTrace.stackTrace.elems.foreach(g.writeString)
+    g.writeEndArray()
+
+    // Optional and Collection Fields
+    g.writeNumberField("blockedByThreadId", threadStackTrace.blockedByThreadId.getOrElse(-1L))
+    g.writeStringField("blockedByLock", threadStackTrace.blockedByLock)
+
+    g.writeArrayFieldStart("holdingLocks")
+    threadStackTrace.holdingLocks.foreach(g.writeString)
+    g.writeEndArray()
+
     g.writeEndObject()
   }
 
@@ -844,6 +883,7 @@ private[spark] object JsonProtocol extends JsonUtils {
     val stageExecutorMetrics = Utils.getFormattedClassName(SparkListenerStageExecutorMetrics)
     val blockUpdate = Utils.getFormattedClassName(SparkListenerBlockUpdated)
     val resourceProfileAdded = Utils.getFormattedClassName(SparkListenerResourceProfileAdded)
+    val threadDumpAdded = Utils.getFormattedClassName(SparkListenerThreadDumpAdded)
   }
 
   def sparkEventFromJson(json: String): SparkListenerEvent = {
@@ -1554,6 +1594,31 @@ private[spark] object JsonProtocol extends JsonUtils {
     val e = new Exception(message)
     e.setStackTrace(stackTraceFromJson(json.get("Stack Trace")))
     e
+  }
+
+  def threadStackTraceFromJson(json: JsonNode): ThreadStackTrace = {
+    val threadId = json.get("threadId").extractLong
+    val threadName = json.get( "threadName").extractString
+    val threadState = Thread.State.valueOf(json.get( "threadState").extractString)
+
+    val stackTrace = StackTrace(
+      elems = json.get("stackTraces").
+        extractElements.map(_.extractString).toArray.toSeq)
+
+    val blockedByThreadId = jsonOption(json.get("blockedByThreadId"))
+      .map(_.extractLong)
+    val blockedByLock = json.get("blockedByLock").extractString
+    val holdingLocks = json.get("holdingLocks").extractElements.map(_.extractString).toArray.toSeq
+
+    ThreadStackTrace(
+      threadId,
+      threadName,
+      threadState,
+      stackTrace,
+      blockedByThreadId,
+      blockedByLock,
+      holdingLocks
+    )
   }
 
   /** Return an option that translates NullNode to None */

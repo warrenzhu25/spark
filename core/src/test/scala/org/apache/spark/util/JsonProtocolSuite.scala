@@ -39,6 +39,8 @@ import org.apache.spark.resource.ResourceProfile.DEFAULT_RESOURCE_PROFILE_ID
 import org.apache.spark.scheduler._
 import org.apache.spark.scheduler.cluster.ExecutorInfo
 import org.apache.spark.shuffle.MetadataFetchFailedException
+import org.apache.spark.status.api.v1.StackTrace
+import org.apache.spark.status.api.v1.ThreadStackTrace
 import org.apache.spark.storage._
 
 class JsonProtocolSuite extends SparkFunSuite {
@@ -161,6 +163,18 @@ class JsonProtocolSuite extends SparkFunSuite {
     val resourceProfile = rprofBuilder.build
     resourceProfile.setResourceProfileId(21)
     val resourceProfileAdded = SparkListenerResourceProfileAdded(resourceProfile)
+    val threadStackTrace = ThreadStackTrace(
+      1234,
+      "main",
+      Thread.State.RUNNABLE,
+      StackTrace(Seq("com.foo.loader//com.foo.bar.App.run(App.java:12)",
+        "com.foo.loader//com.foo.bar.App.run(App.java:12)")),
+      None,
+      "",
+      Seq("1")
+    )
+    val threadDumpAdded = SparkListenerThreadDumpAdded(0, "exe1", Array(threadStackTrace))
+
     testEvent(stageSubmitted, stageSubmittedJsonString)
     testEvent(stageSubmittedWithNullProperties, stageSubmittedWithNullPropertiesJsonString)
     testEvent(stageCompleted, stageCompletedJsonString)
@@ -194,6 +208,7 @@ class JsonProtocolSuite extends SparkFunSuite {
     testEvent(blockUpdated, blockUpdatedJsonString)
     testEvent(stageExecutorMetrics, stageExecutorMetricsJsonString)
     testEvent(resourceProfileAdded, resourceProfileJsonString)
+    testEvent(threadDumpAdded, threadDumpAddedJsonString)
   }
 
   test("Dependent Classes") {
@@ -1060,6 +1075,10 @@ private[spark] object JsonProtocolSuite extends Assertions {
         assert(e1.stageId === e2.stageId)
         assert(e1.stageAttemptId === e2.stageAttemptId)
         assertEquals(e1.executorMetrics, e2.executorMetrics)
+      case (e1: SparkListenerThreadDumpAdded, e2: SparkListenerThreadDumpAdded) =>
+        assert(e1.executorId === e2.executorId)
+        assert(e1.time === e2.time)
+        assert(e1.threadStackTraces.length === e2.threadStackTraces.length)
       case (e1, e2) =>
         assert(e1 === e2)
       case _ => fail("Events don't match in types!")
@@ -1112,6 +1131,31 @@ private[spark] object JsonProtocolSuite extends Assertions {
     assert(info1.finishTime === info2.finishTime)
     assert(info1.failed === info2.failed)
     assert(info1.accumulables === info2.accumulables)
+  }
+
+  private def assertEquals(info1: ThreadStackTrace, info2: ThreadStackTrace): Unit = {
+    assert(info1.threadId == info2.threadId,
+      s"Thread IDs do not match: ${info1.threadId} vs ${info2.threadId}")
+    assert(info1.threadName == info2.threadName,
+      s"Thread names do not match: ${info1.threadName} vs ${info2.threadName}")
+    assert(info1.threadState == info2.threadState,
+      s"Thread states do not match: ${info1.threadState} vs ${info2.threadState}")
+
+    // Handle optional blockedByThreadId
+    (info1.blockedByThreadId, info2.blockedByThreadId) match {
+      case (Some(id1), Some(id2)) => assert(id1 == id2,
+        s"Blocked by thread IDs do not match: $id1 vs $id2")
+      case (None, None) => // Both are None, so they match
+      case _ => assert(false,
+        s"Blocked by thread ID mismatch: ${info1.blockedByThreadId} vs ${info2.blockedByThreadId}")
+    }
+
+    assert(info1.blockedByLock == info2.blockedByLock,
+      s"Blocked by locks do not match: ${info1.blockedByLock} vs ${info2.blockedByLock}")
+
+    // Compare holding locks
+    assert(info1.holdingLocks.sorted == info2.holdingLocks.sorted,
+      s"Holding locks do not match: ${info1.holdingLocks} vs ${info2.holdingLocks}")
   }
 
   private def assertEquals(info1: ExecutorInfo, info2: ExecutorInfo): Unit = {
@@ -3106,6 +3150,26 @@ private[spark] object JsonProtocolSuite extends Assertions {
       |  }
       |}
     """.stripMargin
+
+  val threadDumpAddedJsonString =
+    """
+{
+      "Event" : "org.apache.spark.scheduler.SparkListenerThreadDumpAdded",
+      "time" : 0,
+      "executorId" : "exe1",
+      "threadStackTraces" : [ {
+        "threadId" : 1234,
+        "threadName" : "main",
+        "threadState" : "RUNNABLE",
+        "stackTrace" : {
+          "elems" : [ "com.foo.loader//com.foo.bar.App.run(App.java:12)", "com.foo.loader//com.foo.bar.App.run(App.java:12)" ]
+        },
+        "blockedByThreadId" : null,
+        "blockedByLock" : "",
+        "holdingLocks" : [ "1" ]
+      } ]
+    }
+  """
 
 }
 
