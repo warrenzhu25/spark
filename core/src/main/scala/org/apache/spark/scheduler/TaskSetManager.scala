@@ -35,7 +35,9 @@ import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.internal.config._
 import org.apache.spark.resource.ResourceInformation
 import org.apache.spark.scheduler.SchedulingMode._
-import org.apache.spark.util.{AccumulatorV2, Clock, LongAccumulator, SystemClock, Utils}
+import org.apache.spark.status.api.v1.ThreadStackTrace
+import org.apache.spark.storage.BlockManagerMessages.TriggerThreadDump
+import org.apache.spark.util.{AccumulatorV2, Clock, LongAccumulator, SystemClock, ThreadUtils, Utils}
 import org.apache.spark.util.collection.PercentileHeap
 
 /**
@@ -109,6 +111,16 @@ private[spark] class TaskSetManager(
     }
     numTasks <= slots
   }
+
+  private val hangDetectionEnabled = conf.get(HANG_DETECTION_ENABLE)
+  private val hangDetectionThreshold = conf.get(HANG_DETECTION_TASK_DURATION_THRESHOLD)
+  private val hangDetectionExecutor =
+    if (hangDetectionEnabled) {
+      val executor = ThreadUtils.newDaemonThreadPoolScheduledExecutor("hang-detection", 1)
+      executor.schedule(new Runnable {
+        override def run(): Unit = checkHangTasks()
+      }, hangDetectionThreshold, TimeUnit.MILLISECONDS)
+    } else None
 
   private val executorDecommissionKillInterval =
     conf.get(EXECUTOR_DECOMMISSION_KILL_INTERVAL).map(TimeUnit.SECONDS.toMillis)
@@ -1215,6 +1227,47 @@ private[spark] class TaskSetManager(
       }
     }
     foundTasks
+  }
+
+  private def checkHangTasks(): Unit = {
+    val currentTimeMillis = clock.getTimeMillis()
+
+    for (tid <- runningTasksSet) {
+      val info = taskInfos(tid)
+      val index = info.index
+      val runtimeMs = info.timeRunning(currentTimeMillis)
+      if (runtimeMs > hangDetectionThreshold) {
+        val threadDump = getExecutorThreadDump(info.executorId)
+        val message = s"Task $index in stage ${taskSet.id} running $runtimeMs ms exceeds " +
+        "hang detection threshold"
+        logError(message + "; taking thread dump and aborting job")
+        abort(message)
+        return
+      }
+    }
+  }
+
+  /**
+   * Get executor thread dumps.  This method may be expensive.
+   * Logs an error and returns None if we failed to obtain a thread dump, which could occur due
+   * to an executor being dead or unresponsive or due to network issues while sending the thread
+   * dump message back to the driver.
+   */
+  private[spark] def getExecutorThreadDump(executorId: String): Option[Array[ThreadStackTrace]] = {
+    try {
+        env.blockManager.master.getExecutorEndpointRef(executorId) match {
+          case Some(endpointRef) =>
+            Some(endpointRef.askSync[Array[ThreadStackTrace]](TriggerThreadDump))
+          case None =>
+            logWarning(s"Executor $executorId might already have stopped and " +
+              "can not request thread dump from it.")
+            None
+        }
+    } catch {
+      case e: Exception =>
+        logError(s"Exception getting thread dump from executor $executorId", e)
+        None
+    }
   }
 
   private def getLocalityWait(level: TaskLocality.TaskLocality): Long = {

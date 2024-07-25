@@ -2083,6 +2083,22 @@ package object config {
       .timeConf(TimeUnit.MILLISECONDS)
       .createOptional
 
+  private[spark] val HANG_DETECTION_ENABLE =
+    ConfigBuilder("spark.diagnostic.hangDetect.enabled")
+      .doc("When set to true, spark will detect deadlock and hanging tasks. " +
+        "If detected, task will be killed and application will fail. " +
+        "This can help auto detect hang and diagnosis root cause of task hang.")
+      .version("3.3.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  private[spark] val HANG_DETECTION_TASK_DURATION_THRESHOLD =
+    ConfigBuilder("spark.diagnostic.hangDetect.taskDurationThreshold")
+      .doc("How long a task running for considered as hang")
+      .version("3.3.0")
+      .timeConf(TimeUnit.MINUTES)
+      .createWithDefault(30)
+
   private[spark] val SPECULATION_ENABLED =
     ConfigBuilder("spark.speculation")
       .version("0.6.0")
