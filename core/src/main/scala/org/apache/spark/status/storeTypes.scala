@@ -442,6 +442,12 @@ private[spark] class ResourceProfileWrapper(val rpInfo: ResourceProfileInfo) {
 
 }
 
+private[spark] class ThreadDumpWrapper(val threadDumpInfo: ThreadDumpInfo) {
+
+  @JsonIgnore @KVIndex
+  def id: Int = threadDumpInfo.id
+}
+
 private[spark] class ExecutorStageSummaryWrapper(
     val stageId: Int,
     val stageAttemptId: Int,

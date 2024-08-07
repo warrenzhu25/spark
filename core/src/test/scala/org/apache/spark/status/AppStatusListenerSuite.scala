@@ -34,6 +34,7 @@ import org.apache.spark.scheduler._
 import org.apache.spark.scheduler.cluster._
 import org.apache.spark.status.ListenerEventsTestHelper._
 import org.apache.spark.status.api.v1
+import org.apache.spark.status.api.v1.{StackTrace, ThreadStackTrace}
 import org.apache.spark.storage._
 import org.apache.spark.tags.ExtendedLevelDBTest
 import org.apache.spark.util.Utils
@@ -104,6 +105,36 @@ abstract class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter 
       assert(info.sparkProperties === details("Spark Properties"))
       assert(info.systemProperties === details("System Properties"))
       assert(info.classpathEntries === details("Classpath Entries"))
+    }
+  }
+
+  test("thread dump info") {
+    val listener = new AppStatusListener(store, conf, true)
+
+    val threadStackTrace = ThreadStackTrace(
+      1234,
+      "main",
+      Thread.State.RUNNABLE,
+      StackTrace(Seq("com.foo.loader//com.foo.bar.App.run(App.java:12)",
+        "com.foo.loader//com.foo.bar.App.run(App.java:12)")),
+      None,
+      "",
+      Seq("1")
+    )
+    val timestamp = System.currentTimeMillis()
+    val execId = "exec1"
+    val threadDumpAdded = SparkListenerThreadDumpAdded(timestamp, execId, Array(threadStackTrace))
+
+    listener.onThreadDumpAdded(threadDumpAdded)
+
+    val id = 1
+    check[ThreadDumpWrapper](id) { threadDump =>
+      val info = threadDump.threadDumpInfo
+
+      assert(info.id == id)
+      assert(info.time == timestamp)
+      assert(info.executorId == execId)
+      assert(info.threadStackTraces === Array(threadStackTrace))
     }
   }
 

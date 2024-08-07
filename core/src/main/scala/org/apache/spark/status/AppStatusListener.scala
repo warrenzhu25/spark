@@ -19,6 +19,7 @@ package org.apache.spark.status
 
 import java.util.Date
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.{ArrayBuffer, HashMap}
@@ -32,6 +33,7 @@ import org.apache.spark.internal.config.Status._
 import org.apache.spark.resource.ResourceProfile.CPUS
 import org.apache.spark.scheduler._
 import org.apache.spark.status.api.v1
+import org.apache.spark.status.api.v1.ThreadDumpInfo
 import org.apache.spark.storage._
 import org.apache.spark.ui.SparkUI
 import org.apache.spark.ui.scope._
@@ -88,6 +90,8 @@ private[spark] class AppStatusListener(
 
   /** The last time when flushing `LiveEntity`s. This is to avoid flushing too frequently. */
   private var lastFlushTimeNs = System.nanoTime()
+
+  private val currentThreadDumpId = new AtomicInteger(0)
 
   kvstore.addTrigger(classOf[ExecutorSummaryWrapper], conf.get(MAX_RETAINED_DEAD_EXECUTORS))
     { count => cleanupExecutors(count) }
@@ -163,6 +167,12 @@ private[spark] class AppStatusListener(
     val rpInfo = new v1.ResourceProfileInfo(liveRP.resourceProfileId,
       liveRP.executorResources, liveRP.taskResources)
     kvstore.write(new ResourceProfileWrapper(rpInfo))
+  }
+
+  override def onThreadDumpAdded(event: SparkListenerThreadDumpAdded): Unit = {
+    val threadDumpInfo = new ThreadDumpInfo(currentThreadDumpId.incrementAndGet(), event.time,
+      event.executorId, event.threadStackTraces)
+    kvstore.write(new ThreadDumpWrapper(threadDumpInfo))
   }
 
   override def onEnvironmentUpdate(event: SparkListenerEnvironmentUpdate): Unit = {

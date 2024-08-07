@@ -68,6 +68,12 @@ class ResourceProfileInfo private[spark](
     val executorResources: Map[String, ExecutorResourceRequest],
     val taskResources: Map[String, TaskResourceRequest])
 
+class ThreadDumpInfo private[spark](
+    val id: Int,
+    val time: Long,
+    val executorId: String,
+    val threadStackTraces: Array[ThreadStackTrace])
+
 class ExecutorStageSummary private[spark](
     val taskTime : Long,
     val failedTasks : Int,
