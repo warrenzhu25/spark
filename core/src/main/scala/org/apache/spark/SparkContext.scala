@@ -718,7 +718,7 @@ class SparkContext(config: SparkConf) extends Logging {
   }
 
   /**
-   * Called by the web UI to obtain executor thread dumps.  This method may be expensive.
+   * Obtain executor thread dumps. This method may be expensive.
    * Logs an error and returns None if we failed to obtain a thread dump, which could occur due
    * to an executor being dead or unresponsive or due to network issues while sending the thread
    * dump message back to the driver.

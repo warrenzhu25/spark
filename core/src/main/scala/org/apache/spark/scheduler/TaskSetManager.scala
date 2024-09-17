@@ -1237,36 +1237,13 @@ private[spark] class TaskSetManager(
       val index = info.index
       val runtimeMs = info.timeRunning(currentTimeMillis)
       if (runtimeMs > hangDetectionThreshold) {
-        val threadDump = getExecutorThreadDump(info.executorId)
+        val threadDump = sched.sc.getExecutorThreadDump(info.executorId)
         val message = s"Task $index in stage ${taskSet.id} running $runtimeMs ms exceeds " +
         "hang detection threshold"
         logError(message + "; taking thread dump and aborting job")
         abort(message)
         return
       }
-    }
-  }
-
-  /**
-   * Get executor thread dumps.  This method may be expensive.
-   * Logs an error and returns None if we failed to obtain a thread dump, which could occur due
-   * to an executor being dead or unresponsive or due to network issues while sending the thread
-   * dump message back to the driver.
-   */
-  private[spark] def getExecutorThreadDump(executorId: String): Option[Array[ThreadStackTrace]] = {
-    try {
-        env.blockManager.master.getExecutorEndpointRef(executorId) match {
-          case Some(endpointRef) =>
-            Some(endpointRef.askSync[Array[ThreadStackTrace]](TriggerThreadDump))
-          case None =>
-            logWarning(s"Executor $executorId might already have stopped and " +
-              "can not request thread dump from it.")
-            None
-        }
-    } catch {
-      case e: Exception =>
-        logError(s"Exception getting thread dump from executor $executorId", e)
-        None
     }
   }
 
