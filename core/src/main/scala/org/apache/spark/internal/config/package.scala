@@ -2652,4 +2652,11 @@ package object config {
       .doubleConf
       .checkValue(ratio => ratio > 0 && ratio <= 1, "Decommission max ratio should > 0 and <= 1")
       .createWithDefault(1)
+
+  private[spark] val EVENT_LOG_THREAD_DUMP =
+    ConfigBuilder("spark.eventLog.logThreadDump")
+      .doc("Whether to write thread dump to the event log.")
+      .version("3.3.0")
+      .booleanConf
+      .createWithDefault(false)
 }

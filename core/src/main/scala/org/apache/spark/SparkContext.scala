@@ -746,7 +746,7 @@ class SparkContext(config: SparkConf) extends Logging {
    */
   private[spark] def getExecutorThreadDump(executorId: String): Option[Array[ThreadStackTrace]] = {
     try {
-      if (executorId == SparkContext.DRIVER_IDENTIFIER) {
+      val threadDump = if (executorId == SparkContext.DRIVER_IDENTIFIER) {
         Some(Utils.getThreadDump())
       } else {
         env.blockManager.master.getExecutorEndpointRef(executorId) match {
@@ -758,6 +758,13 @@ class SparkContext(config: SparkConf) extends Logging {
             None
         }
       }
+      val logThreadDumpToEventLog = conf.get(EVENT_LOG_THREAD_DUMP)
+      if (logThreadDumpToEventLog && eventLogger.nonEmpty) {
+        threadDump.foreach(t =>
+          eventLogger.get.onThreadDumpAdded(
+            SparkListenerThreadDumpAdded(System.currentTimeMillis(), executorId, t)))
+      }
+      threadDump
     } catch {
       case e: Exception =>
         logError(s"Exception getting thread dump from executor $executorId", e)
