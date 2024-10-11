@@ -809,7 +809,7 @@ private[spark] class ExecutorAllocationManager(
       allocationManager.synchronized {
         stageAttemptToNumRunningTask(stageAttempt) =
           stageAttemptToNumRunningTask.getOrElse(stageAttempt, 0) + 1
-        stageAttemptToAverageTasksTime(stageAttempt).onTaskStart()
+        stageAttemptToAverageTasksTime.get(stageAttempt).foreach(_.onTaskStart())
         // If this is the last pending task, mark the scheduler queue as empty
         if (taskStart.taskInfo.speculative) {
           stageAttemptToSpeculativeTaskIndices.getOrElseUpdate(stageAttempt,
@@ -834,7 +834,8 @@ private[spark] class ExecutorAllocationManager(
       allocationManager.synchronized {
         if (stageAttemptToNumRunningTask.contains(stageAttempt)) {
           stageAttemptToNumRunningTask(stageAttempt) -= 1
-          stageAttemptToAverageTasksTime(stageAttempt).onTaskEnd(taskEnd.taskInfo.duration)
+          stageAttemptToAverageTasksTime.get(stageAttempt)
+            .foreach(_.onTaskEnd(taskEnd.taskInfo.duration))
           if (stageAttemptToNumRunningTask(stageAttempt) == 0) {
             stageAttemptToNumRunningTask -= stageAttempt
             removeStageFromResourceProfileIfUnused(stageAttempt)
@@ -1022,9 +1023,9 @@ private[spark] class ExecutorAllocationManager(
     def getMaxNeededPerResourceProfile(rpId: Int): Int = {
       val attempts = resourceProfileIdToStageAttempt.getOrElse(rpId, Set.empty).toSeq
 
-
       attempts
-        .map(a => stageAttemptToAverageTasksTime(a).getMaxNeededExecutors(dynamicRatioBaselineMs))
+        .flatMap(a => stageAttemptToAverageTasksTime.get(a)
+          map(_.getMaxNeededExecutors(dynamicRatioBaselineMs)))
         .sum
     }
   }

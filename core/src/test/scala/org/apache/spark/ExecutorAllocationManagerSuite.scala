@@ -1626,7 +1626,7 @@ class ExecutorAllocationManagerSuite extends SparkFunSuite {
     assert(maxNumExecutorsNeededPerResourceProfile(manager, defaultProfile) === 1)
   }
 
-  test("SPARK-8366: dynamic allocation ratio should be based on running task duration") {
+  test("dynamic allocation ratio should be based on running task duration") {
     val clock = new ManualClock()
     val conf = createConf()
       .set(config.DYN_ALLOCATION_DYNAMIC_RATIO_ENABLED, true)
@@ -1648,7 +1648,7 @@ class ExecutorAllocationManagerSuite extends SparkFunSuite {
     }
   }
 
-  test("SPARK-8366: dynamic allocation ratio should be based on finished task duration") {
+  test("dynamic allocation ratio should be based on finished task duration") {
     val clock = new ManualClock()
     val conf = createConf()
       .set(config.DYN_ALLOCATION_DYNAMIC_RATIO_ENABLED, true)
