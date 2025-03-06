@@ -269,6 +269,10 @@ private[spark] class EventLoggingListener(
     logEvent(event, flushLogger = true)
   }
 
+  override def onThreadDumpAdded(event: SparkListenerThreadDumpAdded): Unit = {
+    logEvent(event, flushLogger = true)
+  }
+
   override def onOtherEvent(event: SparkListenerEvent): Unit = {
     if (event.logEvent) {
       logEvent(event, flushLogger = true)
