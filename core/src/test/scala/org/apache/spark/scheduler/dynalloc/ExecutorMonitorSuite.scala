@@ -26,7 +26,7 @@ import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito.{doAnswer, mock, when}
 
 import org.apache.spark._
-import org.apache.spark.executor.ExecutorMetrics
+import org.apache.spark.executor.{ExecutorMetrics, TaskMetrics}
 import org.apache.spark.internal.config._
 import org.apache.spark.resource.ResourceProfile.{DEFAULT_RESOURCE_PROFILE_ID, UNKNOWN_RESOURCE_PROFILE_ID}
 import org.apache.spark.resource.ResourceProfile
@@ -332,6 +332,9 @@ class ExecutorMonitorSuite extends SparkFunSuite {
     val stage5 = stageInfo(5, shuffleId = 1)
     val stage6 = stageInfo(6)
 
+    val taskMetrics = TaskMetrics.empty
+    taskMetrics.shuffleWriteMetrics.incBytesWritten(100)
+
     // Start jobs 1 and 2. Finish a task on each, but don't finish the jobs. This should prevent the
     // executor from going idle since there are active shuffles.
     monitor.onJobStart(SparkListenerJobStart(1, clock.getTimeMillis(), Seq(stage1, stage2)))
@@ -348,12 +351,12 @@ class ExecutorMonitorSuite extends SparkFunSuite {
 
     monitor.onTaskStart(SparkListenerTaskStart(1, 0, taskInfo("1", 1)))
     monitor.onTaskEnd(SparkListenerTaskEnd(1, 0, "foo", Success, taskInfo("1", 1),
-      new ExecutorMetrics, null))
+      new ExecutorMetrics, taskMetrics))
     assert(monitor.timedOutExecutors(idleDeadline).isEmpty)
 
     monitor.onTaskStart(SparkListenerTaskStart(3, 0, taskInfo("1", 1)))
     monitor.onTaskEnd(SparkListenerTaskEnd(3, 0, "foo", Success, taskInfo("1", 1),
-      new ExecutorMetrics, null))
+      new ExecutorMetrics, taskMetrics))
     assert(monitor.timedOutExecutors(idleDeadline).isEmpty)
 
     // Finish the jobs, now the executor should be idle, but with the shuffle timeout, since the
@@ -384,6 +387,127 @@ class ExecutorMonitorSuite extends SparkFunSuite {
     assert(monitor.timedOutExecutors(idleDeadline) === Seq("1"))
   }
 
+  test("shuffle block tracking via onBlockUpdated") {
+    val bus = mockListenerBus()
+    conf.set(DYN_ALLOCATION_SHUFFLE_TRACKING_ENABLED, true).set(SHUFFLE_SERVICE_ENABLED, false)
+    monitor = new ExecutorMonitor(conf, client, bus, clock, allocationManagerSource())
+
+    monitor.onExecutorAdded(SparkListenerExecutorAdded(clock.getTimeMillis(), "1", execInfo))
+    knownExecs += "1"
+
+    val stage1 = stageInfo(1, shuffleId = 0)
+    monitor.onJobStart(SparkListenerJobStart(1, clock.getTimeMillis(), Seq(stage1)))
+
+    val blockUpdate = SparkListenerBlockUpdated(
+      BlockUpdatedInfo(BlockManagerId("1", "host1", 12345),
+        ShuffleDataBlockId(0, 0, 0), StorageLevel.DISK_ONLY, 0L, 100L))
+    monitor.onBlockUpdated(blockUpdate)
+
+    // Check that shuffle size is tracked correctly (uses diskSize)
+    assert(monitor.getShuffleSize("1", 0) === 100L)
+    assert(monitor.getShuffleTotalBytes("1") === 100L)
+    assert(!monitor.isExecutorIdle("1"))
+
+    monitor.onJobEnd(SparkListenerJobEnd(1, clock.getTimeMillis(), JobSucceeded))
+    assert(monitor.isExecutorIdle("1"))
+    assert(monitor.timedOutExecutors(idleDeadline).isEmpty)
+    assert(monitor.timedOutExecutors(shuffleDeadline) === Seq("1"))
+  }
+
+  test("shuffle size tracking with zero bytes") {
+    val bus = mockListenerBus()
+    conf.set(DYN_ALLOCATION_SHUFFLE_TRACKING_ENABLED, true).set(SHUFFLE_SERVICE_ENABLED, false)
+    monitor = new ExecutorMonitor(conf, client, bus, clock, allocationManagerSource())
+
+    monitor.onExecutorAdded(SparkListenerExecutorAdded(clock.getTimeMillis(), "1", execInfo))
+    knownExecs += "1"
+
+    val stage1 = stageInfo(1, shuffleId = 0)
+    monitor.onJobStart(SparkListenerJobStart(1, clock.getTimeMillis(), Seq(stage1)))
+
+    val taskMetrics = TaskMetrics.empty
+    // No bytes written
+    monitor.onTaskStart(SparkListenerTaskStart(1, 0, taskInfo("1", 1)))
+    monitor.onTaskEnd(SparkListenerTaskEnd(1, 0, "foo", Success, taskInfo("1", 1),
+      new ExecutorMetrics, taskMetrics))
+
+    // Check that no size is tracked for zero bytes
+    assert(monitor.getShuffleSize("1", 0) === 0L)
+    assert(monitor.getShuffleTotalBytes("1") === 0L)
+    assert(!monitor.isExecutorIdle("1"))
+    monitor.onJobEnd(SparkListenerJobEnd(1, clock.getTimeMillis(), JobSucceeded))
+    assert(monitor.isExecutorIdle("1"))
+    assert(monitor.timedOutExecutors(shuffleDeadline) === Seq("1"))
+  }
+
+  test("shuffle size tracking with multiple shuffle blocks") {
+    val bus = mockListenerBus()
+    conf.set(DYN_ALLOCATION_SHUFFLE_TRACKING_ENABLED, true).set(SHUFFLE_SERVICE_ENABLED, false)
+    monitor = new ExecutorMonitor(conf, client, bus, clock, allocationManagerSource())
+
+    monitor.onExecutorAdded(SparkListenerExecutorAdded(clock.getTimeMillis(), "1", execInfo))
+    knownExecs += "1"
+
+    val stage1 = stageInfo(1, shuffleId = 0)
+    monitor.onJobStart(SparkListenerJobStart(1, clock.getTimeMillis(), Seq(stage1)))
+
+    // Add multiple shuffle blocks with different disk sizes
+    val blockUpdate1 = SparkListenerBlockUpdated(
+      BlockUpdatedInfo(BlockManagerId("1", "host1", 12345),
+        ShuffleDataBlockId(0, 0, 0), StorageLevel.DISK_ONLY, 0L, 50L))
+    monitor.onBlockUpdated(blockUpdate1)
+
+    // Check size after first block (uses diskSize)
+    assert(monitor.getShuffleSize("1", 0) === 50L)
+    assert(monitor.getShuffleTotalBytes("1") === 50L)
+
+    val blockUpdate2 = SparkListenerBlockUpdated(
+      BlockUpdatedInfo(BlockManagerId("1", "host1", 12345),
+        ShuffleDataBlockId(0, 1, 0), StorageLevel.DISK_ONLY, 0L, 75L))
+    monitor.onBlockUpdated(blockUpdate2)
+
+    // Check accumulated size after second block
+    assert(monitor.getShuffleSize("1", 0) === 125L) // 50 + 75
+    assert(monitor.getShuffleTotalBytes("1") === 125L)
+    assert(!monitor.isExecutorIdle("1"))
+
+    monitor.onJobEnd(SparkListenerJobEnd(1, clock.getTimeMillis(), JobSucceeded))
+    assert(monitor.isExecutorIdle("1"))
+    assert(monitor.timedOutExecutors(shuffleDeadline) === Seq("1"))
+
+    // Clean up shuffle and verify size is decremented
+    monitor.shuffleCleaned(0)
+    assert(monitor.getShuffleSize("1", 0) === 0L)
+    assert(monitor.getShuffleTotalBytes("1") === 0L)
+  }
+
+  test("shuffle size tracking via task metrics") {
+    val bus = mockListenerBus()
+    conf.set(DYN_ALLOCATION_SHUFFLE_TRACKING_ENABLED, true).set(SHUFFLE_SERVICE_ENABLED, false)
+    monitor = new ExecutorMonitor(conf, client, bus, clock, allocationManagerSource())
+
+    monitor.onExecutorAdded(SparkListenerExecutorAdded(clock.getTimeMillis(), "1", execInfo))
+    knownExecs += "1"
+
+    val stage1 = stageInfo(1, shuffleId = 0)
+    monitor.onJobStart(SparkListenerJobStart(1, clock.getTimeMillis(), Seq(stage1)))
+
+    val taskMetrics = TaskMetrics.empty
+    taskMetrics.shuffleWriteMetrics.incBytesWritten(200L)
+
+    monitor.onTaskStart(SparkListenerTaskStart(1, 0, taskInfo("1", 1)))
+    monitor.onTaskEnd(SparkListenerTaskEnd(1, 0, "foo", Success, taskInfo("1", 1),
+      new ExecutorMetrics, taskMetrics))
+
+    // Check that task metrics are tracked correctly
+    assert(monitor.getShuffleSize("1", 0) === 200L)
+    assert(monitor.getShuffleTotalBytes("1") === 200L)
+    assert(!monitor.isExecutorIdle("1"))
+
+    monitor.onJobEnd(SparkListenerJobEnd(1, clock.getTimeMillis(), JobSucceeded))
+    assert(monitor.isExecutorIdle("1"))
+    assert(monitor.timedOutExecutors(shuffleDeadline) === Seq("1"))
+  }
 
   test("SPARK-28839: Avoids NPE in context cleaner when shuffle service is on") {
     val bus = mockListenerBus()
@@ -417,14 +541,17 @@ class ExecutorMonitorSuite extends SparkFunSuite {
     val stage4 = stageInfo(4)
     monitor.onJobStart(SparkListenerJobStart(2, clock.getTimeMillis(), Seq(stage3, stage4)))
 
+    val taskMetrics = TaskMetrics.empty
+    taskMetrics.shuffleWriteMetrics.incBytesWritten(100)
+
     monitor.onTaskStart(SparkListenerTaskStart(1, 0, taskInfo("1", 1)))
     monitor.onTaskEnd(SparkListenerTaskEnd(1, 0, "foo", Success, taskInfo("1", 1),
-     new ExecutorMetrics, null))
+      new ExecutorMetrics, taskMetrics))
     assert(monitor.timedOutExecutors(idleDeadline) === Seq("2"))
 
     monitor.onTaskStart(SparkListenerTaskStart(3, 0, taskInfo("2", 1)))
     monitor.onTaskEnd(SparkListenerTaskEnd(3, 0, "foo", Success, taskInfo("2", 1),
-      new ExecutorMetrics, null))
+      new ExecutorMetrics, taskMetrics))
     assert(monitor.timedOutExecutors(idleDeadline).isEmpty)
 
     monitor.onJobEnd(SparkListenerJobEnd(1, clock.getTimeMillis(), JobSucceeded))
@@ -447,6 +574,9 @@ class ExecutorMonitorSuite extends SparkFunSuite {
       .set(SHUFFLE_SERVICE_ENABLED, false)
     monitor = new ExecutorMonitor(conf, client, null, clock, allocationManagerSource())
 
+    val taskMetrics = TaskMetrics.empty
+    taskMetrics.shuffleWriteMetrics.incBytesWritten(100)
+
     // Generate events that will make executor 1 be idle, while still holding shuffle data.
     // The executor should not be eligible for removal since the timeout is basically "infinite".
     val stage = stageInfo(1, shuffleId = 0)
@@ -455,7 +585,7 @@ class ExecutorMonitorSuite extends SparkFunSuite {
     monitor.onExecutorAdded(SparkListenerExecutorAdded(clock.getTimeMillis(), "1", execInfo))
     monitor.onTaskStart(SparkListenerTaskStart(1, 0, taskInfo("1", 1)))
     monitor.onTaskEnd(SparkListenerTaskEnd(1, 0, "foo", Success, taskInfo("1", 1),
-      new ExecutorMetrics, null))
+      new ExecutorMetrics, taskMetrics))
     monitor.onJobEnd(SparkListenerJobEnd(1, clock.getTimeMillis(), JobSucceeded))
 
     assert(monitor.timedOutExecutors(idleDeadline).isEmpty)
@@ -492,7 +622,11 @@ class ExecutorMonitorSuite extends SparkFunSuite {
       monitor.onBlockUpdated(rddUpdate(1, 0, "1"))
       val t1 = taskInfo("1", 1)
       monitor.onTaskStart(SparkListenerTaskStart(1, 1, t1))
-      monitor.onTaskEnd(SparkListenerTaskEnd(1, 1, "foo", Success, t1, new ExecutorMetrics, null))
+
+      val taskMetrics = TaskMetrics.empty
+      taskMetrics.shuffleWriteMetrics.incBytesWritten(100)
+      monitor.onTaskEnd(SparkListenerTaskEnd(1, 1, "foo", Success, t1,
+        new ExecutorMetrics, taskMetrics))
       monitor.onJobEnd(SparkListenerJobEnd(1, clock.getTimeMillis(), JobSucceeded))
 
       if (isShuffleTrackingEnabled) {
