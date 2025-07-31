@@ -329,7 +329,12 @@ private[spark] class ExecutorMonitor(
       // TODO: Only track used files (SPARK-31974)
       if (shuffleTrackingEnabled && event.reason == Success) {
         stageToShuffleID.get(event.stageId).foreach { shuffleId =>
-          exec.addShuffle(shuffleId)
+          val bytes = event.taskMetrics.shuffleWriteMetrics.bytesWritten
+          if (bytes > 0) {
+            exec.addShuffle(shuffleId, bytes)
+          } else {
+            exec.addShuffle(shuffleId, 0L)
+          }
         }
       }
 
@@ -396,7 +401,9 @@ private[spark] class ExecutorMonitor(
          * has been committed.
          */
         event.blockUpdatedInfo.blockId match {
-          case ShuffleDataBlockId(shuffleId, _, _) => exec.addShuffle(shuffleId)
+          case ShuffleDataBlockId(shuffleId, _, _) =>
+            val size = event.blockUpdatedInfo.diskSize.max(event.blockUpdatedInfo.memSize)
+            exec.addShuffle(shuffleId, size)
           case _ => // For now we only update on data blocks
         }
       }
@@ -551,6 +558,8 @@ private[spark] class ExecutorMonitor(
     // The set of shuffles for which shuffle data is held by the executor.
     // This should only be used in the event thread.
     private val shuffleIds = if (shuffleTrackingEnabled) new mutable.HashSet[Int]() else null
+    private val shuffleSizes = if (shuffleTrackingEnabled) new mutable.HashMap[Int, Long]() else null
+    private var shuffleTotalBytes: Long = 0
 
     def isIdle: Boolean = idleStart >= 0 && !hasActiveShuffle
 
@@ -588,17 +597,28 @@ private[spark] class ExecutorMonitor(
       }
     }
 
-    def addShuffle(id: Int): Unit = {
+    def addShuffle(id: Int, size: Long): Unit = {
       if (shuffleIds.add(id)) {
         hasActiveShuffle = true
+      }
+      if (shuffleSizes != null) {
+        val oldSize = shuffleSizes.getOrElse(id, 0L)
+        shuffleSizes(id) = oldSize + size
+        shuffleTotalBytes += size
       }
     }
 
     def removeShuffle(id: Int): Unit = {
-      if (shuffleIds.remove(id) && shuffleIds.isEmpty) {
-        hasActiveShuffle = false
-        if (isIdle) {
-          updateTimeout()
+      if (shuffleIds.remove(id)) {
+        if (shuffleSizes != null) {
+          shuffleTotalBytes -= shuffleSizes.getOrElse(id, 0L)
+          shuffleSizes.remove(id)
+        }
+        if (shuffleIds.isEmpty) {
+          hasActiveShuffle = false
+          if (isIdle) {
+            updateTimeout()
+          }
         }
       }
     }
