@@ -43,12 +43,11 @@ private[spark] class ExecutorMonitor(
     metrics: ExecutorAllocationManagerSource = null)
   extends SparkListener with CleanerListener with Logging {
 
-  private val idleTimeoutNs = TimeUnit.SECONDS.toNanos(
+  private val idleTimeoutMs = TimeUnit.SECONDS.toMillis(
     conf.get(DYN_ALLOCATION_EXECUTOR_IDLE_TIMEOUT))
-  private val storageTimeoutNs = TimeUnit.SECONDS.toNanos(
+  private val storageTimeoutMs = TimeUnit.SECONDS.toMillis(
     conf.get(DYN_ALLOCATION_CACHED_EXECUTOR_IDLE_TIMEOUT))
-  private val shuffleTimeoutNs = TimeUnit.MILLISECONDS.toNanos(
-    conf.get(DYN_ALLOCATION_SHUFFLE_TRACKING_TIMEOUT))
+  private val shuffleTimeoutMs = conf.get(DYN_ALLOCATION_SHUFFLE_TRACKING_TIMEOUT)
 
   private val fetchFromShuffleSvcEnabled = conf.get(SHUFFLE_SERVICE_ENABLED) &&
     conf.get(SHUFFLE_SERVICE_FETCH_RDD_ENABLED)
@@ -107,7 +106,7 @@ private[spark] class ExecutorMonitor(
    * be timed out. Should only be called from the EAM thread.
    */
   def timedOutExecutors(): Seq[(String, Int)] = {
-    val now = clock.nanoTime()
+    val now = clock.getTimeMillis()
     if (now >= nextTimeout.get()) {
       // Temporarily set the next timeout at Long.MaxValue. This ensures that after
       // scanning all executors below, we know when the next timeout for non-timed out
@@ -565,21 +564,26 @@ private[spark] class ExecutorMonitor(
 
     def updateRunningTasks(delta: Int): Unit = {
       runningTasks = math.max(0, runningTasks + delta)
-      idleStart = if (runningTasks == 0) clock.nanoTime() else -1L
+      idleStart = if (runningTasks == 0) clock.getTimeMillis() else -1L
       updateTimeout()
     }
 
     def updateTimeout(): Unit = {
       val oldDeadline = timeoutAt
       val newDeadline = if (idleStart >= 0) {
-        val _cacheTimeout = if (cachedBlocks.nonEmpty) storageTimeoutNs else 0
+        val _cacheTimeout = if (cachedBlocks.nonEmpty) storageTimeoutMs else 0
         val _shuffleTimeout = if (shuffleIds != null && shuffleIds.nonEmpty) {
-          shuffleTimeoutNs
+        if (conf.get(DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_ENABLED)) {
+          val timeoutPerMb = conf.get(DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_PER_MB)
+          shuffleTotalBytes / 1024 / 1024 * timeoutPerMb
         } else {
-          0
+          shuffleTimeoutMs
         }
+      } else {
+        0
+      }
         // timeout should be max of idleTimeout, storageTimeout and shuffleTimeout
-        val timeout = Seq(_cacheTimeout, _shuffleTimeout, idleTimeoutNs).max
+        val timeout = Seq(_cacheTimeout, _shuffleTimeout, idleTimeoutMs).max
         val deadline = idleStart + timeout
         if (deadline >= 0) deadline else Long.MaxValue
       } else {

@@ -657,6 +657,19 @@ package object config {
       .checkValue(_ >= 0L, "Timeout must be >= 0.")
       .createWithDefault(Long.MaxValue)
 
+  private[spark] val DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_PER_MB =
+    ConfigBuilder("spark.dynamicAllocation.shuffleTracking.dynamicTimeout.perMb")
+      .version("3.5.1")
+      .timeConf(TimeUnit.MILLISECONDS)
+      .checkValue(_ >= 0L, "Timeout must be >= 0.")
+      .createWithDefault(500L) // 120MB / min = 500ms / MB
+
+  private[spark] val DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_ENABLED =
+    ConfigBuilder("spark.dynamicAllocation.shuffleTracking.dynamicTimeout.enabled")
+      .version("3.5.1")
+      .booleanConf
+      .createWithDefault(false)
+
   private[spark] val DYN_ALLOCATION_SCHEDULER_BACKLOG_TIMEOUT =
     ConfigBuilder("spark.dynamicAllocation.schedulerBacklogTimeout")
       .version("1.2.0")
