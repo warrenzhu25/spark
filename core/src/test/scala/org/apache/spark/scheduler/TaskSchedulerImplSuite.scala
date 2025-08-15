@@ -1998,7 +1998,6 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext
 
     assert(scheduler.executorsPendingDecommission.isEmpty)
     clock.advance(5000)
-
     // executor1 hasn't been decommissioned yet
     assert(scheduler.getExecutorDecommissionState("executor1").isEmpty)
 
@@ -2277,5 +2276,29 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext
     taskScheduler.statusUpdate(tid, state, ByteBuffer.allocate(0))
     taskScheduler.handleFailedTask(tsm, tid, state, reason)
   }
+  test("SPARK-30504: scheduler should keep the decommission state when executor is decommissioning") {
+    val clock = new ManualClock(10000L)
+    val scheduler = setupSchedulerForDecommissionTests(clock, 2)
+    val decomTime = clock.getTimeMillis()
+    scheduler.executorDecommission("executor0", ExecutorDecommissionInfo("0", None))
+    scheduler.executorDecommission("executor1", ExecutorDecommissionInfo("1", Some("host1")))
 
+    assert(scheduler.getExecutorDecommissionState("executor0")
+      === Some(ExecutorDecommissionState(decomTime, None)))
+    assert(scheduler.getExecutorDecommissionState("executor1")
+      === Some(ExecutorDecommissionState(decomTime, Some("host1"))))
+    assert(scheduler.getExecutorDecommissionState("executor2").isEmpty)
+
+    scheduler.executorLost("executor1", ExecutorDecommissionFinished("decommission finished"))
+    assert(scheduler.getExecutorDecommissionState("executor1").isEmpty)
+  }
+}
+
+private class NotSerializableFakeTask(stageId: Int, partitionId: Int)
+  extends Task[Int](stageId, partitionId, 0, 1) {
+  // scalastyle:off
+  @transient val x = 1
+  // scalastyle:on
+  override def runTask(context: TaskContext): Int = 1
+  override def preferredLocations: Seq[TaskLocation] = Nil
 }
