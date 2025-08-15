@@ -29,8 +29,42 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config._
 import org.apache.spark.resource.ResourceProfile.UNKNOWN_RESOURCE_PROFILE_ID
 import org.apache.spark.scheduler._
+import org.apache.spark.scheduler.dynalloc.ExecutorMonitor.{ExecutorSummary, Percentiles}
 import org.apache.spark.storage.{RDDBlockId, ShuffleDataBlockId}
 import org.apache.spark.util.Clock
+
+private[spark] object ExecutorMonitor {
+  case class Percentiles(min: Long, p25: Long, median: Long, p75: Long, max: Long) {
+    override def toString: String = s"min=$min, 25%=$p25, 50%=$median, 75%=$p75, max=$max"
+  }
+
+  case class ExecutorSummary(
+      running: Int,
+      idle: Int,
+      idleTime: Option[Percentiles],
+      activeTasks: Option[Percentiles],
+      shuffleSize: Option[Percentiles],
+      cachedRddSize: Option[Percentiles]) {
+    override def toString: String = {
+      val summary = new mutable.StringBuilder()
+      summary.append(s"  Running executors ($running): \n")
+      summary.append(s"    Idle Executors: $idle\n")
+      idleTime.foreach { p =>
+        summary.append(s"      Idle Time (sec): $p\n")
+      }
+      activeTasks.foreach { p =>
+        summary.append(s"    Active Tasks: $p\n")
+      }
+      shuffleSize.foreach { p =>
+        summary.append(s"    Shuffle Size (MB): $p\n")
+      }
+      cachedRddSize.foreach {
+        p => summary.append(s"    Cached RDD Size (MB): $p\n")
+      }
+      summary.toString()
+    }
+  }
+}
 
 /**
  * A monitor for executor activity, used by ExecutorAllocationManager to detect idle executors.
@@ -204,13 +238,15 @@ private[spark] class ExecutorMonitor(
     }
 
     val shuffleStages = event.stageInfos.flatMap { s =>
-      s.shuffleDepId.toSeq.map { shuffleId =>
+      s.shuffleDepId.toSeq.map {
+        shuffleId =>
         s.stageId -> shuffleId
       }
     }
 
     var updateExecutors = false
-    shuffleStages.foreach { case (stageId, shuffle) =>
+    shuffleStages.foreach {
+      case (stageId, shuffle) =>
       val jobIDs = shuffleToActiveJobs.get(shuffle) match {
         case Some(jobs) =>
           // If a shuffle is being re-used, we need to re-scan the executors and update their
@@ -232,7 +268,8 @@ private[spark] class ExecutorMonitor(
       val activeShuffleIds = shuffleStages.map(_._2)
       var needTimeoutUpdate = false
       val activatedExecs = new ExecutorIdCollector()
-      executors.asScala.foreach { case (id, exec) =>
+      executors.asScala.foreach {
+        case (id, exec) =>
         if (!exec.hasActiveShuffle) {
           exec.updateActiveShuffles(activeShuffleIds)
           if (exec.hasActiveShuffle) {
@@ -263,7 +300,8 @@ private[spark] class ExecutorMonitor(
 
     var updateExecutors = false
     val activeShuffles = new mutable.ArrayBuffer[Int]()
-    shuffleToActiveJobs.foreach { case (shuffleId, jobs) =>
+    shuffleToActiveJobs.foreach {
+      case (shuffleId, jobs) =>
       jobs -= event.jobId
       if (jobs.nonEmpty) {
         activeShuffles += shuffleId
@@ -285,7 +323,8 @@ private[spark] class ExecutorMonitor(
       }
 
       val deactivatedExecs = new ExecutorIdCollector()
-      executors.asScala.foreach { case (id, exec) =>
+      executors.asScala.foreach {
+        case (id, exec) =>
         if (exec.hasActiveShuffle) {
           exec.updateActiveShuffles(activeShuffles)
           if (!exec.hasActiveShuffle) {
@@ -300,7 +339,8 @@ private[spark] class ExecutorMonitor(
       }
     }
 
-    jobToStageIDs.remove(event.jobId).foreach { stages =>
+    jobToStageIDs.remove(event.jobId).foreach {
+      stages =>
       stages.foreach { id => stageToShuffleID -= id }
     }
   }
@@ -327,7 +367,8 @@ private[spark] class ExecutorMonitor(
       // from being removed, even though the data may not be used.
       // TODO: Only track used files (SPARK-31974)
       if (shuffleTrackingEnabled && event.reason == Success) {
-        stageToShuffleID.get(event.stageId).foreach { shuffleId =>
+        stageToShuffleID.get(event.stageId).foreach {
+          shuffleId =>
           val bytes = event.taskMetrics.shuffleWriteMetrics.bytesWritten
           if (bytes > 0) {
             exec.addShuffle(shuffleId, bytes)
@@ -411,24 +452,34 @@ private[spark] class ExecutorMonitor(
 
     val storageLevel = event.blockUpdatedInfo.storageLevel
     val blockId = event.blockUpdatedInfo.blockId.asInstanceOf[RDDBlockId]
+    val rddId = blockId.rddId
+    val partitionId = blockId.splitIndex
 
     // SPARK-27677. When a block can be fetched from the external shuffle service, the executor can
     // be removed without hurting the application too much, since the cached data is still
     // available. So don't count blocks that can be served by the external service.
     if (storageLevel.isValid && (!fetchFromShuffleSvcEnabled || !storageLevel.useDisk)) {
       val hadCachedBlocks = exec.cachedBlocks.nonEmpty
-      val blocks = exec.cachedBlocks.getOrElseUpdate(blockId.rddId,
-        new mutable.BitSet(blockId.splitIndex))
-      blocks += blockId.splitIndex
+      val blocks = exec.cachedBlocks.getOrElseUpdate(rddId, new mutable.HashMap[Int, Long]())
+      val blockSize = event.blockUpdatedInfo.memSize + event.blockUpdatedInfo.diskSize
+      blocks.put(partitionId, blockSize).foreach {
+        oldSize =>
+        exec.rddTotalBytes -= oldSize
+      }
+      exec.rddTotalBytes += blockSize
 
       if (!hadCachedBlocks) {
         exec.updateTimeout()
       }
     } else {
-      exec.cachedBlocks.get(blockId.rddId).foreach { blocks =>
-        blocks -= blockId.splitIndex
+      exec.cachedBlocks.get(rddId).foreach {
+        blocks =>
+        blocks.remove(partitionId).foreach {
+          oldSize =>
+          exec.rddTotalBytes -= oldSize
+        }
         if (blocks.isEmpty) {
-          exec.cachedBlocks -= blockId.rddId
+          exec.cachedBlocks -= rddId
           if (exec.cachedBlocks.isEmpty) {
             exec.updateTimeout()
           }
@@ -438,8 +489,12 @@ private[spark] class ExecutorMonitor(
   }
 
   override def onUnpersistRDD(event: SparkListenerUnpersistRDD): Unit = {
-    executors.values().asScala.foreach { exec =>
-      exec.cachedBlocks -= event.rddId
+    executors.values().asScala.foreach {
+      exec =>
+      exec.cachedBlocks.remove(event.rddId).foreach {
+        blocks =>
+        exec.rddTotalBytes -= blocks.values.sum
+      }
       if (exec.cachedBlocks.isEmpty) {
         exec.updateTimeout()
       }
@@ -475,7 +530,8 @@ private[spark] class ExecutorMonitor(
 
   // Visible for testing
   private[dynalloc] def timedOutExecutors(when: Long): Seq[String] = {
-    executors.asScala.flatMap { case (id, tracker) =>
+    executors.asScala.flatMap {
+      case (id, tracker) =>
       if (tracker.isIdle && tracker.timeoutAt <= when) Some(id) else None
     }.toSeq
   }
@@ -488,6 +544,47 @@ private[spark] class ExecutorMonitor(
   // Visible for testing
   private[spark] def executorsDecommissioning(): Set[String] = {
     executors.asScala.filter { case (_, exec) => exec.decommissioning }.keys.toSet
+  }
+
+  private[spark] def getExecutorSummary(running: Int): ExecutorSummary = {
+    val idleExecs = executors.asScala.values.filter(_.isIdle)
+    val idleTimes = if (idleExecs.nonEmpty) {
+      idleExecs.map(exec => (clock.getTimeMillis() - exec.idleStart) / 1000).toSeq
+    } else {
+      Seq.empty
+    }
+
+    val activeTasks = executors.asScala.values.map(_.runningTasks.toLong).toSeq
+
+    val shuffleSizes =
+      executors.asScala.values.map(_.shuffleTotalBytes / (1024 * 1024)).filter(_ > 0).toSeq
+
+    val cachedRddSizes =
+      executors.asScala.values.map(_.rddTotalBytes / (1024 * 1024)).filter(_ > 0).toSeq
+
+    ExecutorSummary(
+      running = running,
+      idle = idleExecs.size,
+      idleTime = calculatePercentiles(idleTimes),
+      activeTasks = calculatePercentiles(activeTasks),
+      shuffleSize = calculatePercentiles(shuffleSizes),
+      cachedRddSize = calculatePercentiles(cachedRddSizes)
+    )
+  }
+
+  private def calculatePercentiles(values: Seq[Long]): Option[Percentiles] = {
+    if (values.isEmpty) {
+      None
+    } else {
+      val sorted = values.sorted
+      val count = sorted.length
+      val min = sorted.head
+      val max = sorted.last
+      val median = sorted(count / 2)
+      val p25 = sorted(count / 4)
+      val p75 = sorted(count * 3 / 4)
+      Some(Percentiles(min, p25, median, p75, max))
+    }
   }
 
   /**
@@ -531,7 +628,8 @@ private[spark] class ExecutorMonitor(
   private def cleanupShuffle(id: Int): Unit = {
     logDebug(s"Cleaning up state related to shuffle $id.")
     shuffleToActiveJobs -= id
-    executors.asScala.foreach { case (_, exec) =>
+    executors.asScala.foreach {
+      case (_, exec) =>
       exec.removeShuffle(id)
     }
   }
@@ -547,18 +645,19 @@ private[spark] class ExecutorMonitor(
     var decommissioning: Boolean = false
     var hasActiveShuffle: Boolean = false
 
-    private var idleStart: Long = -1
-    private var runningTasks: Int = 0
+    private[dynalloc] var idleStart: Long = -1
+    private[dynalloc] var runningTasks: Int = 0
 
-    // Maps RDD IDs to the partition IDs stored in the executor.
+    // Maps RDD IDs to a map of partition IDs to block size.
     // This should only be used in the event thread.
-    val cachedBlocks = new mutable.HashMap[Int, mutable.BitSet]()
+    val cachedBlocks = new mutable.HashMap[Int, mutable.HashMap[Int, Long]]()
+    private[dynalloc] var rddTotalBytes: Long = 0
 
     // The set of shuffles for which shuffle data is held by the executor.
     // This should only be used in the event thread.
     private val shuffleIds = if (shuffleTrackingEnabled) new mutable.HashSet[Int]() else null
     private val shuffleSizes = if (shuffleTrackingEnabled) new mutable.HashMap[Int, Long]() else null
-    private var shuffleTotalBytes: Long = 0
+    private[dynalloc] var shuffleTotalBytes: Long = 0
 
     def isIdle: Boolean = idleStart >= 0 && !hasActiveShuffle
 

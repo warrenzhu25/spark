@@ -680,6 +680,22 @@ package object config {
       .version("1.2.0")
       .fallbackConf(DYN_ALLOCATION_SCHEDULER_BACKLOG_TIMEOUT)
 
+  private[spark] val DYN_ALLOCATION_DIAGNOSIS_ENABLED =
+    ConfigBuilder("spark.dynamicAllocation.diagnosis.enabled")
+      .doc("Whether to do diagnosis when the number of running executors is greater than the " +
+        "number of max-needed executors for a certain period.")
+      .version("3.5.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  private[spark] val DYN_ALLOCATION_DIAGNOSIS_INTERVAL =
+    ConfigBuilder("spark.dynamicAllocation.diagnosis.interval")
+      .doc("The interval to do diagnosis when the number of running executors is greater than " +
+        "the number of max-needed executors.")
+      .version("3.5.0")
+      .timeConf(TimeUnit.SECONDS)
+      .createWithDefaultString("5m")
+
   private[spark] val LEGACY_LOCALITY_WAIT_RESET =
     ConfigBuilder("spark.locality.wait.legacyResetOnTaskLaunch")
     .doc("Whether to use the legacy behavior of locality wait, which resets the delay timer " +

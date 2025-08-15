@@ -1763,6 +1763,137 @@ class ExecutorAllocationManagerSuite extends SparkFunSuite {
     assert(manager.executorMonitor.executorsPendingToRemove() === Set("executor-1"))
   }
 
+  test("diagnosis summary for dynamic allocation") {
+    val clock = new ManualClock(2020L)
+    val conf = createConf(1, 20, 1)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_ENABLED, true)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_INTERVAL.key, "1s")
+    val manager = createManager(conf, clock = clock)
+
+    // Add 5 executors
+    (1 to 5).foreach { i => onExecutorAddedDefaultProfile(manager, s"executor-$i") }
+    assert(manager.executorMonitor.executorCount === 5)
+
+    // Make some executors busy
+    // executor-1: 1 task
+    val taskInfo1 = createTaskInfo(1, 1, "executor-1")
+    post(SparkListenerTaskStart(1, 1, taskInfo1))
+    // executor-2: 2 tasks
+    val taskInfo2 = createTaskInfo(2, 2, "executor-2")
+    post(SparkListenerTaskStart(1, 1, taskInfo2))
+    val taskInfo3 = createTaskInfo(3, 3, "executor-2")
+    post(SparkListenerTaskStart(1, 1, taskInfo3))
+
+    // Let some time pass for idle executors
+    clock.advance(5000) // 5 seconds
+
+    // Set max needed executors to be less than running executors
+    // Running is 5. Let's make max needed 2.
+    post(SparkListenerStageSubmitted(createStageInfo(0, 2)))
+    manager invokePrivate _updateAndSyncNumExecutorsTarget(clock.nanoTime())
+    assert(maxNumExecutorsNeededPerResourceProfile(manager, defaultProfile) == 2)
+
+    // Trigger diagnosis
+    clock.advance(1000) // diagnosis interval is 1s
+    schedule(manager)
+
+    // Now get the summary and verify
+    val summary = manager.executorMonitor.getExecutorSummary(5)
+
+    assert(summary.running === 5)
+    assert(summary.idle === 3)
+
+    // Idle time for executor-3, executor-4, executor-5 should be 5 + 1 = 6 seconds.
+    assert(summary.idleTime.isDefined)
+    val idleP = summary.idleTime.get
+    assert(idleP.min === 6)
+    assert(idleP.p25 === 6)
+    assert(idleP.median === 6)
+    assert(idleP.p75 === 6)
+    assert(idleP.max === 6)
+
+    // Active tasks: exec-1 has 1, exec-2 has 2, exec-3,4,5 have 0.
+    // tasks are [1, 2, 0, 0, 0]. Sorted: [0, 0, 0, 1, 2].
+    // min=0, 25%=0, 50%=0, 75%=1, max=2.
+    assert(summary.activeTasks.isDefined)
+    val activeP = summary.activeTasks.get
+    assert(activeP.min === 0)
+    assert(activeP.p25 === 0)
+    assert(activeP.median === 0)
+    assert(activeP.p75 === 1)
+    assert(activeP.max === 2)
+
+    // No shuffle or RDD data.
+    assert(summary.shuffleSize.isEmpty)
+    assert(summary.cachedRddSize.isEmpty)
+  }
+
+  test("diagnosis summary with shuffle data") {
+    val clock = new ManualClock(2020L)
+    val conf = createConf(1, 20, 1)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_ENABLED, true)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_INTERVAL.key, "1s")
+      .set(config.DYN_ALLOCATION_SHUFFLE_TRACKING_ENABLED, true)
+      .set(config.SHUFFLE_SERVICE_ENABLED, false)
+    val manager = createManager(conf, clock = clock)
+
+    // Add 3 executors
+    (1 to 3).foreach { i => onExecutorAddedDefaultProfile(manager, s"executor-$i") }
+    assert(manager.executorMonitor.executorCount === 3)
+
+    // Create shuffle jobs with different amounts of data
+    val stage1 = createStageInfo(1, 1, shuffleId = Some(0))
+    val stage2 = createStageInfo(2, 1, shuffleId = Some(1))
+    post(SparkListenerJobStart(1, clock.getTimeMillis(), Seq(stage1)))
+    post(SparkListenerJobStart(2, clock.getTimeMillis(), Seq(stage2)))
+
+    // executor-1: 10MB shuffle data
+    val taskInfo1 = createTaskInfo(1, 1, "executor-1")
+    val taskMetrics1 = new TaskMetrics()
+    taskMetrics1.shuffleWriteMetrics.incBytesWritten(10 * 1024 * 1024)
+    post(SparkListenerTaskStart(1, 1, taskInfo1))
+    post(SparkListenerTaskEnd(1, 1, "foo", Success, taskInfo1, new ExecutorMetrics, taskMetrics1))
+
+    // executor-2: 50MB shuffle data
+    val taskInfo2 = createTaskInfo(2, 2, "executor-2")
+    val taskMetrics2 = new TaskMetrics()
+    taskMetrics2.shuffleWriteMetrics.incBytesWritten(50 * 1024 * 1024)
+    post(SparkListenerTaskStart(2, 1, taskInfo2))
+    post(SparkListenerTaskEnd(2, 1, "foo", Success, taskInfo2, new ExecutorMetrics, taskMetrics2))
+
+    // executor-3: 100MB shuffle data
+    val taskInfo3 = createTaskInfo(3, 3, "executor-3")
+    val taskMetrics3 = new TaskMetrics()
+    taskMetrics3.shuffleWriteMetrics.incBytesWritten(100 * 1024 * 1024)
+    post(SparkListenerTaskStart(1, 1, taskInfo3))
+    post(SparkListenerTaskEnd(1, 1, "foo", Success, taskInfo3, new ExecutorMetrics, taskMetrics3))
+
+    post(SparkListenerJobEnd(1, clock.getTimeMillis(), JobSucceeded))
+    post(SparkListenerJobEnd(2, clock.getTimeMillis(), JobSucceeded))
+
+    clock.advance(5000) // 5 seconds
+
+    // Set max needed executors to be less than running executors
+    post(SparkListenerStageSubmitted(createStageInfo(0, 1)))
+    manager invokePrivate _updateAndSyncNumExecutorsTarget(clock.nanoTime())
+    assert(maxNumExecutorsNeededPerResourceProfile(manager, defaultProfile) == 1)
+
+    // Trigger diagnosis
+    clock.advance(1000)
+    schedule(manager)
+
+    val summary = manager.executorMonitor.getExecutorSummary(3)
+
+    // Should have shuffle size percentiles: [10, 50, 100] MB
+    assert(summary.shuffleSize.isDefined)
+    val shuffleP = summary.shuffleSize.get
+    assert(shuffleP.min === 10)
+    assert(shuffleP.p25 === 10) // 25% of [10, 50, 100] = 10
+    assert(shuffleP.median === 50) // 50% of [10, 50, 100] = 50
+    assert(shuffleP.p75 === 100) // 75% of [10, 50, 100] = 100
+    assert(shuffleP.max === 100)
+  }
+
   test("SPARK-26758 check executor target number after idle time out ") {
     val clock = new ManualClock(10000L)
     val manager = createManager(createConf(1, 5, 3), clock = clock)

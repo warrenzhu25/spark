@@ -123,6 +123,9 @@ private[spark] class ExecutorAllocationManager(
   private val sustainedSchedulerBacklogTimeoutS =
     conf.get(DYN_ALLOCATION_SUSTAINED_SCHEDULER_BACKLOG_TIMEOUT)
 
+  private val diagnosisEnabled = conf.get(DYN_ALLOCATION_DIAGNOSIS_ENABLED)
+  private val diagnosisIntervalS = conf.get(DYN_ALLOCATION_DIAGNOSIS_INTERVAL)
+
   // During testing, the methods to actually kill and add executors are mocked out
   private val testing = conf.get(DYN_ALLOCATION_TESTING)
 
@@ -149,6 +152,9 @@ private[spark] class ExecutorAllocationManager(
   // A timestamp of when an addition should be triggered, or NOT_SET if it is not set
   // This is set when pending tasks are added but not scheduled yet
   private var addTime: Long = NOT_SET
+
+  // A timestamp of when a diagnosis should be triggered, or NOT_SET if it is not set
+  private var diagnosisTime: Long = NOT_SET
 
   // Polling loop interval (ms)
   private val intervalMillis: Long = 100
@@ -343,6 +349,26 @@ private[spark] class ExecutorAllocationManager(
     updateAndSyncNumExecutorsTarget(clock.nanoTime())
     if (executorIdsToBeRemoved.nonEmpty) {
       removeExecutors(executorIdsToBeRemoved)
+    }
+
+    if (diagnosisEnabled) {
+      val now = clock.getTimeMillis()
+      val running = executorMonitor.executorCount
+      val maxNeeded = numExecutorsTargetPerResourceProfileId.keys
+        .map(maxNumExecutorsNeededPerResourceProfile).sum
+      if (running > maxNeeded) {
+        if (diagnosisTime == NOT_SET) {
+          diagnosisTime = now + TimeUnit.SECONDS.toMillis(diagnosisIntervalS)
+        }
+        if (now >= diagnosisTime) {
+          logInfo(s"Running executors ($running) > max needed executors ($maxNeeded) for " +
+            s"$diagnosisIntervalS seconds. The summary of executors:\n" +
+            s"${executorMonitor.getExecutorSummary(running)}")
+          diagnosisTime = NOT_SET
+        }
+      } else {
+        diagnosisTime = NOT_SET
+      }
     }
   }
 
