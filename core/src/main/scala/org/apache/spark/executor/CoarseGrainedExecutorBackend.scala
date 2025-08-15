@@ -361,12 +361,14 @@ private[spark] class CoarseGrainedExecutorBackend(
                     NANOSECONDS)
                   val migrationTime = Duration(System.nanoTime() - decommissionedTime.get,
                     NANOSECONDS)
-                  val migrationSummary = f"Migration finished in ${migrationTime.toMillis}%,d ms" +
-                    f"(including ${taskWaitingTime.toMillis}%,d ms running task waiting time). " +
-                    f"${shuffleStat.numMigratedBlock}%,d blocks of size " +
-                    f"${Utils.bytesToString(shuffleStat.totalMigratedSize)} migrated, " +
-                    f"${shuffleStat.numBlocksLeft} blocks not migrated."
-                  exitExecutor(0, ExecutorLossMessage.decommissionFinished + migrationSummary)
+                  val decommissionSummary = DecommissionSummary(
+                    decommissionTime = NANOSECONDS.toMillis(System.nanoTime() -
+                      decommissionedTime.get),
+                    migrationTime = migrationTime,
+                    taskWaitingTime = taskWaitingTime,
+                    migrationInfo = env.blockManager.lastMigrationInfo().get)
+                  exitExecutor(0, ExecutorLossMessage.decommissionFinished +
+                    decommissionSummary.toString)
                 } else {
                   logInfo("All blocks not yet migrated.")
                 }
