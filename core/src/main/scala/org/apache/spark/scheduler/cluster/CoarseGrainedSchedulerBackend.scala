@@ -446,7 +446,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
               ExecutorKilled
             } else if (decommissionInfoOpt.isDefined) {
               val decommissionInfo = decommissionInfoOpt.get
-              ExecutorDecommission(decommissionInfo.workerHost,
+              ExecutorDecommissionFinished(decommissionInfo.workerHost,
                 decommissionInfo.message + " " + reason.message)
             } else {
               reason
