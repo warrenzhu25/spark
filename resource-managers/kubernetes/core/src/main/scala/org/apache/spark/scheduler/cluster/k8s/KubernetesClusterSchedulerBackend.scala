@@ -338,7 +338,7 @@ private[spark] class KubernetesClusterSchedulerBackend(
               // We don't pass through the host because by convention the
               // host is only populated if the entire host is going away
               // and we don't know if that's the case or just one container.
-              removeExecutor(id, ExecutorDecommission(None))
+              removeExecutor(id, ExecutorDecommissionFinished(None))
             case _ =>
               // Don't do anything besides disabling the executor - allow the K8s API events to
               // drive the rest of the lifecycle decisions.

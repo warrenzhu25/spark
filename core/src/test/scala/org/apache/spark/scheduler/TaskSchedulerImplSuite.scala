@@ -2278,4 +2278,20 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext
     taskScheduler.handleFailedTask(tsm, tid, state, reason)
   }
 
+  test("SPARK-30504: scheduler should keep the decommission state when executor is decommissioning") {
+    val clock = new ManualClock(10000L)
+    val scheduler = setupSchedulerForDecommissionTests(clock, 2)
+    val decomTime = clock.getTimeMillis()
+    scheduler.executorDecommission("executor0", ExecutorDecommissionInfo("0", None))
+    scheduler.executorDecommission("executor1", ExecutorDecommissionInfo("1", Some("host1")))
+
+    assert(scheduler.getExecutorDecommissionState("executor0")
+      === Some(ExecutorDecommissionState(decomTime, None)))
+    assert(scheduler.getExecutorDecommissionState("executor1")
+      === Some(ExecutorDecommissionState(decomTime, Some("host1"))))
+    assert(scheduler.getExecutorDecommissionState("executor2").isEmpty)
+
+    scheduler.executorLost("executor1", ExecutorDecommissionFinished("decommission finished"))
+    assert(scheduler.getExecutorDecommissionState("executor1").isEmpty)
+  }
 }

@@ -702,7 +702,7 @@ class TaskSetManagerSuite
 
     // Trigger executor "exec0" lost. Since the map output of task 0 has been migrated, it doesn't
     // need to rerun. So task 0 should still remain in the successful status.
-    manager.executorLost("exec0", "host0", ExecutorDecommission())
+    manager.executorLost("exec0", "host0", ExecutorDecommissionFinished())
     assert(manager.successful(taskIndex))
   }
 
