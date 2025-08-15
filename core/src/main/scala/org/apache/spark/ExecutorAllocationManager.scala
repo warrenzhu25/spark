@@ -123,6 +123,10 @@ private[spark] class ExecutorAllocationManager(
   private val sustainedSchedulerBacklogTimeoutS =
     conf.get(DYN_ALLOCATION_SUSTAINED_SCHEDULER_BACKLOG_TIMEOUT)
 
+  private val diagnosisEnabled = conf.get(DYN_ALLOCATION_DIAGNOSIS_ENABLED)
+  private val diagnosisInterval = conf.get(DYN_ALLOCATION_DIAGNOSIS_INTERVAL)
+  private val diagnosisLogLevel = conf.get(DYN_ALLOCATION_DIAGNOSIS_LOG_LEVEL)
+
   // During testing, the methods to actually kill and add executors are mocked out
   private val testing = conf.get(DYN_ALLOCATION_TESTING)
 
@@ -149,6 +153,9 @@ private[spark] class ExecutorAllocationManager(
   // A timestamp of when an addition should be triggered, or NOT_SET if it is not set
   // This is set when pending tasks are added but not scheduled yet
   private var addTime: Long = NOT_SET
+
+  // A timestamp of when a diagnosis should be triggered, or NOT_SET if it is not set
+  private var diagnosisTime: Long = NOT_SET
 
   // Polling loop interval (ms)
   private val intervalMillis: Long = 100
@@ -343,6 +350,43 @@ private[spark] class ExecutorAllocationManager(
     updateAndSyncNumExecutorsTarget(clock.nanoTime())
     if (executorIdsToBeRemoved.nonEmpty) {
       removeExecutors(executorIdsToBeRemoved)
+    }
+
+    runDynamicAllocationDiagnosis()
+  }
+
+  /**
+   * Runs dynamic allocation diagnosis when enabled to identify potential over-allocation.
+   * Logs executor usage summary when running executors exceed max needed for diagnosis interval.
+   */
+  private def runDynamicAllocationDiagnosis(): Unit = {
+    if (diagnosisEnabled) {
+      val now = clock.getTimeMillis()
+      val running = executorMonitor.executorCount
+      val maxNeeded = numExecutorsTargetPerResourceProfileId.keys
+        .map(maxNumExecutorsNeededPerResourceProfile).sum
+      if (running > maxNeeded) {
+        if (diagnosisTime == NOT_SET) {
+          diagnosisTime = now + diagnosisInterval * 1000L
+        }
+        if (now >= diagnosisTime) {
+          val message = s"Running executors ($running) > max needed executors ($maxNeeded) for " +
+            s"$diagnosisInterval seconds. The summary of executors:\n" +
+            s"${executorMonitor.getExecutorSummary(running)}"
+          diagnosisLogLevel match {
+            case "DEBUG" => logDebug(message)
+            case "INFO" => logInfo(message)
+            case "WARN" => logWarning(message)
+            case "ERROR" => logError(message)
+            case _ =>
+              logWarning(s"Invalid diagnosis log level '$diagnosisLogLevel', using WARN")
+              logWarning(message)
+          }
+          diagnosisTime = NOT_SET
+        }
+      } else {
+        diagnosisTime = NOT_SET
+      }
     }
   }
 

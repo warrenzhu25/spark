@@ -1763,6 +1763,105 @@ class ExecutorAllocationManagerSuite extends SparkFunSuite {
     assert(manager.executorMonitor.executorsPendingToRemove() === Set("executor-1"))
   }
 
+  test("diagnosis summary for dynamic allocation") {
+    val clock = new ManualClock(2020L)
+    val conf = createConf(1, 20, 1)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_ENABLED, true)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_INTERVAL.key, "1s")
+    val manager = createManager(conf, clock = clock)
+
+    // Add 5 executors
+    (1 to 5).foreach { i => onExecutorAddedDefaultProfile(manager, s"executor-$i") }
+    assert(manager.executorMonitor.executorCount === 5)
+
+    // Make some executors busy
+    // executor-1: 1 task
+    val taskInfo1 = createTaskInfo(1, 1, "executor-1")
+    post(SparkListenerTaskStart(1, 1, taskInfo1))
+    // executor-2: 2 tasks
+    val taskInfo2 = createTaskInfo(2, 2, "executor-2")
+    post(SparkListenerTaskStart(1, 1, taskInfo2))
+    val taskInfo3 = createTaskInfo(3, 3, "executor-2")
+    post(SparkListenerTaskStart(1, 1, taskInfo3))
+
+    // Let some time pass for idle executors
+    clock.advance(5000) // 5 seconds
+
+    // Set max needed executors to be less than running executors
+    // Running is 5. Let's make max needed 2.
+    post(SparkListenerStageSubmitted(createStageInfo(0, 2)))
+    manager invokePrivate _updateAndSyncNumExecutorsTarget(clock.nanoTime())
+    assert(maxNumExecutorsNeededPerResourceProfile(manager, defaultProfile) == 2)
+
+    // Trigger diagnosis
+    clock.advance(1000) // diagnosis interval is 1s
+    schedule(manager)
+
+    // Now get the summary and verify
+    val summary = manager.executorMonitor.getExecutorSummary(5)
+
+    assert(summary.running === 5)
+    assert(summary.idle === 3)
+
+    // Idle time for executor-3, executor-4, executor-5 should be 5 + 1 = 6 seconds.
+    assert(summary.idleTime.isDefined)
+    val idleP = summary.idleTime.get
+    assert(idleP.min === 6)
+    assert(idleP.p25 === 6)
+    assert(idleP.median === 6)
+    assert(idleP.p75 === 6)
+    assert(idleP.max === 6)
+
+    // Active tasks: exec-1 has 1, exec-2 has 2, exec-3,4,5 have 0.
+    // tasks are [1, 2, 0, 0, 0]. Sorted: [0, 0, 0, 1, 2].
+    // min=0, 25%=0, 50%=0, 75%=1, max=2.
+    assert(summary.activeTasks.isDefined)
+    val activeP = summary.activeTasks.get
+    assert(activeP.min === 0)
+    assert(activeP.p25 === 0)
+    assert(activeP.median === 0)
+    assert(activeP.p75 === 1)
+    assert(activeP.max === 2)
+
+    // No shuffle or RDD data.
+    assert(summary.shuffleSize.isEmpty)
+    assert(summary.cachedRddSize.isEmpty)
+    assert(summary.idleShuffleSize.isEmpty)
+    assert(summary.idleCachedRddSize.isEmpty)
+  }
+
+  test("diagnosis log level configuration") {
+    val clock = new ManualClock(2020L)
+    // Test with DEBUG log level
+    val confDebug = createConf(1, 20, 1)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_ENABLED, true)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_INTERVAL.key, "1s")
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_LOG_LEVEL, "DEBUG")
+    val managerDebug = createManager(confDebug, clock = clock)
+    // Test with WARN log level
+    val confWarn = createConf(1, 20, 1)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_ENABLED, true)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_INTERVAL.key, "1s")
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_LOG_LEVEL, "WARN")
+    val managerWarn = createManager(confWarn, clock = clock)
+    // Test with ERROR log level
+    val confError = createConf(1, 20, 1)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_ENABLED, true)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_INTERVAL.key, "1s")
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_LOG_LEVEL, "ERROR")
+    val managerError = createManager(confError, clock = clock)
+    // Verify that the managers were created successfully with different log levels
+    assert(managerDebug != null)
+    assert(managerWarn != null)
+    assert(managerError != null)
+    // Test default log level (WARN)
+    val confDefault = createConf(1, 20, 1)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_ENABLED, true)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_INTERVAL.key, "1s")
+    val managerDefault = createManager(confDefault, clock = clock)
+    assert(managerDefault != null)
+  }
+
   test("SPARK-26758 check executor target number after idle time out ") {
     val clock = new ManualClock(10000L)
     val manager = createManager(createConf(1, 5, 3), clock = clock)

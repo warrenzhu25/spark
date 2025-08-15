@@ -17,7 +17,7 @@
 
 package org.apache.spark.scheduler.dynalloc
 
-import java.util.concurrent.{ConcurrentHashMap, TimeUnit}
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 import scala.collection.JavaConverters._
@@ -29,8 +29,50 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config._
 import org.apache.spark.resource.ResourceProfile.UNKNOWN_RESOURCE_PROFILE_ID
 import org.apache.spark.scheduler._
+import org.apache.spark.scheduler.dynalloc.ExecutorMonitor.{ExecutorSummary, Percentiles}
 import org.apache.spark.storage.{RDDBlockId, ShuffleDataBlockId}
-import org.apache.spark.util.Clock
+import org.apache.spark.util.{Clock, Distribution}
+
+private[spark] object ExecutorMonitor {
+  case class Percentiles(min: Long, p25: Long, median: Long, p75: Long, max: Long) {
+    override def toString: String = s"min=$min, 25%=$p25, 50%=$median, 75%=$p75, max=$max"
+  }
+
+  case class ExecutorSummary(
+      running: Int,
+      idle: Int,
+      idleTime: Option[Percentiles],
+      activeTasks: Option[Percentiles],
+      shuffleSize: Option[Percentiles],
+      cachedRddSize: Option[Percentiles],
+      idleShuffleSize: Option[Percentiles],
+      idleCachedRddSize: Option[Percentiles]) {
+    override def toString: String = {
+      val summary = new mutable.StringBuilder()
+      summary.append(s"  Running executors ($running): \n")
+      summary.append(s"    Idle Executors: $idle\n")
+      idleTime.foreach { p =>
+        summary.append(s"      Idle Time (sec): $p\n")
+      }
+      idleShuffleSize.foreach { p =>
+        summary.append(s"      Idle Shuffle Size (MB): $p\n")
+      }
+      idleCachedRddSize.foreach { p =>
+        summary.append(s"      Idle Cached RDD Size (MB): $p\n")
+      }
+      activeTasks.foreach { p =>
+        summary.append(s"    Active Tasks: $p\n")
+      }
+      shuffleSize.foreach { p =>
+        summary.append(s"    Shuffle Size (MB): $p\n")
+      }
+      cachedRddSize.foreach {
+        p => summary.append(s"    Cached RDD Size (MB): $p\n")
+      }
+      summary.toString()
+    }
+  }
+}
 
 /**
  * A monitor for executor activity, used by ExecutorAllocationManager to detect idle executors.
@@ -43,12 +85,9 @@ private[spark] class ExecutorMonitor(
     metrics: ExecutorAllocationManagerSource = null)
   extends SparkListener with CleanerListener with Logging {
 
-  private val idleTimeoutNs = TimeUnit.SECONDS.toNanos(
-    conf.get(DYN_ALLOCATION_EXECUTOR_IDLE_TIMEOUT))
-  private val storageTimeoutNs = TimeUnit.SECONDS.toNanos(
-    conf.get(DYN_ALLOCATION_CACHED_EXECUTOR_IDLE_TIMEOUT))
-  private val shuffleTimeoutNs = TimeUnit.MILLISECONDS.toNanos(
-    conf.get(DYN_ALLOCATION_SHUFFLE_TRACKING_TIMEOUT))
+  private val idleTimeoutMs = conf.get(DYN_ALLOCATION_EXECUTOR_IDLE_TIMEOUT) * 1000L
+  private val storageTimeoutMs = conf.get(DYN_ALLOCATION_CACHED_EXECUTOR_IDLE_TIMEOUT) * 1000L
+  private val shuffleTimeoutMs = conf.get(DYN_ALLOCATION_SHUFFLE_TRACKING_TIMEOUT)
 
   private val fetchFromShuffleSvcEnabled = conf.get(SHUFFLE_SERVICE_ENABLED) &&
     conf.get(SHUFFLE_SERVICE_FETCH_RDD_ENABLED)
@@ -107,7 +146,7 @@ private[spark] class ExecutorMonitor(
    * be timed out. Should only be called from the EAM thread.
    */
   def timedOutExecutors(): Seq[(String, Int)] = {
-    val now = clock.nanoTime()
+    val now = clock.getTimeMillis()
     if (now >= nextTimeout.get()) {
       // Temporarily set the next timeout at Long.MaxValue. This ensures that after
       // scanning all executors below, we know when the next timeout for non-timed out
@@ -418,24 +457,33 @@ private[spark] class ExecutorMonitor(
 
     val storageLevel = event.blockUpdatedInfo.storageLevel
     val blockId = event.blockUpdatedInfo.blockId.asInstanceOf[RDDBlockId]
+    val rddId = blockId.rddId
+    val partitionId = blockId.splitIndex
 
     // SPARK-27677. When a block can be fetched from the external shuffle service, the executor can
     // be removed without hurting the application too much, since the cached data is still
     // available. So don't count blocks that can be served by the external service.
     if (storageLevel.isValid && (!fetchFromShuffleSvcEnabled || !storageLevel.useDisk)) {
       val hadCachedBlocks = exec.cachedBlocks.nonEmpty
-      val blocks = exec.cachedBlocks.getOrElseUpdate(blockId.rddId,
-        new mutable.BitSet(blockId.splitIndex))
-      blocks += blockId.splitIndex
+      val blocks = exec.cachedBlocks.getOrElseUpdate(rddId, new mutable.HashMap[Int, Long]())
+      val blockSize = event.blockUpdatedInfo.memSize + event.blockUpdatedInfo.diskSize
+      blocks.put(partitionId, blockSize).foreach {
+        oldSize =>
+        exec.rddTotalBytes -= oldSize
+      }
+      exec.rddTotalBytes += blockSize
 
       if (!hadCachedBlocks) {
         exec.updateTimeout()
       }
     } else {
-      exec.cachedBlocks.get(blockId.rddId).foreach { blocks =>
-        blocks -= blockId.splitIndex
+      exec.cachedBlocks.get(rddId).foreach { blocks =>
+        blocks.remove(partitionId).foreach {
+          oldSize =>
+          exec.rddTotalBytes -= oldSize
+        }
         if (blocks.isEmpty) {
-          exec.cachedBlocks -= blockId.rddId
+          exec.cachedBlocks -= rddId
           if (exec.cachedBlocks.isEmpty) {
             exec.updateTimeout()
           }
@@ -446,7 +494,10 @@ private[spark] class ExecutorMonitor(
 
   override def onUnpersistRDD(event: SparkListenerUnpersistRDD): Unit = {
     executors.values().asScala.foreach { exec =>
-      exec.cachedBlocks -= event.rddId
+      exec.cachedBlocks.remove(event.rddId).foreach {
+        blocks =>
+        exec.rddTotalBytes -= blocks.values.sum
+      }
       if (exec.cachedBlocks.isEmpty) {
         exec.updateTimeout()
       }
@@ -495,6 +546,53 @@ private[spark] class ExecutorMonitor(
   // Visible for testing
   private[spark] def executorsDecommissioning(): Set[String] = {
     executors.asScala.filter { case (_, exec) => exec.decommissioning }.keys.toSet
+  }
+
+  private[spark] def getExecutorSummary(running: Int): ExecutorSummary = {
+    val idleExecs = executors.asScala.values.filter(_.isIdle)
+    val idleTimes = if (idleExecs.nonEmpty) {
+      idleExecs.map(exec => (clock.getTimeMillis() - exec.idleStart) / 1000).toSeq
+    } else {
+      Seq.empty
+    }
+
+    val activeTasks = executors.asScala.values.map(_.runningTasks.toLong).toSeq
+
+    val allShuffleSizes =
+      executors.asScala.values.map(_.getShuffleTotalBytes / (1024 * 1024)).filter(_ > 0).toSeq
+    val allCachedRddSizes =
+      executors.asScala.values.map(_.rddTotalBytes / (1024 * 1024)).filter(_ > 0).toSeq
+    val idleShuffleSizes =
+      idleExecs.map(_.getShuffleTotalBytes / (1024 * 1024)).filter(_ > 0).toSeq
+    val idleCachedRddSizes =
+      idleExecs.map(_.rddTotalBytes / (1024 * 1024)).filter(_ > 0).toSeq
+
+    ExecutorSummary(
+      running = running,
+      idle = idleExecs.size,
+      idleTime = calculatePercentiles(idleTimes),
+      activeTasks = calculatePercentiles(activeTasks),
+      shuffleSize = calculatePercentiles(allShuffleSizes),
+      cachedRddSize = calculatePercentiles(allCachedRddSizes),
+      idleShuffleSize = calculatePercentiles(idleShuffleSizes),
+      idleCachedRddSize = calculatePercentiles(idleCachedRddSizes)
+    )
+  }
+
+  private def calculatePercentiles(values: Seq[Long]): Option[Percentiles] = {
+    if (values.isEmpty) {
+      None
+    } else {
+      val distribution = new Distribution(values.map(_.toDouble))
+      val quantiles = distribution.getQuantiles() // Returns [min, 25%, 50%, 75%, max]
+      Some(Percentiles(
+        quantiles(0).toLong,  // min
+        quantiles(1).toLong,  // 25%
+        quantiles(2).toLong,  // 50% (median)
+        quantiles(3).toLong,  // 75%
+        quantiles(4).toLong   // max
+      ))
+    }
   }
 
   /**
@@ -554,12 +652,13 @@ private[spark] class ExecutorMonitor(
     var decommissioning: Boolean = false
     var hasActiveShuffle: Boolean = false
 
-    private var idleStart: Long = -1
-    private var runningTasks: Int = 0
+    private[dynalloc] var idleStart: Long = -1
+    private[dynalloc] var runningTasks: Int = 0
 
-    // Maps RDD IDs to the partition IDs stored in the executor.
+    // Maps RDD IDs to a map of partition IDs to block size.
     // This should only be used in the event thread.
-    val cachedBlocks = new mutable.HashMap[Int, mutable.BitSet]()
+    val cachedBlocks = new mutable.HashMap[Int, mutable.HashMap[Int, Long]]()
+    private[dynalloc] var rddTotalBytes: Long = 0
 
     // The set of shuffles for which shuffle data is held by the executor.
     // This should only be used in the event thread.
@@ -571,28 +670,28 @@ private[spark] class ExecutorMonitor(
 
     def updateRunningTasks(delta: Int): Unit = {
       runningTasks = math.max(0, runningTasks + delta)
-      idleStart = if (runningTasks == 0) clock.nanoTime() else -1L
+      idleStart = if (runningTasks == 0) clock.getTimeMillis() else -1L
       updateTimeout()
     }
 
     def updateTimeout(): Unit = {
       val oldDeadline = timeoutAt
       val newDeadline = if (idleStart >= 0) {
-        val _cacheTimeout = if (cachedBlocks.nonEmpty) storageTimeoutNs else 0
+        val _cacheTimeout = if (cachedBlocks.nonEmpty) storageTimeoutMs else 0
         val _shuffleTimeout = if (shuffleIds != null && shuffleIds.nonEmpty) {
         if (conf.get(DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_ENABLED)) {
           val timeoutPerMb = conf.get(DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_PER_MB)
-          val shuffleSizeMb = Math.min(shuffleTotalBytes / 1024 / 1024,
-            Long.MaxValue / timeoutPerMb)
-          TimeUnit.MILLISECONDS.toNanos(shuffleSizeMb * timeoutPerMb)
+          val shuffleSizeMb = shuffleTotalBytes / 1024 / 1024
+          // Calculate timeout in milliseconds
+          shuffleSizeMb * timeoutPerMb
         } else {
-          shuffleTimeoutNs
+          shuffleTimeoutMs
         }
       } else {
         0
       }
         // timeout should be max of idleTimeout, storageTimeout and shuffleTimeout
-        val timeout = Seq(_cacheTimeout, _shuffleTimeout, idleTimeoutNs).max
+        val timeout = Seq(_cacheTimeout, _shuffleTimeout, idleTimeoutMs).max
         val deadline = idleStart + timeout
         if (deadline >= 0) deadline else Long.MaxValue
       } else {
