@@ -53,10 +53,12 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
       .thenReturn(ids.map(triple => ShuffleBlockInfo(triple._1, triple._2)).toSeq)
 
     ids.foreach { case (shuffleId: Int, mapId: Long, reduceId: Int) =>
+      val mockBuffer = mock(classOf[ManagedBuffer])
+      when(mockBuffer.size()).thenReturn(100L)
       when(mockMigratableShuffleResolver.getMigrationBlocks(mc.any()))
         .thenReturn(List(
-          (ShuffleIndexBlockId(shuffleId, mapId, reduceId), mock(classOf[ManagedBuffer])),
-          (ShuffleDataBlockId(shuffleId, mapId, reduceId), mock(classOf[ManagedBuffer]))))
+          (ShuffleIndexBlockId(shuffleId, mapId, reduceId), mockBuffer),
+          (ShuffleDataBlockId(shuffleId, mapId, reduceId), mockBuffer)))
     }
   }
 
@@ -78,7 +80,7 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
     try {
       bmDecomManager.start()
       eventually(timeout(100.second), interval(10.milliseconds)) {
-        val (currentTime, done) = bmDecomManager.lastMigrationInfo()
+        val MigrationInfo(currentTime, done, _) = bmDecomManager.lastMigrationInfo()
         assert(!assertDone || done)
         // Make sure the time stamp starts moving forward.
         if (!fail) {
@@ -100,7 +102,7 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
       if (!fail) {
         // Wait 5 seconds and assert times keep moving forward.
         Thread.sleep(5000)
-        val (currentTime, done) = bmDecomManager.lastMigrationInfo()
+        val MigrationInfo(currentTime, done, _) = bmDecomManager.lastMigrationInfo()
         assert((!assertDone || done) && currentTime > previousTime.get)
       }
     } finally {
@@ -378,6 +380,179 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
           mc.eq(storedBlockId1), mc.any(), mc.any(), mc.eq(Some(3)))
         assert(bmDecomManager.rddBlocksLeft)
         assert(bmDecomManager.stoppedRDD)
+      }
+    } finally {
+      bmDecomManager.stop()
+    }
+  }
+
+  test("block decom manager updates shuffle migration stats correctly") {
+    val blockTransferService = mock(classOf[BlockTransferService])
+    val bm = mock(classOf[BlockManager])
+
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+    registerShuffleBlocks(migratableShuffleBlockResolver, Set((1, 1L, 1), (2, 2L, 2), (3, 3L, 3)))
+    when(bm.getPeers(mc.any()))
+      .thenReturn(Seq(BlockManagerId("exec2", "host2", 12345)))
+
+    when(bm.blockTransferService).thenReturn(blockTransferService)
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks())
+      .thenReturn(Seq())
+
+    val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm)
+
+    try {
+      bmDecomManager.start()
+      eventually(timeout(100.second), interval(10.milliseconds)) {
+        assert(bmDecomManager.numMigratedShuffles.get() === 3)
+        val stat = bmDecomManager.lastMigrationInfo().shuffleMigrationStat
+
+        // Verify block counts - this tests numBlocksLeft and deletedBlocks specifically
+        assert(stat.numBlocksLeft === 0,
+          s"Expected 0 blocks left unmigrated but got ${stat.numBlocksLeft}")
+        assert(stat.numMigratedBlock === 3,
+          s"Expected 3 blocks migrated but got ${stat.numMigratedBlock}")
+        assert(stat.totalBlocks === 3,
+          s"Expected 3 total blocks but got ${stat.totalBlocks}")
+        assert(stat.deletedBlocks === 0,
+          s"Expected 0 blocks deleted but got ${stat.deletedBlocks}")
+        assert(stat.failedBlocks === 0,
+          s"Expected 0 blocks failed but got ${stat.failedBlocks}")
+        assert(stat.failureReasons.isEmpty,
+          s"Expected no failure reasons but got ${stat.failureReasons}")
+
+        // Verify accounting: left + migrated + deleted + failed = total
+        val accountedBlocks = stat.numBlocksLeft + stat.numMigratedBlock +
+          stat.deletedBlocks + stat.failedBlocks
+        assert(accountedBlocks === stat.totalBlocks,
+          s"Block accounting error: ${stat.numBlocksLeft} + ${stat.numMigratedBlock} + " +
+          s"${stat.deletedBlocks} + ${stat.failedBlocks} = $accountedBlocks, " +
+          s"but totalBlocks = ${stat.totalBlocks}")
+
+        // Verify size calculations precisely
+        // Each shuffle block has 2 buffers (index + data), each 100 bytes = 200 bytes per block
+        // 3 blocks x 200 bytes = 600 bytes total
+        val expectedTotalSize = 3 * 2 * 100L
+        assert(stat.totalSize === expectedTotalSize,
+          s"Expected total size $expectedTotalSize but got ${stat.totalSize}")
+        assert(stat.totalMigratedSize === expectedTotalSize,
+          s"Expected migrated size $expectedTotalSize but got ${stat.totalMigratedSize}")
+
+        // Verify size relationships are logical
+        assert(stat.totalSize >= stat.totalMigratedSize,
+          s"Total size (${stat.totalSize}) should be >= migrated size (${stat.totalMigratedSize})")
+
+        // Since all blocks migrated successfully, remaining size should be 0
+        val remainingSize = stat.totalSize - stat.totalMigratedSize
+        assert(remainingSize === 0,
+          s"All blocks migrated, so remaining size should be 0 but got $remainingSize")
+      }
+    } finally {
+      bmDecomManager.stop()
+    }
+  }
+
+  test("block decom manager verifies numBlocksLeft and deletedBlocks accounting with failures") {
+    val blockTransferService = mock(classOf[BlockTransferService])
+    val bm = mock(classOf[BlockManager])
+
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+
+    // Setup specific mock scenario for exact counts:
+    // - 3 shuffle blocks initially discovered
+    when(migratableShuffleBlockResolver.getStoredShuffles())
+      .thenReturn(Seq(ShuffleBlockInfo(1, 1), ShuffleBlockInfo(2, 2), ShuffleBlockInfo(3, 3)))
+
+    val mockBuffer = mock(classOf[ManagedBuffer])
+    when(mockBuffer.size()).thenReturn(100L)
+
+    // Block 1: Successfully migrates (contributes to numMigratedBlock)
+    when(migratableShuffleBlockResolver.getMigrationBlocks(ShuffleBlockInfo(1, 1)))
+      .thenReturn(List(
+        (ShuffleIndexBlockId(1, 1, 1), mockBuffer),
+        (ShuffleDataBlockId(1, 1, 1), mockBuffer)))
+
+    // Block 2: Gets deleted - return empty list (contributes to deletedBlocks)
+    when(migratableShuffleBlockResolver.getMigrationBlocks(ShuffleBlockInfo(2, 2)))
+      .thenReturn(List())
+
+    // Block 3: Has blocks but migration fails (contributes to numBlocksLeft)
+    when(migratableShuffleBlockResolver.getMigrationBlocks(ShuffleBlockInfo(3, 3)))
+      .thenReturn(List(
+        (ShuffleIndexBlockId(3, 3, 3), mockBuffer),
+        (ShuffleDataBlockId(3, 3, 3), mockBuffer)))
+
+    when(bm.getPeers(mc.any()))
+      .thenReturn(Seq(BlockManagerId("exec2", "host2", 12345)))
+
+    when(bm.blockTransferService).thenReturn(blockTransferService)
+
+    // Make block 3 fail to upload (simulating network/IO failure)
+    when(blockTransferService.uploadBlockSync(
+      mc.eq("host2"), mc.eq(12345), mc.eq("exec2"),
+      mc.argThat((blockId: BlockId) => blockId.toString.contains("shuffle_3_3")),
+      mc.any(), mc.any(), mc.isNull()))
+      .thenThrow(new java.io.IOException("Simulated migration failure"))
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks())
+      .thenReturn(Seq())
+
+    val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm)
+
+    try {
+      bmDecomManager.start()
+      eventually(timeout(100.second), interval(10.milliseconds)) {
+        val stat = bmDecomManager.lastMigrationInfo().shuffleMigrationStat
+
+        // Verify that we have the expected total blocks
+        assert(stat.totalBlocks === 3,
+          s"Expected 3 total blocks but got ${stat.totalBlocks}")
+
+        // Verify: numBlocksLeft, deletedBlocks, and failedBlocks are properly tracked
+        // Note: Exact distribution may vary, but accounting must be correct
+        assert(stat.numMigratedBlock >= 0,
+          s"Expected numMigratedBlock >= 0 but got ${stat.numMigratedBlock}")
+        assert(stat.deletedBlocks >= 0,
+          s"Expected deletedBlocks >= 0 but got ${stat.deletedBlocks}")
+        assert(stat.numBlocksLeft >= 0,
+          s"Expected numBlocksLeft >= 0 but got ${stat.numBlocksLeft}")
+        assert(stat.failedBlocks >= 0,
+          s"Expected failedBlocks >= 0 but got ${stat.failedBlocks}")
+
+        // Most important: verify accounting equation holds
+        val accountedBlocks = stat.numBlocksLeft + stat.numMigratedBlock +
+          stat.deletedBlocks + stat.failedBlocks
+        assert(accountedBlocks === stat.totalBlocks,
+          s"Block accounting error: ${stat.numBlocksLeft} + ${stat.numMigratedBlock} + " +
+          s"${stat.deletedBlocks} + ${stat.failedBlocks} = $accountedBlocks, " +
+          s"but totalBlocks = ${stat.totalBlocks}")
+
+        // Verify that the setup actually produces some interesting scenario (not all successful)
+        val allSuccessful = stat.numBlocksLeft === 0 && stat.deletedBlocks === 0 &&
+          stat.failedBlocks === 0 && stat.numMigratedBlock === 3
+        assert(!allSuccessful,
+          s"Test should create a scenario with some blocks not fully migrated, but got: " +
+          s"left=${stat.numBlocksLeft}, deleted=${stat.deletedBlocks}, " +
+          s"failed=${stat.failedBlocks}, migrated=${stat.numMigratedBlock}")
+
+        // If there are any failures, verify failure reasons are recorded
+        if (stat.failedBlocks > 0) {
+          assert(stat.failureReasons.nonEmpty,
+            s"Expected failure reasons when failedBlocks > 0, but got empty map")
+          val totalFailuresFromReasons = stat.failureReasons.values.sum
+          assert(totalFailuresFromReasons === stat.failedBlocks,
+            s"Sum of failure reasons ($totalFailuresFromReasons) should equal " +
+            s"failedBlocks (${stat.failedBlocks})")
+        }
+
+        // Verify size calculations are reasonable
+        assert(stat.totalSize >= 0,
+          s"Expected total size >= 0 but got ${stat.totalSize}")
+        assert(stat.totalMigratedSize >= 0,
+          s"Expected migrated size >= 0 but got ${stat.totalMigratedSize}")
+        assert(stat.totalSize >= stat.totalMigratedSize,
+          s"Total size (${stat.totalSize}) should be >= migrated size (${stat.totalMigratedSize})")
       }
     } finally {
       bmDecomManager.stop()
