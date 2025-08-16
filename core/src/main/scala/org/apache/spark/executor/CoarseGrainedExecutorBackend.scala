@@ -42,7 +42,7 @@ import org.apache.spark.resource.{ResourceInformation, ResourceProfile}
 import org.apache.spark.resource.ResourceProfile._
 import org.apache.spark.resource.ResourceUtils._
 import org.apache.spark.rpc._
-import org.apache.spark.scheduler.{ExecutorLossMessage, ExecutorLossReason, TaskDescription}
+import org.apache.spark.scheduler.{DecommissionSummary, ExecutorLossMessage, ExecutorLossReason, TaskDescription}
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages._
 import org.apache.spark.storage.MigrationInfo
 import org.apache.spark.util._
@@ -357,16 +357,17 @@ private[spark] class CoarseGrainedExecutorBackend(
                 // since the start of computing it.
                 if (allBlocksMigrated && (migrationTime > lastTaskRunningTime)) {
                   logInfo("No running tasks, all blocks migrated, stopping.")
-                  val taskWaitingTime = Duration(lastTaskRunningTime - decommissionedTime.get,
+                  val taskWaitingDuration = Duration(lastTaskRunningTime - decommissionedTime.get,
                     NANOSECONDS)
-                  val migrationTime = Duration(System.nanoTime() - decommissionedTime.get,
+                  val totalDecommissionTime = Duration(System.nanoTime() - decommissionedTime.get,
                     NANOSECONDS)
-                  val migrationSummary = f"Migration finished in ${migrationTime.toMillis}%,d ms" +
-                    f"(including ${taskWaitingTime.toMillis}%,d ms running task waiting time). " +
-                    f"${shuffleStat.numMigratedBlock}%,d blocks of size " +
-                    f"${Utils.bytesToString(shuffleStat.totalMigratedSize)} migrated, " +
-                    f"${shuffleStat.numBlocksLeft} blocks not migrated."
-                  exitExecutor(0, ExecutorLossMessage.decommissionFinished + migrationSummary)
+                  val decommissionSummary = DecommissionSummary(
+                    decommissionTime = totalDecommissionTime,
+                    migrationTime = totalDecommissionTime,
+                    taskWaitingTime = taskWaitingDuration,
+                    migrationInfo = MigrationInfo(migrationTime, allBlocksMigrated, shuffleStat))
+                  exitExecutor(0, ExecutorLossMessage.decommissionFinished +
+                    decommissionSummary.toString)
                 } else {
                   logInfo("All blocks not yet migrated.")
                 }
