@@ -420,4 +420,58 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
       bmDecomManager.stop()
     }
   }
+
+  test("block decom manager load balances shuffle blocks across peers") {
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+    
+    // Create multiple shuffle blocks to test load balancing
+    val shuffleBlocks = (1 to 6).map(i => (i, i.toLong, 1)).toSet
+    registerShuffleBlocks(migratableShuffleBlockResolver, shuffleBlocks)
+    
+    // Set up multiple peers
+    val peer1 = BlockManagerId("exec1", "host1", 12345)
+    val peer2 = BlockManagerId("exec2", "host2", 12345) 
+    val peer3 = BlockManagerId("exec3", "host3", 12345)
+    
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks()).thenReturn(Seq())
+    when(bm.getPeers(mc.any())).thenReturn(Seq(peer1, peer2, peer3))
+    
+    val blockTransferService = mock(classOf[BlockTransferService])
+    when(bm.blockTransferService).thenReturn(blockTransferService)
+    
+    val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm)
+    
+    try {
+      bmDecomManager.start()
+      
+      eventually(timeout(30.second), interval(100.milliseconds)) {
+        // Verify that all shuffle blocks have been migrated
+        assert(bmDecomManager.numMigratedShuffles.get() === shuffleBlocks.size)
+        
+        // Check load balancing - get per-peer statistics
+        val peerStats = bmDecomManager.getPeerMigrationStats()
+        
+        // All peers should have participated in migration
+        assert(peerStats.nonEmpty)
+        assert(peerStats.keys.toSet.subsetOf(Set(peer1, peer2, peer3)))
+        
+        // Load should be relatively balanced (no peer should have more than others + 1)
+        val blockCounts = peerStats.values.map(_._1).toSeq
+        if (blockCounts.nonEmpty) {
+          val minBlocks = blockCounts.min
+          val maxBlocks = blockCounts.max
+          assert(maxBlocks - minBlocks <= 1, 
+            s"Load imbalance detected: min=$minBlocks, max=$maxBlocks, counts=$blockCounts")
+        }
+        
+        // Verify total blocks migrated across all peers equals total shuffle blocks
+        val totalMigrated = blockCounts.sum
+        assert(totalMigrated === shuffleBlocks.size)
+      }
+    } finally {
+      bmDecomManager.stop()
+    }
+  }
 }
