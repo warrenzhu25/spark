@@ -189,6 +189,13 @@ private[storage] class BlockManagerDecommissioner(
               // Track bytes migrated to this peer for load balancing
               peerMigrationBytes.computeIfAbsent(peer, _ => new AtomicLong(0))
                 .addAndGet(totalSize)
+                
+              // Track shuffle sizes migrated per executor for intelligent placement
+              val shuffleId = shuffleBlockInfo.shuffleId
+              shuffleSizesMigratedPerExecutor.computeIfAbsent(shuffleId, 
+                _ => new java.util.concurrent.ConcurrentHashMap[BlockManagerId, AtomicLong]())
+                .computeIfAbsent(peer, _ => new AtomicLong(0))
+                .addAndGet(totalSize)
             } catch {
               case e @ ( _ : IOException | _ : SparkException) =>
                 handleMigrationError(shuffleBlockInfo, blocks, e, retryCount)
@@ -242,6 +249,15 @@ private[storage] class BlockManagerDecommissioner(
   
   // Round-robin index for load balancing  
   private val nextPeerIndex = new AtomicInteger(0)
+  
+  // Cached shuffle size information per executor per shuffle to avoid frequent MapOutputTracker calls
+  private val shuffleSizeCache = new java.util.concurrent.ConcurrentHashMap[Int, Map[BlockManagerId, Long]]()
+  private val shuffleSizeCacheTimestamp = new java.util.concurrent.ConcurrentHashMap[Int, Long]()
+  private val shuffleSizeCacheTimeout = conf.getLong("spark.storage.decommission.shuffle.size.cache.timeout", 60000L) // 1 minute
+  
+  // Track shuffle sizes migrated per executor per shuffle for intelligent placement
+  private val shuffleSizesMigratedPerExecutor = 
+    new java.util.concurrent.ConcurrentHashMap[Int, java.util.concurrent.ConcurrentHashMap[BlockManagerId, AtomicLong]]()
 
   // Set if we encounter an error attempting to migrate and stop.
   @volatile private var stopped = false
@@ -253,6 +269,83 @@ private[storage] class BlockManagerDecommissioner(
   private val migrationPeers =
     mutable.HashMap[BlockManagerId, ShuffleMigrationRunnable]()
     
+  /**
+   * Get shuffle sizes per executor for a given shuffle, with caching to avoid frequent calls.
+   */
+  private def getShuffleSizesPerExecutor(shuffleId: Int): Map[BlockManagerId, Long] = {
+    val currentTime = System.currentTimeMillis()
+    val cacheTime = shuffleSizeCacheTimestamp.getOrDefault(shuffleId, 0L)
+    
+    // Return cached data if still valid
+    if (currentTime - cacheTime < shuffleSizeCacheTimeout) {
+      return shuffleSizeCache.getOrDefault(shuffleId, Map.empty)
+    }
+    
+    try {
+      // Query MapOutputTracker for all reduce partitions of this shuffle
+      val executorSizes = mutable.Map[BlockManagerId, Long]()
+      
+      // Get map output locations and sizes for all reducers
+      // We aggregate across all reduce partitions to get total shuffle size per executor
+      val iter = bm.mapOutputTracker.getMapSizesByExecutorId(shuffleId, 0, Int.MaxValue, 0, Int.MaxValue)
+      
+      iter.foreach { case (executorId, blocks) =>
+        val totalSize = blocks.map(_._2).sum
+        if (totalSize > 0) {
+          executorSizes(executorId) = executorSizes.getOrElse(executorId, 0L) + totalSize
+        }
+      }
+      
+      val result = executorSizes.toMap
+      
+      // Cache the result
+      shuffleSizeCache.put(shuffleId, result)
+      shuffleSizeCacheTimestamp.put(shuffleId, currentTime)
+      
+      logDebug(s"Cached shuffle sizes for shuffle $shuffleId: ${result.map { case (exec, size) => 
+        s"${exec.executorId}=${Utils.bytesToString(size)}" }.mkString(", ")}")
+      
+      result
+    } catch {
+      case NonFatal(e) =>
+        logWarning(s"Failed to get shuffle sizes for shuffle $shuffleId from MapOutputTracker", e)
+        Map.empty
+    }
+  }
+  
+  /**
+   * Get the current shuffle load per executor for a given shuffle ID.
+   * This includes both existing shuffle data and data we've already migrated.
+   */
+  private def getCurrentShuffleLoadPerExecutor(shuffleId: Int, peers: Seq[BlockManagerId]): Map[BlockManagerId, Long] = {
+    val originalSizes = getShuffleSizesPerExecutor(shuffleId)
+    val migratedSizes = shuffleSizesMigratedPerExecutor.getOrDefault(shuffleId, 
+      new java.util.concurrent.ConcurrentHashMap[BlockManagerId, AtomicLong]())
+    
+    peers.map { peer =>
+      val originalSize = originalSizes.getOrElse(peer, 0L)
+      val migratedSize = migratedSizes.getOrDefault(peer, new AtomicLong(0)).get()
+      peer -> (originalSize + migratedSize)
+    }.toMap
+  }
+  
+  /**
+   * Find the best target executor for migrating a shuffle block, considering existing shuffle distribution.
+   */
+  private def findBestTargetForShuffle(shuffleId: Int, peers: Seq[BlockManagerId], blockSize: Long = 0L): Option[BlockManagerId] = {
+    if (peers.isEmpty) return None
+    
+    val currentLoads = getCurrentShuffleLoadPerExecutor(shuffleId, peers)
+    
+    // Find executor with minimum shuffle load for this shuffle
+    val sortedByLoad = peers.sortBy(peer => currentLoads.getOrElse(peer, 0L))
+    
+    logDebug(s"Shuffle $shuffleId load distribution: ${sortedByLoad.map(p => 
+      s"${p.executorId}=${Utils.bytesToString(currentLoads.getOrElse(p, 0L))}").mkString(", ")}")
+    
+    Some(sortedByLoad.head)
+  }
+  
   /**
    * Load-aware block assignment to peers. Uses a combination of round-robin and load balancing
    * to ensure even distribution of shuffle blocks across peers.
@@ -270,27 +363,49 @@ private[storage] class BlockManagerDecommissioner(
       return None
     }
     
-    // Find peer with minimum load (by count of migrated blocks)
-    val peerLoads = activePeers.map { peer =>
-      val count = peerMigrationCounts.getOrDefault(peer, new AtomicInteger(0)).get()
-      (peer, count)
-    }
-    
-    val minLoad = peerLoads.minBy(_._2)._2
-    val lightLoadedPeers = peerLoads.filter(_._2 <= minLoad + 1).map(_._1)
-    
-    // Only assign block if this peer is among the least loaded
-    if (lightLoadedPeers.contains(targetPeer)) {
-      Option(shufflesToMigrate.poll()) match {
-        case Some(block) =>
-          // Track assignment to this peer
-          peerMigrationCounts.computeIfAbsent(targetPeer, _ => new AtomicInteger(0))
-            .incrementAndGet()
-          Some(block)
-        case None => None
-      }
-    } else {
-      None
+    // Peek at the next block to determine optimal placement
+    val peekResult = Option(shufflesToMigrate.peek())
+    peekResult match {
+      case Some((shuffleBlockInfo, _)) =>
+        // Find the best target for this shuffle based on existing shuffle distribution
+        findBestTargetForShuffle(shuffleBlockInfo.shuffleId, activePeers) match {
+          case Some(bestTarget) if bestTarget == targetPeer =>
+            // This peer is the best target, assign the block
+            Option(shufflesToMigrate.poll()) match {
+              case Some(block) =>
+                // Track assignment to this peer
+                peerMigrationCounts.computeIfAbsent(targetPeer, _ => new AtomicInteger(0))
+                  .incrementAndGet()
+                Some(block)
+              case None => None
+            }
+          case Some(bestTarget) =>
+            // Another peer is better suited, don't assign to this peer
+            logDebug(s"Block ${shuffleBlockInfo} better suited for ${bestTarget.executorId} than ${targetPeer.executorId}")
+            None
+          case None =>
+            // Fallback to original load balancing if shuffle size info unavailable
+            val peerLoads = activePeers.map { peer =>
+              val count = peerMigrationCounts.getOrDefault(peer, new AtomicInteger(0)).get()
+              (peer, count)
+            }
+            
+            val minLoad = peerLoads.minBy(_._2)._2
+            val lightLoadedPeers = peerLoads.filter(_._2 <= minLoad + 1).map(_._1)
+            
+            if (lightLoadedPeers.contains(targetPeer)) {
+              Option(shufflesToMigrate.poll()) match {
+                case Some(block) =>
+                  peerMigrationCounts.computeIfAbsent(targetPeer, _ => new AtomicInteger(0))
+                    .incrementAndGet()
+                  Some(block)
+                case None => None
+              }
+            } else {
+              None
+            }
+        }
+      case None => None
     }
   }
 
@@ -642,6 +757,59 @@ private[storage] class BlockManagerDecommissioner(
     }
     
     result.toMap
+  }
+  
+  /**
+   * Returns shuffle distribution statistics for monitoring load balancing effectiveness.
+   */
+  private[storage] def getShuffleDistributionStats(): Map[String, Any] = {
+    val stats = mutable.Map[String, Any]()
+    
+    // Get active shuffles being migrated
+    val activeShuffles = migratingShuffles.map(_.shuffleId).toSet
+    
+    if (activeShuffles.nonEmpty) {
+      val activePeers = migrationPeers.keys.toSeq
+      
+      // Calculate load distribution per shuffle
+      val shuffleDistributions = activeShuffles.map { shuffleId =>
+        val loads = getCurrentShuffleLoadPerExecutor(shuffleId, activePeers)
+        val nonZeroLoads = loads.values.filter(_ > 0).toSeq
+        
+        if (nonZeroLoads.nonEmpty) {
+          val min = nonZeroLoads.min
+          val max = nonZeroLoads.max
+          val avg = nonZeroLoads.sum.toDouble / nonZeroLoads.size
+          val imbalanceRatio = if (min > 0) max.toDouble / min else Double.MaxValue
+          
+          shuffleId -> Map(
+            "minLoadBytes" -> min,
+            "maxLoadBytes" -> max,
+            "avgLoadBytes" -> avg.toLong,
+            "imbalanceRatio" -> imbalanceRatio,
+            "executorsWithData" -> nonZeroLoads.size
+          )
+        } else {
+          shuffleId -> Map("noData" -> true)
+        }
+      }.toMap
+      
+      stats("shuffleDistributions") = shuffleDistributions
+      stats("totalActiveShuffles") = activeShuffles.size
+      
+      // Overall balance metrics
+      val allLoads = shuffleDistributions.values.flatMap { dist =>
+        dist.get("avgLoadBytes").map(_.asInstanceOf[Long])
+      }.toSeq
+      
+      if (allLoads.nonEmpty) {
+        stats("overallMinLoad") = allLoads.min
+        stats("overallMaxLoad") = allLoads.max
+        stats("overallAvgLoad") = allLoads.sum / allLoads.size
+      }
+    }
+    
+    stats.toMap
   }
   
   /**
