@@ -330,20 +330,20 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
         assert(bmDecomManager.rddBlocksLeft)
         previousRDDTime match {
           case None =>
-            previousRDDTime = Some(bmDecomManager.lastRDDMigrationTime)
+            previousRDDTime = Some(bmDecomManager.lastRDDMigrationTime.get())
             assert(false)
           case Some(t) =>
-            assert(bmDecomManager.lastRDDMigrationTime > t)
+            assert(bmDecomManager.lastRDDMigrationTime.get() > t)
         }
         // Since we do eventually finish the shuffle blocks make sure the shuffle blocks complete
         // and that the time keeps moving forward.
         assert(!bmDecomManager.shuffleBlocksLeft)
         previousShuffleTime match {
           case None =>
-            previousShuffleTime = Some(bmDecomManager.lastShuffleMigrationTime)
+            previousShuffleTime = Some(bmDecomManager.lastShuffleMigrationTime.get())
             assert(false)
           case Some(t) =>
-            assert(bmDecomManager.lastShuffleMigrationTime > t)
+            assert(bmDecomManager.lastShuffleMigrationTime.get() > t)
         }
       }
     } finally {
@@ -378,6 +378,43 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
           mc.eq(storedBlockId1), mc.any(), mc.any(), mc.eq(Some(3)))
         assert(bmDecomManager.rddBlocksLeft)
         assert(bmDecomManager.stoppedRDD)
+      }
+    } finally {
+      bmDecomManager.stop()
+    }
+  }
+
+  test("block decom manager provides migration statistics") {
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+    registerShuffleBlocks(migratableShuffleBlockResolver, Set((1, 1L, 1)))
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks())
+      .thenReturn(Seq())
+    when(bm.getPeers(mc.any()))
+      .thenReturn(Seq(BlockManagerId("exec2", "host2", 12345)))
+
+    val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm)
+    
+    try {
+      bmDecomManager.start()
+      
+      eventually(timeout(30.second), interval(100.milliseconds)) {
+        val stats = bmDecomManager.getMigrationStats()
+        
+        // Verify stats contain expected keys
+        assert(stats.contains("rddBlocksMigrated"))
+        assert(stats.contains("shuffleBlocksMigrated"))
+        assert(stats.contains("migrationErrors"))
+        assert(stats.contains("lastRDDMigrationTime"))
+        assert(stats.contains("lastShuffleMigrationTime"))
+        assert(stats.contains("remainingShuffles"))
+        
+        // Verify non-negative values
+        stats.values.foreach(value => assert(value >= 0))
+        
+        // Should have migrated 1 shuffle block eventually
+        assert(stats("shuffleBlocksMigrated") === 1)
       }
     } finally {
       bmDecomManager.stop()
