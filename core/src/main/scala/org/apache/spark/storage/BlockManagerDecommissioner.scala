@@ -234,6 +234,8 @@ private[storage] class BlockManagerDecommissioner(
 
   private val rddBlockMigrationRunnable = new Runnable {
     val sleepInterval = conf.get(config.STORAGE_DECOMMISSION_REPLICATION_REATTEMPT_INTERVAL)
+    // Batch size for RDD migration to avoid overwhelming the system
+    val batchSize = conf.getInt("spark.storage.decommission.rdd.batch.size", 100)
 
     override def run(): Unit = {
       logInfo("Attempting to migrate all RDD blocks")
@@ -246,10 +248,14 @@ private[storage] class BlockManagerDecommissioner(
           try {
             val startTime = System.nanoTime()
             logInfo("Attempting to migrate all cached RDD blocks")
-            rddBlocksLeft = decommissionRddCacheBlocks()
+            val migrationResult = decommissionRddCacheBlocks()
+            rddBlocksLeft = migrationResult.hasMoreBlocks
             lastRDDMigrationTime.set(startTime)
-            logInfo(s"Finished current round RDD blocks migration, " +
-              s"waiting for ${sleepInterval}ms before the next round migration.")
+            
+            logInfo(s"Finished current round RDD blocks migration. " +
+              s"Migrated ${migrationResult.migratedCount} blocks, " +
+              s"failed ${migrationResult.failedCount} blocks. " +
+              s"Waiting ${sleepInterval}ms before next round.")
             Thread.sleep(sleepInterval)
           } catch {
             case _: InterruptedException =>
@@ -257,6 +263,7 @@ private[storage] class BlockManagerDecommissioner(
               stoppedRDD = true
             case NonFatal(e) =>
               logError("Error occurred during RDD blocks migration.", e)
+              migrationErrors.incrementAndGet()
               stoppedRDD = true
           }
         }
@@ -358,51 +365,97 @@ private[storage] class BlockManagerDecommissioner(
     }
   }
 
+  // Case class to hold RDD migration results
+  private case class RDDMigrationResult(migratedCount: Int, failedCount: Int, hasMoreBlocks: Boolean)
+  
   /**
    * Tries to migrate all cached RDD blocks from this BlockManager to peer BlockManagers
    * Visible for testing
-   * Returns true if we have not migrated all of our RDD blocks.
+   * Returns migration result with counts and whether more blocks remain.
    */
-  private[storage] def decommissionRddCacheBlocks(): Boolean = {
+  private[storage] def decommissionRddCacheBlocks(): RDDMigrationResult = {
     val replicateBlocksInfo = bm.getMigratableRDDBlocks()
-    // Refresh peers and validate we have somewhere to move blocks.
-
-    if (replicateBlocksInfo.nonEmpty) {
-      logInfo(s"Need to replicate ${replicateBlocksInfo.size} RDD blocks " +
-        "for block manager decommissioning")
-    } else {
-      logWarning(s"Asked to decommission RDD cache blocks, but no blocks to migrate")
-      return false
+    
+    if (replicateBlocksInfo.isEmpty) {
+      logInfo("No RDD blocks to migrate")
+      return RDDMigrationResult(0, 0, false)
     }
 
-    // TODO: We can sort these blocks based on some policy (LRU/blockSize etc)
-    //   so that we end up prioritize them over each other
-    val blocksFailedReplication = replicateBlocksInfo.map { replicateBlock =>
-        val replicatedSuccessfully = migrateBlock(replicateBlock)
-        (replicateBlock.blockId, replicatedSuccessfully)
-    }.filterNot(_._2).map(_._1)
-    if (blocksFailedReplication.nonEmpty) {
-      logWarning("Blocks failed replication in cache decommissioning " +
-        s"process: ${blocksFailedReplication.mkString(",")}")
-      return true
+    logInfo(s"Need to replicate ${replicateBlocksInfo.size} RDD blocks " +
+      "for block manager decommissioning")
+
+    // Sort blocks by size (smaller first) for better migration efficiency  
+    val sortedBlocks = replicateBlocksInfo.sortBy { block =>
+      bm.getLocalBytes(block.blockId) match {
+        case Some(size) => size
+        case None => 0L
+      }
     }
-    false
+    
+    var migratedCount = 0
+    var failedCount = 0
+    val failedBlocks = mutable.ArrayBuffer[BlockId]()
+    
+    // Process blocks in batches for better performance
+    val batchSize = rddBlockMigrationRunnable.batchSize
+    for (batch <- sortedBlocks.grouped(batchSize)) {
+      if (stopped || stoppedRDD) {
+        return RDDMigrationResult(migratedCount, failedCount, true)
+      }
+      
+      val batchResults = batch.map { replicateBlock =>
+        val success = migrateBlock(replicateBlock)
+        if (success) {
+          migratedCount += 1
+          totalRDDBlocksMigrated.incrementAndGet()
+        } else {
+          failedCount += 1
+          failedBlocks += replicateBlock.blockId
+        }
+        success
+      }
+      
+      val batchSuccessCount = batchResults.count(identity)
+      logDebug(s"Batch migration completed: $batchSuccessCount/${batch.size} blocks succeeded")
+    }
+    
+    if (failedBlocks.nonEmpty) {
+      logWarning(s"Failed to migrate ${failedBlocks.size} RDD blocks: ${failedBlocks.take(10).mkString(",")}" +
+        (if (failedBlocks.size > 10) "..." else ""))
+    }
+    
+    RDDMigrationResult(migratedCount, failedCount, failedCount > 0)
   }
 
   private def migrateBlock(blockToReplicate: ReplicateBlock): Boolean = {
-    val replicatedSuccessfully = bm.replicateBlock(
-      blockToReplicate.blockId,
-      blockToReplicate.replicas.toSet,
-      blockToReplicate.maxReplicas,
-      maxReplicationFailures = Some(maxReplicationFailuresForDecommission))
-    if (replicatedSuccessfully) {
-      logInfo(s"Block ${blockToReplicate.blockId} migrated successfully, Removing block now")
-      bm.removeBlock(blockToReplicate.blockId)
-      logInfo(s"Block ${blockToReplicate.blockId} removed")
-    } else {
-      logWarning(s"Failed to migrate block ${blockToReplicate.blockId}")
+    val startTime = System.currentTimeMillis()
+    val blockSize = bm.getLocalBytes(blockToReplicate.blockId).getOrElse(0L)
+    
+    try {
+      val replicatedSuccessfully = bm.replicateBlock(
+        blockToReplicate.blockId,
+        blockToReplicate.replicas.toSet,
+        blockToReplicate.maxReplicas,
+        maxReplicationFailures = Some(maxReplicationFailuresForDecommission))
+        
+      if (replicatedSuccessfully) {
+        val migrationTime = System.currentTimeMillis() - startTime
+        logInfo(s"Block ${blockToReplicate.blockId} migrated successfully " +
+          s"(size: ${Utils.bytesToString(blockSize)}, time: ${migrationTime}ms). Removing block now.")
+        bm.removeBlock(blockToReplicate.blockId)
+        logDebug(s"Block ${blockToReplicate.blockId} removed from local storage")
+      } else {
+        logWarning(s"Failed to migrate block ${blockToReplicate.blockId} " +
+          s"(size: ${Utils.bytesToString(blockSize)}) after ${maxReplicationFailuresForDecommission} attempts")
+        migrationErrors.incrementAndGet()
+      }
+      replicatedSuccessfully
+    } catch {
+      case NonFatal(e) =>
+        logError(s"Exception during migration of block ${blockToReplicate.blockId}", e)
+        migrationErrors.incrementAndGet()
+        false
     }
-    replicatedSuccessfully
   }
 
   def start(): Unit = {
