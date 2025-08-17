@@ -132,16 +132,18 @@ private[storage] class BlockManagerDecommissioner(
       }
     }
 
-    private def nextShuffleBlockToMigrate(): (ShuffleBlockInfo, Int) = {
-      while (!Thread.currentThread().isInterrupted && keepRunning) {
-        Option(shufflesToMigrate.poll()) match {
-          case Some(head) => return head
-          // Nothing to do right now, but maybe a transfer will fail or a new block
-          // will finish being committed. Use shorter sleep for better responsiveness.
-          case None => Thread.sleep(100)
+    private def nextShuffleBlockToMigrate(): Option[(ShuffleBlockInfo, Int)] = {
+      // Check if this peer should take the next block based on load balancing
+      if (!Thread.currentThread().isInterrupted && keepRunning) {
+        val nextBlock = getNextBlockForPeer(peer)
+        if (nextBlock.isEmpty) {
+          // No block assigned to this peer, wait briefly
+          Thread.sleep(100)
         }
+        nextBlock
+      } else {
+        None
       }
-      throw SparkCoreErrors.interruptedError()
     }
 
     override def run(): Unit = {
@@ -149,7 +151,8 @@ private[storage] class BlockManagerDecommissioner(
       // Once a block fails to transfer to an executor stop trying to transfer more blocks
       while (keepRunning) {
         try {
-          val (shuffleBlockInfo, retryCount) = nextShuffleBlockToMigrate()
+          nextShuffleBlockToMigrate() match {
+            case Some((shuffleBlockInfo, retryCount)) =>
           val blocks = bm.migratableResolver.getMigrationBlocks(shuffleBlockInfo)
           // We only migrate a shuffle block when both index file and data file exist.
           if (blocks.isEmpty) {
@@ -182,6 +185,10 @@ private[storage] class BlockManagerDecommissioner(
                 s"size: ${Utils.bytesToString(totalSize)}) to $peer " +
                 s"in ${migrationTime} ms")
               totalShuffleBlocksMigrated.incrementAndGet()
+              
+              // Track bytes migrated to this peer for load balancing
+              peerMigrationBytes.computeIfAbsent(peer, _ => new AtomicLong(0))
+                .addAndGet(totalSize)
             } catch {
               case e @ ( _ : IOException | _ : SparkException) =>
                 handleMigrationError(shuffleBlockInfo, blocks, e, retryCount)
@@ -191,14 +198,17 @@ private[storage] class BlockManagerDecommissioner(
                 keepRunning = false
             }
           }
-          if (keepRunning) {
-            numMigratedShuffles.incrementAndGet()
-          } else {
-            logWarning(s"Stop migrating shuffle blocks to $peer")
-            // Do not mark the block as migrated if it still needs retry
-            if (!allowRetry(shuffleBlockInfo, retryCount + 1)) {
-              numMigratedShuffles.incrementAndGet()
-            }
+              if (keepRunning) {
+                numMigratedShuffles.incrementAndGet()
+              } else {
+                logWarning(s"Stop migrating shuffle blocks to $peer")
+                // Do not mark the block as migrated if it still needs retry
+                if (!allowRetry(shuffleBlockInfo, retryCount + 1)) {
+                  numMigratedShuffles.incrementAndGet()
+                }
+              }
+            case None =>
+              // No block to migrate right now, continue loop
           }
         } catch {
           case _: InterruptedException =>
@@ -223,6 +233,15 @@ private[storage] class BlockManagerDecommissioner(
   // Visible in storage for testing.
   private[storage] val shufflesToMigrate =
     new java.util.concurrent.ConcurrentLinkedQueue[(ShuffleBlockInfo, Int)]()
+    
+  // Per-peer load tracking for balanced distribution
+  private[storage] val peerMigrationCounts = 
+    new java.util.concurrent.ConcurrentHashMap[BlockManagerId, AtomicInteger]()
+  private[storage] val peerMigrationBytes = 
+    new java.util.concurrent.ConcurrentHashMap[BlockManagerId, AtomicLong]()
+  
+  // Round-robin index for load balancing  
+  private val nextPeerIndex = new AtomicInteger(0)
 
   // Set if we encounter an error attempting to migrate and stop.
   @volatile private var stopped = false
@@ -233,6 +252,47 @@ private[storage] class BlockManagerDecommissioner(
 
   private val migrationPeers =
     mutable.HashMap[BlockManagerId, ShuffleMigrationRunnable]()
+    
+  /**
+   * Load-aware block assignment to peers. Uses a combination of round-robin and load balancing
+   * to ensure even distribution of shuffle blocks across peers.
+   */
+  private def getNextBlockForPeer(targetPeer: BlockManagerId): Option[(ShuffleBlockInfo, Int)] = {
+    if (shufflesToMigrate.isEmpty) {
+      return None
+    }
+    
+    // Get current load for all active peers
+    val activePeers = migrationPeers.keys.filter(peer => 
+      migrationPeers.get(peer).exists(_.keepRunning)).toSeq
+    
+    if (activePeers.isEmpty) {
+      return None
+    }
+    
+    // Find peer with minimum load (by count of migrated blocks)
+    val peerLoads = activePeers.map { peer =>
+      val count = peerMigrationCounts.getOrDefault(peer, new AtomicInteger(0)).get()
+      (peer, count)
+    }
+    
+    val minLoad = peerLoads.minBy(_._2)._2
+    val lightLoadedPeers = peerLoads.filter(_._2 <= minLoad + 1).map(_._1)
+    
+    // Only assign block if this peer is among the least loaded
+    if (lightLoadedPeers.contains(targetPeer)) {
+      Option(shufflesToMigrate.poll()) match {
+        case Some(block) =>
+          // Track assignment to this peer
+          peerMigrationCounts.computeIfAbsent(targetPeer, _ => new AtomicInteger(0))
+            .incrementAndGet()
+          Some(block)
+        case None => None
+      }
+    } else {
+      None
+    }
+  }
 
   private val rddBlockMigrationExecutor =
     if (conf.get(config.STORAGE_DECOMMISSION_RDD_BLOCKS_ENABLED)) {
@@ -345,6 +405,9 @@ private[storage] class BlockManagerDecommissioner(
     val newPeers = Utils.randomize(livePeerSet.diff(currentPeerSet))
     migrationPeers ++= newPeers.map { peer =>
       logDebug(s"Starting thread to migrate shuffle blocks to ${peer}")
+      // Initialize per-peer tracking
+      peerMigrationCounts.putIfAbsent(peer, new AtomicInteger(0))
+      peerMigrationBytes.putIfAbsent(peer, new AtomicLong(0))
       val runnable = new ShuffleMigrationRunnable(peer)
       shuffleMigrationPool.foreach(_.submit(runnable))
       (peer, runnable)
@@ -564,6 +627,21 @@ private[storage] class BlockManagerDecommissioner(
       "lastShuffleMigrationTime" -> lastShuffleMigrationTime.get(),
       "remainingShuffles" -> (migratingShuffles.size - numMigratedShuffles.get()).toLong
     )
+  }
+  
+  /**
+   * Returns per-peer migration statistics for load balancing monitoring.
+   */
+  private[storage] def getPeerMigrationStats(): Map[BlockManagerId, (Long, Long)] = {
+    val result = mutable.Map[BlockManagerId, (Long, Long)]()
+    
+    migrationPeers.keys.foreach { peer =>
+      val blockCount = peerMigrationCounts.getOrDefault(peer, new AtomicInteger(0)).get().toLong
+      val byteCount = peerMigrationBytes.getOrDefault(peer, new AtomicLong(0)).get()
+      result(peer) = (blockCount, byteCount)
+    }
+    
+    result.toMap
   }
   
   /**
