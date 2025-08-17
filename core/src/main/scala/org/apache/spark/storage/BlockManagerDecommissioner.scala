@@ -44,6 +44,9 @@ private[storage] class BlockManagerDecommissioner(
   private val fallbackStorage = FallbackStorage.getFallbackStorage(conf)
   private val maxReplicationFailuresForDecommission =
     conf.get(config.STORAGE_DECOMMISSION_MAX_REPLICATION_FAILURE_PER_BLOCK)
+  
+  // Shutdown timeout for graceful termination
+  private val shutdownTimeoutMs = conf.get(config.STORAGE_DECOMMISSION_REPLICATION_REATTEMPT_INTERVAL) * 10
 
   // Used for tracking if our migrations are complete. Readable for testing
   // Use AtomicLong for better thread safety and performance
@@ -347,7 +350,11 @@ private[storage] class BlockManagerDecommissioner(
       logInfo("Stopping migrating shuffle blocks.")
       // Stop as gracefully as possible.
       migrationPeers.values.foreach(_.keepRunning = false)
-      threadPool.shutdownNow()
+      threadPool.shutdown()
+      if (!threadPool.awaitTermination(shutdownTimeoutMs, TimeUnit.MILLISECONDS)) {
+        logWarning(s"Shuffle migration pool did not terminate within ${shutdownTimeoutMs}ms, forcing shutdown")
+        threadPool.shutdownNow()
+      }
     }
   }
 
@@ -410,25 +417,65 @@ private[storage] class BlockManagerDecommissioner(
     } else {
       stopped = true
     }
+    
+    logInfo("Initiating graceful shutdown of block migration")
+    val shutdownStart = System.currentTimeMillis()
+    
+    // First, signal all threads to stop gracefully
+    migrationPeers.values.foreach(_.keepRunning = false)
+    
+    // Try graceful shutdown with timeout
     try {
-      rddBlockMigrationExecutor.foreach(_.shutdownNow())
+      rddBlockMigrationExecutor.foreach { executor =>
+        executor.shutdown()
+        if (!executor.awaitTermination(shutdownTimeoutMs, TimeUnit.MILLISECONDS)) {
+          logWarning(s"RDD migration executor did not terminate within ${shutdownTimeoutMs}ms, forcing shutdown")
+          executor.shutdownNow()
+        }
+      }
     } catch {
       case NonFatal(e) =>
         logError(s"Error during shutdown RDD block migration thread", e)
     }
+    
     try {
-      shuffleBlockMigrationRefreshExecutor.foreach(_.shutdownNow())
+      shuffleBlockMigrationRefreshExecutor.foreach { executor =>
+        executor.shutdown()
+        if (!executor.awaitTermination(shutdownTimeoutMs, TimeUnit.MILLISECONDS)) {
+          logWarning(s"Shuffle refresh executor did not terminate within ${shutdownTimeoutMs}ms, forcing shutdown")
+          executor.shutdownNow()
+        }
+      }
     } catch {
       case NonFatal(e) =>
         logError(s"Error during shutdown shuffle block refreshing thread", e)
     }
+    
     try {
       stopMigratingShuffleBlocks()
     } catch {
       case NonFatal(e) =>
         logError(s"Error during shutdown shuffle block migration thread", e)
     }
-    logInfo("Stopped block migration")
+    
+    val shutdownTime = System.currentTimeMillis() - shutdownStart
+    logInfo(s"Stopped block migration in ${shutdownTime}ms. " +
+      s"Migrated ${totalRDDBlocksMigrated.get()} RDD blocks and ${totalShuffleBlocksMigrated.get()} shuffle blocks. " +
+      s"Encountered ${migrationErrors.get()} errors.")
+  }
+
+  /**
+   * Returns migration statistics for monitoring.
+   */
+  private[storage] def getMigrationStats(): Map[String, Long] = {
+    Map(
+      "rddBlocksMigrated" -> totalRDDBlocksMigrated.get().toLong,
+      "shuffleBlocksMigrated" -> totalShuffleBlocksMigrated.get().toLong,
+      "migrationErrors" -> migrationErrors.get().toLong,
+      "lastRDDMigrationTime" -> lastRDDMigrationTime.get(),
+      "lastShuffleMigrationTime" -> lastShuffleMigrationTime.get(),
+      "remainingShuffles" -> (migratingShuffles.size - numMigratedShuffles.get()).toLong
+    )
   }
 
   /*
