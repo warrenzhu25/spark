@@ -59,6 +59,13 @@ private[storage] class BlockManagerDecommissioner(
   private[storage] val totalRDDBlocksMigrated = new AtomicInteger(0)
   private[storage] val totalShuffleBlocksMigrated = new AtomicInteger(0)
   private[storage] val migrationErrors = new AtomicInteger(0)
+  
+  // Track migration start time for rate calculations
+  private val migrationStartTime = new AtomicLong(0)
+  
+  // Periodic status logging
+  private val statusLogInterval = conf.getLong("spark.storage.decommission.status.log.interval", 30000L)
+  private var lastStatusLog = 0L
 
   /**
    * This runnable consumes any shuffle blocks in the queue for migration. This part of a
@@ -256,6 +263,8 @@ private[storage] class BlockManagerDecommissioner(
               s"Migrated ${migrationResult.migratedCount} blocks, " +
               s"failed ${migrationResult.failedCount} blocks. " +
               s"Waiting ${sleepInterval}ms before next round.")
+            logMigrationStatus()
+            checkForStuckMigration()
             Thread.sleep(sleepInterval)
           } catch {
             case _: InterruptedException =>
@@ -288,6 +297,8 @@ private[storage] class BlockManagerDecommissioner(
           lastShuffleMigrationTime.set(startTime)
           logInfo(s"Finished current round refreshing migratable shuffle blocks, " +
             s"waiting for ${sleepInterval}ms before the next round refreshing.")
+          logMigrationStatus()
+          checkForStuckMigration()
           Thread.sleep(sleepInterval)
         } catch {
           case _: InterruptedException if stopped =>
@@ -460,8 +471,32 @@ private[storage] class BlockManagerDecommissioner(
 
   def start(): Unit = {
     logInfo("Starting block migration")
+    migrationStartTime.set(System.currentTimeMillis())
+    lastStatusLog = System.currentTimeMillis()
     rddBlockMigrationExecutor.foreach(_.submit(rddBlockMigrationRunnable))
     shuffleBlockMigrationRefreshExecutor.foreach(_.submit(shuffleBlockMigrationRefreshRunnable))
+  }
+  
+  /**
+   * Log periodic status updates about migration progress
+   */
+  private def logMigrationStatus(): Unit = {
+    val currentTime = System.currentTimeMillis()
+    if (currentTime - lastStatusLog >= statusLogInterval) {
+      val stats = getMigrationStats()
+      val elapsedMinutes = (currentTime - migrationStartTime.get()) / 60000.0
+      val rddRate = if (elapsedMinutes > 0) stats("rddBlocksMigrated") / elapsedMinutes else 0.0
+      val shuffleRate = if (elapsedMinutes > 0) stats("shuffleBlocksMigrated") / elapsedMinutes else 0.0
+      
+      logInfo(s"Migration status after ${elapsedMinutes.formatted("%.1f")} minutes: " +
+        s"RDD blocks: ${stats("rddBlocksMigrated")} (${rddRate.formatted("%.1f")}/min), " +
+        s"Shuffle blocks: ${stats("shuffleBlocksMigrated")} (${shuffleRate.formatted("%.1f")}/min), " +
+        s"Remaining shuffles: ${stats("remainingShuffles")}, " +
+        s"Errors: ${stats("migrationErrors")}, " +
+        s"Active migration threads: ${migrationPeers.values.count(_.keepRunning)}")
+      
+      lastStatusLog = currentTime
+    }
   }
 
   def stop(): Unit = {
@@ -529,6 +564,32 @@ private[storage] class BlockManagerDecommissioner(
       "lastShuffleMigrationTime" -> lastShuffleMigrationTime.get(),
       "remainingShuffles" -> (migratingShuffles.size - numMigratedShuffles.get()).toLong
     )
+  }
+  
+  /**
+   * Check if migration appears to be stuck and log warning if so.
+   */
+  private def checkForStuckMigration(): Unit = {
+    val currentTime = System.currentTimeMillis()
+    val stuckThreshold = conf.getLong("spark.storage.decommission.stuck.threshold", 300000L) // 5 minutes
+    
+    if (!stoppedRDD && currentTime - lastRDDMigrationTime.get() > stuckThreshold) {
+      logWarning(s"RDD migration appears stuck - no progress for ${(currentTime - lastRDDMigrationTime.get()) / 1000}s")
+    }
+    
+    if (!stoppedShuffle && currentTime - lastShuffleMigrationTime.get() > stuckThreshold) {
+      logWarning(s"Shuffle migration appears stuck - no progress for ${(currentTime - lastShuffleMigrationTime.get()) / 1000}s")
+    }
+    
+    // Check for stuck migration threads
+    val stuckThreads = migrationPeers.filter { case (peer, runnable) =>
+      runnable.keepRunning && shufflesToMigrate.size() > 0
+    }
+    
+    if (stuckThreads.nonEmpty && shufflesToMigrate.size() > 0) {
+      logWarning(s"Potential stuck shuffle migration detected: ${stuckThreads.size} active threads, " +
+        s"${shufflesToMigrate.size()} blocks in queue")
+    }
   }
 
   /*
