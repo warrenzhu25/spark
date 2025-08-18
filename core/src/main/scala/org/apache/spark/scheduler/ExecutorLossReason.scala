@@ -87,3 +87,7 @@ private [spark] case class ExecutorDecommission(
 private[spark] object ExecutorDecommission {
   val msgPrefix = "Executor decommission: "
 }
+
+private[spark] object ExecutorLossMessage {
+  val decommissionFinished = "Finished decommissioning"
+}
