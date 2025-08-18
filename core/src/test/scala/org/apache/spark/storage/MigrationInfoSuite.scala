@@ -83,7 +83,7 @@ class MigrationInfoSuite extends SparkFunSuite {
 
   test("MigrationStat serialization") {
     val migrationStat = MigrationStat(10, 2048000L, 25)
-    
+
     // Test that the case class can be serialized (basic test)
     assert(migrationStat.productArity === 3)
     assert(migrationStat.productElement(0) === 10)
@@ -94,7 +94,7 @@ class MigrationInfoSuite extends SparkFunSuite {
   test("MigrationInfo serialization") {
     val migrationStat = MigrationStat(1, 1024L, 4)
     val migrationInfo = MigrationInfo(5000L, false, migrationStat)
-    
+
     // Test that the case class can be serialized (basic test)
     assert(migrationInfo.productArity === 3)
     assert(migrationInfo.productElement(0) === 5000L)
@@ -110,7 +110,7 @@ class MigrationInfoSuite extends SparkFunSuite {
     assert(emptyStats.numBlocksLeft === 0)
 
     // Test tracking with migrated blocks
-    val withDataStats = MigrationStat(5, 2048000L, 10) 
+    val withDataStats = MigrationStat(5, 2048000L, 10)
     assert(withDataStats.totalMigratedSize === 2048000L) // 2MB
     assert(withDataStats.numMigratedBlock === 10)
     assert(withDataStats.numBlocksLeft === 5)
