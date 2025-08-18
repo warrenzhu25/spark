@@ -20,7 +20,7 @@ package org.apache.spark.storage
 import java.io.{InputStream, IOException}
 import java.nio.channels.ClosedByInterruptException
 import java.util.concurrent.{LinkedBlockingQueue, TimeUnit}
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 import java.util.zip.CheckedInputStream
 import javax.annotation.concurrent.GuardedBy
 
@@ -160,6 +160,18 @@ final class ShuffleBlockFetcherIterator(
   /** Current number of blocks in flight per host:port */
   private[this] val numBlocksInFlightPerAddress = new HashMap[BlockManagerId, Int]()
 
+  /** Track bytes fetched per executor for load balancing */
+  private[this] val bytesFetchedPerAddress = new HashMap[BlockManagerId, AtomicLong]()
+
+  /** Track fetch completion times per executor for performance-based load balancing */
+  private[this] val fetchCompletionTimesPerAddress = new HashMap[BlockManagerId, collection.mutable.Queue[Long]]()
+
+  /** Track average fetch speed per executor (bytes per millisecond) */
+  private[this] val avgFetchSpeedPerAddress = new HashMap[BlockManagerId, Double]()
+
+  /** Maximum fetch history to keep for performance calculations */
+  private[this] val maxFetchHistorySize = 10
+
   /**
    * Count the retry times for the blocks due to Netty OOM. The block will stop retry if
    * retry times has exceeded the [[maxAttemptsOnNettyOOM]].
@@ -190,6 +202,144 @@ final class ShuffleBlockFetcherIterator(
 
   private[this] val pushBasedFetchHelper = new PushBasedFetchHelper(
     this, shuffleClient, blockManager, mapOutputTracker, shuffleMetrics)
+
+  /**
+   * Prioritize fetch requests based on executor load and performance to achieve better balance.
+   * This replaces the random ordering with intelligent load-aware distribution.
+   */
+  private def prioritizeRequestsByLoad(requests: ArrayBuffer[FetchRequest]): ArrayBuffer[FetchRequest] = {
+    if (requests.isEmpty) return requests
+
+    // Group requests by executor
+    val requestsByExecutor = requests.groupBy(_.address)
+    val prioritizedRequests = new ArrayBuffer[FetchRequest]()
+
+    // Calculate load scores for each executor
+    val executorLoadScores = requestsByExecutor.map { case (address, reqs) =>
+      val totalBytes = reqs.map(_.size).sum
+      val currentLoad = numBlocksInFlightPerAddress.getOrElse(address, 0)
+      val avgSpeed = avgFetchSpeedPerAddress.getOrElse(address, 1.0) // Default to 1.0 if unknown
+      val bytesAlreadyFetched = bytesFetchedPerAddress.get(address).map(_.get()).getOrElse(0L)
+
+      // Score based on: inverse of current load + performance + fairness
+      val loadScore = 1.0 / (currentLoad + 1.0) // Higher score for less loaded executors
+      val speedScore = avgSpeed / 1000.0 // Normalize speed score
+      val fairnessScore = 1.0 / (bytesAlreadyFetched + 1.0) // Promote fairness
+
+      val combinedScore = loadScore * 0.5 + speedScore * 0.3 + fairnessScore * 0.2
+
+      address -> (combinedScore, totalBytes, reqs)
+    }
+
+    // Sort executors by load score (higher score = higher priority)
+    val sortedExecutors = executorLoadScores.toSeq.sortBy(-_._2._1)
+
+    // Distribute requests using round-robin within priority groups to ensure fairness
+    val executorQueues = sortedExecutors.map { case (addr, (_, _, reqs)) =>
+      addr -> reqs.to(collection.mutable.Queue)
+    }.toMap
+
+    // Round-robin distribution to balance load
+    while (executorQueues.values.exists(_.nonEmpty)) {
+      for ((executor, queue) <- sortedExecutors.map(_._1) if queue.nonEmpty) {
+        val queue = executorQueues(executor)
+        if (queue.nonEmpty) {
+          prioritizedRequests += queue.dequeue()
+        }
+      }
+    }
+
+    logDebug(s"Prioritized ${requests.size} fetch requests across ${requestsByExecutor.size} executors " +
+      s"with load-aware ordering")
+
+    prioritizedRequests
+  }
+
+  /**
+   * Update fetch performance metrics for load balancing decisions.
+   */
+  private def updateFetchPerformanceMetrics(address: BlockManagerId, fetchSizeBytes: Long,
+                                           fetchTimeMs: Long): Unit = {
+    // Update bytes fetched counter
+    bytesFetchedPerAddress.getOrElseUpdate(address, new AtomicLong(0)).addAndGet(fetchSizeBytes)
+
+    // Update completion times for performance tracking
+    val completionTimes = fetchCompletionTimesPerAddress.getOrElseUpdate(address,
+      collection.mutable.Queue[Long]())
+
+    if (fetchTimeMs > 0) {
+      completionTimes.enqueue(fetchTimeMs)
+
+      // Keep only recent history
+      while (completionTimes.size > maxFetchHistorySize) {
+        completionTimes.dequeue()
+      }
+
+      // Calculate average fetch speed (bytes per millisecond)
+      if (completionTimes.nonEmpty) {
+        val avgTimeMs = completionTimes.sum.toDouble / completionTimes.size
+        val avgSpeed = if (avgTimeMs > 0) fetchSizeBytes / avgTimeMs else 0.0
+        avgFetchSpeedPerAddress(address) = avgSpeed
+      }
+    }
+  }
+
+  /**
+   * Get current load factor for an executor to help with request balancing.
+   */
+  private def getExecutorLoadFactor(address: BlockManagerId): Double = {
+    val blocksInFlight = numBlocksInFlightPerAddress.getOrElse(address, 0)
+    val avgSpeed = avgFetchSpeedPerAddress.getOrElse(address, 1.0)
+    val bytesFetched = bytesFetchedPerAddress.get(address).map(_.get()).getOrElse(0L)
+
+    // Higher load factor means more loaded (worse for new requests)
+    val loadFactor = (blocksInFlight + 1.0) / avgSpeed + bytesFetched / 1000000.0 // Normalize bytes
+    loadFactor
+  }
+
+  /**
+   * Select the best fetch request from the queue based on current executor loads.
+   * Prefers requests to less loaded executors with better performance.
+   */
+  private def selectBestFetchRequest(requestQueue: Queue[FetchRequest]): Option[FetchRequest] = {
+    if (requestQueue.isEmpty) return None
+
+    // For small queues, just use FIFO to avoid overhead
+    if (requestQueue.size <= 3) {
+      return Some(requestQueue.dequeue())
+    }
+
+    // Convert queue to list for examination, then rebuild queue
+    val allRequests = requestQueue.dequeueAll(_ => true).toArray
+    var bestRequest: FetchRequest = allRequests(0)
+    var bestLoadFactor = getExecutorLoadFactor(bestRequest.address)
+    var bestIndex = 0
+
+    // Examine up to first 10 requests to balance efficiency with load optimization
+    val examineCount = math.min(allRequests.length, 10)
+
+    // Find best request based on load factor
+    for (i <- 1 until examineCount) {
+      val request = allRequests(i)
+      val loadFactor = getExecutorLoadFactor(request.address)
+
+      if (loadFactor < bestLoadFactor) {
+        bestLoadFactor = loadFactor
+        bestRequest = request
+        bestIndex = i
+      }
+    }
+
+    // Put back all requests except the selected one
+    for (i <- allRequests.indices if i != bestIndex) {
+      requestQueue.enqueue(allRequests(i))
+    }
+
+    logDebug(s"Selected fetch request for ${bestRequest.address.executorId} " +
+      s"with load factor ${bestLoadFactor.formatted("%.3f")} from ${examineCount} candidates")
+
+    Some(bestRequest)
+  }
 
   initialize()
 
@@ -294,6 +444,7 @@ final class ShuffleBlockFetcherIterator(
       override def onBlockFetchSuccess(blockId: String, buf: ManagedBuffer): Unit = {
         // Only add the buffer to results queue if the iterator is not zombie,
         // i.e. cleanup() has not been called yet.
+        val fetchEndTime = System.currentTimeMillis()
         ShuffleBlockFetcherIterator.this.synchronized {
           if (!isZombie) {
             // Increment the ref count because we need to pass this to a different thread.
@@ -305,6 +456,11 @@ final class ShuffleBlockFetcherIterator(
             results.put(SuccessFetchResult(BlockId(blockId), infoMap(blockId)._2,
               address, infoMap(blockId)._1, buf, remainingBlocks.isEmpty))
             logDebug("remainingBlocks: " + remainingBlocks)
+
+            // Update fetch performance metrics for load balancing
+            val fetchTimeMs = TimeUnit.NANOSECONDS.toMillis(clock.nanoTime() - requestStartTime)
+            updateFetchPerformanceMetrics(address, buf.size(), fetchTimeMs)
+
             enqueueDeferredFetchRequestIfNecessary()
           }
         }
@@ -503,6 +659,10 @@ final class ShuffleBlockFetcherIterator(
     var curRequestSize = 0L
     var curBlocks = new ArrayBuffer[FetchBlockInfo]()
 
+    // Calculate adaptive batch size based on executor performance
+    val adaptiveMaxBlocks = getAdaptiveBlockLimit(address)
+    val adaptiveTargetSize = getAdaptiveRequestSize(address)
+
     while (iterator.hasNext) {
       val (blockId, size, mapIndex) = iterator.next()
       curBlocks += FetchBlockInfo(blockId, size, mapIndex)
@@ -512,21 +672,21 @@ final class ShuffleBlockFetcherIterator(
         // Based on these types, we decide to do batch fetch and create FetchRequests with
         // forMergedMetas set.
         case ShuffleBlockChunkId(_, _, _, _) =>
-          if (curRequestSize >= targetRemoteRequestSize ||
-            curBlocks.size >= maxBlocksInFlightPerAddress) {
+          if (curRequestSize >= adaptiveTargetSize ||
+            curBlocks.size >= adaptiveMaxBlocks) {
             curBlocks = createFetchRequests(curBlocks, address, isLast = false,
               collectedRemoteRequests, enableBatchFetch = false)
             curRequestSize = curBlocks.map(_.size).sum
           }
         case ShuffleMergedBlockId(_, _, _) =>
-          if (curBlocks.size >= maxBlocksInFlightPerAddress) {
+          if (curBlocks.size >= adaptiveMaxBlocks) {
             curBlocks = createFetchRequests(curBlocks, address, isLast = false,
               collectedRemoteRequests, enableBatchFetch = false, forMergedMetas = true)
           }
         case _ =>
           // For batch fetch, the actual block in flight should count for merged block.
-          val mayExceedsMaxBlocks = !doBatchFetch && curBlocks.size >= maxBlocksInFlightPerAddress
-          if (curRequestSize >= targetRemoteRequestSize || mayExceedsMaxBlocks) {
+          val mayExceedsMaxBlocks = !doBatchFetch && curBlocks.size >= adaptiveMaxBlocks
+          if (curRequestSize >= adaptiveTargetSize || mayExceedsMaxBlocks) {
             curBlocks = createFetchRequests(curBlocks, address, isLast = false,
               collectedRemoteRequests, doBatchFetch)
             curRequestSize = curBlocks.map(_.size).sum
@@ -705,8 +865,8 @@ final class ShuffleBlockFetcherIterator(
     // remote blocks.
     val remoteRequests = partitionBlocksByFetchMode(
       blocksByAddress, localBlocks, hostLocalBlocksByExecutor, pushMergedLocalBlocks)
-    // Add the remote requests into our queue in a random order
-    fetchRequests ++= Utils.randomize(remoteRequests)
+    // Add the remote requests into our queue with load-aware ordering
+    fetchRequests ++= prioritizeRequestsByLoad(remoteRequests)
     assert ((0 == reqsInFlight) == (0 == bytesInFlight),
       "expected reqsInFlight = 0 but found reqsInFlight = " + reqsInFlight +
       ", expected bytesInFlight = 0 but found bytesInFlight = " + bytesInFlight)
@@ -1188,17 +1348,23 @@ final class ShuffleBlockFetcherIterator(
       }
     }
 
-    // Process any regular fetch requests if possible.
+    // Process regular fetch requests with load-aware selection
     while (isRemoteBlockFetchable(fetchRequests)) {
-      val request = fetchRequests.dequeue()
-      val remoteAddress = request.address
-      if (isRemoteAddressMaxedOut(remoteAddress, request)) {
-        logDebug(s"Deferring fetch request for $remoteAddress with ${request.blocks.size} blocks")
+      val request = selectBestFetchRequest(fetchRequests)
+      if (request.isEmpty) {
+        // No suitable request found, break to avoid infinite loop
+        break
+      }
+
+      val req = request.get
+      val remoteAddress = req.address
+      if (isRemoteAddressMaxedOut(remoteAddress, req)) {
+        logDebug(s"Deferring fetch request for $remoteAddress with ${req.blocks.size} blocks")
         val defReqQueue = deferredFetchRequests.getOrElse(remoteAddress, new Queue[FetchRequest]())
-        defReqQueue.enqueue(request)
+        defReqQueue.enqueue(req)
         deferredFetchRequests(remoteAddress) = defReqQueue
       } else {
-        send(remoteAddress, request)
+        send(remoteAddress, req)
       }
     }
 
@@ -1222,8 +1388,54 @@ final class ShuffleBlockFetcherIterator(
     // Checks if sending a new fetch request will exceed the max no. of blocks being fetched from a
     // given remote address.
     def isRemoteAddressMaxedOut(remoteAddress: BlockManagerId, request: FetchRequest): Boolean = {
-      numBlocksInFlightPerAddress.getOrElse(remoteAddress, 0) + request.blocks.size >
-        maxBlocksInFlightPerAddress
+      val currentInFlight = numBlocksInFlightPerAddress.getOrElse(remoteAddress, 0)
+      val proposedTotal = currentInFlight + request.blocks.size
+
+      // Adaptive throttling based on executor performance
+      val dynamicLimit = getAdaptiveBlockLimit(remoteAddress)
+
+      val isMaxedOut = proposedTotal > dynamicLimit
+
+      if (isMaxedOut) {
+        logDebug(s"Remote address $remoteAddress maxed out: $proposedTotal > $dynamicLimit " +
+          s"(base limit: $maxBlocksInFlightPerAddress)")
+      }
+
+      isMaxedOut
+    }
+
+    /**
+     * Calculate adaptive block limit for an executor based on its performance.
+     * Better performing executors get higher limits to maximize throughput.
+     */
+    def getAdaptiveBlockLimit(address: BlockManagerId): Int = {
+      val avgSpeed = avgFetchSpeedPerAddress.getOrElse(address, 1.0)
+      val baseLimit = maxBlocksInFlightPerAddress.toDouble
+
+      // Adjust limit based on relative performance
+      // If avgSpeed is higher than 1.0, increase limit; if lower, decrease limit
+      val speedMultiplier = math.max(0.5, math.min(2.0, avgSpeed / 1000.0 + 0.8))
+      val adaptiveLimit = (baseLimit * speedMultiplier).toInt
+
+      // Ensure we stay within reasonable bounds
+      math.max(1, math.min(maxBlocksInFlightPerAddress * 2, adaptiveLimit))
+    }
+
+    /**
+     * Calculate adaptive request size for an executor based on its performance.
+     * Faster executors can handle larger requests.
+     */
+    def getAdaptiveRequestSize(address: BlockManagerId): Long = {
+      val avgSpeed = avgFetchSpeedPerAddress.getOrElse(address, 1.0)
+      val baseSize = targetRemoteRequestSize.toDouble
+
+      // Adjust request size based on performance
+      // Faster executors get larger requests to improve efficiency
+      val speedMultiplier = math.max(0.6, math.min(1.8, avgSpeed / 1000.0 + 0.9))
+      val adaptiveSize = (baseSize * speedMultiplier).toLong
+
+      // Keep within reasonable bounds
+      math.max(baseSize / 2, math.min(baseSize * 2, adaptiveSize))
     }
   }
 
