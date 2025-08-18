@@ -21,8 +21,10 @@ import java.net.URL
 import java.nio.ByteBuffer
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.TimeUnit.NANOSECONDS
 
 import scala.collection.mutable
+import scala.concurrent.duration.Duration
 import scala.util.{Failure, Success}
 import scala.util.control.NonFatal
 
@@ -44,6 +46,7 @@ import org.apache.spark.resource.ResourceUtils._
 import org.apache.spark.rpc._
 import org.apache.spark.scheduler.{ExecutorLossMessage, ExecutorLossReason, TaskDescription}
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages._
+import org.apache.spark.storage.MigrationInfo
 import org.apache.spark.util.{ChildFirstURLClassLoader, MutableURLClassLoader, SignalUtils, ThreadUtils, Utils}
 
 private[spark] class CoarseGrainedExecutorBackend(
@@ -352,14 +355,28 @@ private[spark] class CoarseGrainedExecutorBackend(
             if (executor == null || executor.numRunningTasks == 0) {
               if (migrationEnabled) {
                 logInfo("No running tasks, checking migrations")
-                val (migrationTime, allBlocksMigrated) = env.blockManager.lastMigrationInfo()
-                // We can only trust allBlocksMigrated boolean value if there were no tasks running
-                // since the start of computing it.
-                if (allBlocksMigrated && (migrationTime > lastTaskRunningTime)) {
-                  logInfo("No running tasks, all blocks migrated, stopping.")
-                  exitExecutor(0, ExecutorLossMessage.decommissionFinished, notifyDriver = true)
-                } else {
-                  logInfo("All blocks not yet migrated.")
+                env.blockManager.lastMigrationInfo() match {
+                  case Some(MigrationInfo(lastMigrationTimestamp, allBlocksMigrated, shuffleStat)) =>
+                    // We can only trust allBlocksMigrated boolean value if there were no
+                    // tasks running since the start of computing it.
+                    if (allBlocksMigrated && (lastMigrationTimestamp > lastTaskRunningTime)) {
+                      logInfo("No running tasks, all blocks migrated, stopping.")
+                      val taskWaitingTime = Duration(lastTaskRunningTime - decommissionedTime.get,
+                        NANOSECONDS)
+                      val migrationTime = Duration(System.nanoTime() - decommissionedTime.get,
+                        NANOSECONDS)
+                      val migrationSummary = f"Migration finished in ${migrationTime.toMillis}%,d ms" +
+                        f"(including ${taskWaitingTime.toMillis}%,d ms running task waiting time). " +
+                        f"${shuffleStat.numMigratedBlock}%,d blocks of size " +
+                        f"${Utils.bytesToString(shuffleStat.totalMigratedSize)} migrated, " +
+                        f"${shuffleStat.numBlocksLeft} blocks not migrated."
+                      exitExecutor(0, ExecutorLossMessage.decommissionFinished + migrationSummary)
+                    } else {
+                      logInfo("All blocks not yet migrated.")
+                    }
+                  case None =>
+                    logWarning("No migration info available, proceeding with basic decommission.")
+                    exitExecutor(0, ExecutorLossMessage.decommissionFinished, notifyDriver = true)
                 }
               } else {
                 logInfo("No running tasks, no block migration configured, stopping.")

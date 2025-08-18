@@ -101,4 +101,30 @@ class MigrationInfoSuite extends SparkFunSuite {
     assert(migrationInfo.productElement(1) === false)
     assert(migrationInfo.productElement(2) === migrationStat)
   }
+
+  test("MigrationStat tracks size correctly") {
+    // Test tracking zero blocks
+    val emptyStats = MigrationStat(0, 0L, 0)
+    assert(emptyStats.totalMigratedSize === 0L)
+    assert(emptyStats.numMigratedBlock === 0)
+    assert(emptyStats.numBlocksLeft === 0)
+
+    // Test tracking with migrated blocks
+    val withDataStats = MigrationStat(5, 2048000L, 10) 
+    assert(withDataStats.totalMigratedSize === 2048000L) // 2MB
+    assert(withDataStats.numMigratedBlock === 10)
+    assert(withDataStats.numBlocksLeft === 5)
+  }
+
+  test("MigrationInfo tracks completion status") {
+    val incompleteStat = MigrationStat(3, 1000L, 2)
+    val incompleteInfo = MigrationInfo(1000L, false, incompleteStat)
+    assert(!incompleteInfo.allBlocksMigrated)
+    assert(incompleteInfo.shuffleMigrationStat.numBlocksLeft === 3)
+
+    val completeStat = MigrationStat(0, 5000L, 5)
+    val completeInfo = MigrationInfo(2000L, true, completeStat)
+    assert(completeInfo.allBlocksMigrated)
+    assert(completeInfo.shuffleMigrationStat.numBlocksLeft === 0)
+  }
 }
