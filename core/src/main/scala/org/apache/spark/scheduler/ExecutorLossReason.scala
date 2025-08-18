@@ -76,8 +76,11 @@ case class ExecutorProcessLost(
 /**
  * A loss reason that means the executor is marked for decommissioning.
  *
- * This is used by the task scheduler to remove state associated with the executor, but
- * not yet fail any tasks that were running in the executor before the executor is "fully" lost.
+ * This is used by the driver/task scheduler when it initiates removal of an executor
+ * that is being decommissioned. The executor is still alive but marked for removal.
+ * This is different from ExecutorDecommissionFinished which is reported by the executor
+ * itself when it has completed the decommissioning process and is about to exit.
+ *
  * If you update this code make sure to re-run the K8s integration tests.
  *
  * @param workerHost it is defined when the worker is decommissioned too
