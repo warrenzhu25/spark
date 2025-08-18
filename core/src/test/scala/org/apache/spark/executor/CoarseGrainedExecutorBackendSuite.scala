@@ -43,9 +43,10 @@ import org.apache.spark.resource._
 import org.apache.spark.resource.ResourceUtils._
 import org.apache.spark.resource.TestResourceIDs._
 import org.apache.spark.rpc.RpcEnv
-import org.apache.spark.scheduler.{SparkListener, SparkListenerExecutorAdded, SparkListenerExecutorRemoved, TaskDescription}
+import org.apache.spark.scheduler.{DecommissionSummary, ExecutorDecommissionFinished, SparkListener, SparkListenerExecutorAdded, SparkListenerExecutorRemoved, TaskDescription}
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.{KillTask, LaunchTask}
 import org.apache.spark.serializer.JavaSerializer
+import org.apache.spark.storage.{MigrationInfo, MigrationStat}
 import org.apache.spark.util.{SerializableBuffer, ThreadUtils, Utils}
 
 class CoarseGrainedExecutorBackendSuite extends SparkFunSuite
@@ -604,6 +605,152 @@ class CoarseGrainedExecutorBackendSuite extends SparkFunSuite
     when(mockEnv.rpcEnv).thenReturn(rpcEnv.getOrElse(mockRpcEnv))
     SparkEnv.set(mockEnv)
     mockEnv
+  }
+
+  test("decommissionedTime is set when decommissioning starts") {
+    val conf = new SparkConf
+    val serializer = new JavaSerializer(conf)
+    val env = createMockEnv(conf, serializer)
+
+    val backend = new CoarseGrainedExecutorBackend(env.rpcEnv, "driverurl", "1", "host1", "host1",
+      4, env, None, ResourceProfile.getOrCreateDefaultProfile(conf))
+
+    // Initially decommissionedTime should be 0
+    assert(backend.decommissionedTime.get() == 0)
+
+    // After calling decommissionSelf, decommissionedTime should be set
+    backend.decommissionSelf()
+    assert(backend.decommissionedTime.get() > 0)
+  }
+
+  test("ExecutorDecommissionFinished creates proper loss reason") {
+    val migrationStat = MigrationStat(
+      numBlocksLeft = 2,
+      totalMigratedSize = 1024000L,
+      numMigratedBlock = 10
+    )
+    val migrationInfo = MigrationInfo(
+      lastMigrationTime = System.currentTimeMillis(),
+      allBlocksMigrated = true,
+      shuffleMigrationStat = migrationStat
+    )
+    val summary = DecommissionSummary(
+      decommissionTime = 5000.milliseconds,
+      migrationTime = 3000.milliseconds,
+      taskWaitingTime = 1000.milliseconds,
+      migrationInfo = migrationInfo
+    )
+
+    val lossReason = ExecutorDecommissionFinished(summary)
+
+    // Verify the message contains expected information
+    assert(lossReason.message.contains("Finished decommissioning"))
+    assert(lossReason.message.contains("5,000 ms"))
+    assert(lossReason.message.contains("3,000 ms"))
+    assert(lossReason.message.contains("1,000 ms"))
+    assert(lossReason.message.contains("10 blocks"))
+    assert(lossReason.message.contains("2 blocks not migrated"))
+  }
+
+  test("DecommissionSummary toString formatting") {
+    val migrationStat = MigrationStat(5, 2048000L, 15)
+    val migrationInfo = MigrationInfo(1000L, true, migrationStat)
+    val summary = DecommissionSummary(
+      decommissionTime = 10000.milliseconds,
+      migrationTime = 8000.milliseconds,
+      taskWaitingTime = 2000.milliseconds,
+      migrationInfo = migrationInfo
+    )
+
+    val summaryString = summary.toString
+
+    // Verify formatting contains expected elements
+    assert(summaryString.contains("Decommission finished in 10,000 ms"))
+    assert(summaryString.contains("Migration finished in 8,000 ms"))
+    assert(summaryString.contains("(including 2,000 ms running task waiting time)"))
+    assert(summaryString.contains("15 blocks of size 2.0 MB migrated"))
+    assert(summaryString.contains("5 blocks not migrated"))
+  }
+
+  test("DecommissionSummary with zero values") {
+    val migrationStat = MigrationStat(0, 0L, 0)
+    val migrationInfo = MigrationInfo(1000L, true, migrationStat)
+    val summary = DecommissionSummary(
+      decommissionTime = 1000.milliseconds,
+      migrationTime = 500.milliseconds,
+      taskWaitingTime = 200.milliseconds,
+      migrationInfo = migrationInfo
+    )
+
+    val summaryString = summary.toString
+
+    assert(summaryString.contains("0 blocks of size 0.0 B migrated"))
+    assert(summaryString.contains("0 blocks not migrated"))
+  }
+
+  test("exitExecutor with ExecutorLossReason sends proper loss reason to driver") {
+    val conf = new SparkConf
+    val serializer = new JavaSerializer(conf)
+    val env = createMockEnv(conf, serializer)
+    val mockDriver = mock[org.apache.spark.rpc.RpcEndpointRef]
+
+    val backend = new CoarseGrainedExecutorBackend(env.rpcEnv, "driverurl", "1", "host1", "host1",
+      4, env, None, ResourceProfile.getOrCreateDefaultProfile(conf))
+
+    // Set up the driver mock
+    backend.driver = Some(mockDriver)
+
+    val migrationStat = MigrationStat(1, 1024L, 2)
+    val migrationInfo = MigrationInfo(1000L, true, migrationStat)
+    val summary = DecommissionSummary(
+      decommissionTime = 2000.milliseconds,
+      migrationTime = 1500.milliseconds,
+      taskWaitingTime = 500.milliseconds,
+      migrationInfo = migrationInfo
+    )
+    val lossReason = ExecutorDecommissionFinished(summary)
+
+    // Call exitExecutor with the specific loss reason
+    backend.exitExecutor(0, lossReason)
+
+    // Verify that the proper ExecutorDecommissionFinished was sent to the driver
+    verify(mockDriver).send(org.mockito.ArgumentMatchers.argThat[Any] { arg =>
+      arg match {
+        case org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.RemoveExecutor(
+          executorId, reason) =>
+          executorId == "1" && reason.isInstanceOf[ExecutorDecommissionFinished]
+        case _ => false
+      }
+    })
+  }
+
+  test("exitExecutor with string reason creates ExecutorLossReason") {
+    val conf = new SparkConf
+    val serializer = new JavaSerializer(conf)
+    val env = createMockEnv(conf, serializer)
+    val mockDriver = mock[org.apache.spark.rpc.RpcEndpointRef]
+
+    val backend = new CoarseGrainedExecutorBackend(env.rpcEnv, "driverurl", "1", "host1", "host1",
+      4, env, None, ResourceProfile.getOrCreateDefaultProfile(conf))
+
+    // Set up the driver mock
+    backend.driver = Some(mockDriver)
+
+    val reasonString = "Test shutdown reason"
+
+    // Call exitExecutor with string reason
+    backend.exitExecutor(1, reasonString)
+
+    // Verify that an ExecutorLossReason with the message was sent to the driver
+    verify(mockDriver).send(org.mockito.ArgumentMatchers.argThat[Any] { arg =>
+      arg match {
+        case org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.RemoveExecutor(
+          executorId, reason) =>
+          executorId == "1" && reason.message == reasonString && 
+            reason.getClass == classOf[ExecutorLossReason]
+        case _ => false
+      }
+    })
   }
 }
 

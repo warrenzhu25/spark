@@ -44,9 +44,9 @@ import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.resource.ResourceProfile._
 import org.apache.spark.resource.ResourceUtils._
 import org.apache.spark.rpc._
-import org.apache.spark.scheduler.{ExecutorLossMessage, ExecutorLossReason, TaskDescription}
+import org.apache.spark.scheduler.{DecommissionSummary, ExecutorDecommissionFinished, ExecutorLossMessage, ExecutorLossReason, TaskDescription}
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages._
-import org.apache.spark.storage.MigrationInfo
+import org.apache.spark.storage.{MigrationInfo, MigrationStat}
 import org.apache.spark.util.{ChildFirstURLClassLoader, MutableURLClassLoader, SignalUtils, ThreadUtils, Utils}
 
 private[spark] class CoarseGrainedExecutorBackend(
@@ -79,6 +79,7 @@ private[spark] class CoarseGrainedExecutorBackend(
   private[executor] val taskResources = new mutable.HashMap[Long, Map[String, ResourceInformation]]
 
   private var decommissioned = false
+  private val decommissionedTime = new AtomicLong(0)
 
   override def onStart(): Unit = {
     if (env.conf.get(DECOMMISSION_ENABLED)) {
@@ -285,8 +286,18 @@ private[spark] class CoarseGrainedExecutorBackend(
                              reason: String,
                              throwable: Throwable = null,
                              notifyDriver: Boolean = true) = {
+    exitExecutor(code, new ExecutorLossReason(reason), throwable, notifyDriver)
+  }
+
+  /**
+   * Exit executor with a specific ExecutorLossReason.
+   */
+  protected def exitExecutor(code: Int,
+                             lossReason: ExecutorLossReason,
+                             throwable: Throwable = null,
+                             notifyDriver: Boolean = true): Unit = {
     if (stopping.compareAndSet(false, true)) {
-      val message = "Executor self-exiting due to : " + reason
+      val message = "Executor self-exiting due to : " + lossReason.message
       if (throwable != null) {
         logError(message, throwable)
       } else {
@@ -298,7 +309,7 @@ private[spark] class CoarseGrainedExecutorBackend(
       }
 
       if (notifyDriver && driver.nonEmpty) {
-        driver.get.send(RemoveExecutor(executorId, new ExecutorLossReason(reason)))
+        driver.get.send(RemoveExecutor(executorId, lossReason))
       }
       self.send(Shutdown)
     } else {
@@ -318,6 +329,7 @@ private[spark] class CoarseGrainedExecutorBackend(
     logInfo(msg)
     try {
       decommissioned = true
+      decommissionedTime.set(System.nanoTime())
       val migrationEnabled = env.conf.get(STORAGE_DECOMMISSION_ENABLED) &&
         (env.conf.get(STORAGE_DECOMMISSION_RDD_BLOCKS_ENABLED) ||
           env.conf.get(STORAGE_DECOMMISSION_SHUFFLE_BLOCKS_ENABLED))
@@ -366,26 +378,47 @@ private[spark] class CoarseGrainedExecutorBackend(
                         NANOSECONDS)
                       val migrationTime = Duration(System.nanoTime() - decommissionedTime.get,
                         NANOSECONDS)
-                      val migrationSummary = 
-                        f"Migration finished in ${migrationTime.toMillis}%,d ms" +
-                        f"(including ${taskWaitingTime.toMillis}%,d ms " +
-                        f"running task waiting time). " +
-                        f"${shuffleStat.numMigratedBlock}%,d blocks of size " +
-                        f"${Utils.bytesToString(shuffleStat.totalMigratedSize)} migrated, " +
-                        f"${shuffleStat.numBlocksLeft} blocks not migrated."
+                      val decommissionTime = Duration(System.nanoTime() - decommissionedTime.get,
+                        NANOSECONDS)
+                      val summary = DecommissionSummary(
+                        decommissionTime = decommissionTime,
+                        migrationTime = migrationTime,
+                        taskWaitingTime = taskWaitingTime,
+                        migrationInfo = MigrationInfo(lastMigrationTimestamp, allBlocksMigrated, shuffleStat)
+                      )
                       exitExecutor(0, 
-                        ExecutorLossMessage.decommissionFinished + migrationSummary)
+                        ExecutorDecommissionFinished(summary))
                     } else {
                       logInfo("All blocks not yet migrated.")
                     }
                   case None =>
                     logWarning("No migration info available, proceeding with basic decommission.")
-                    exitExecutor(0, ExecutorLossMessage.decommissionFinished, 
+                    val decommissionTime = Duration(System.nanoTime() - decommissionedTime.get,
+                      NANOSECONDS)
+                    val emptyMigrationInfo = MigrationInfo(System.nanoTime(), true, 
+                      MigrationStat(0, 0L, 0))
+                    val summary = DecommissionSummary(
+                      decommissionTime = decommissionTime,
+                      migrationTime = Duration.Zero,
+                      taskWaitingTime = Duration.Zero,
+                      migrationInfo = emptyMigrationInfo
+                    )
+                    exitExecutor(0, ExecutorDecommissionFinished(summary), 
                       notifyDriver = true)
                 }
               } else {
                 logInfo("No running tasks, no block migration configured, stopping.")
-                exitExecutor(0, ExecutorLossMessage.decommissionFinished, 
+                val decommissionTime = Duration(System.nanoTime() - decommissionedTime.get,
+                  NANOSECONDS)
+                val emptyMigrationInfo = MigrationInfo(System.nanoTime(), true, 
+                  MigrationStat(0, 0L, 0))
+                val summary = DecommissionSummary(
+                  decommissionTime = decommissionTime,
+                  migrationTime = Duration.Zero,
+                  taskWaitingTime = Duration.Zero,
+                  migrationInfo = emptyMigrationInfo
+                )
+                exitExecutor(0, ExecutorDecommissionFinished(summary), 
                   notifyDriver = true)
               }
             } else {
