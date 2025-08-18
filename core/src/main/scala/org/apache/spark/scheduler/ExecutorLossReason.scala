@@ -93,6 +93,20 @@ private[spark] object ExecutorDecommission {
 }
 
 /**
+ * A loss reason that means the executor has finished decommissioning and provides
+ * detailed summary information about the decommission process.
+ *
+ * This is reported by the executor itself when it has completed the decommissioning
+ * process (including block migration) and is about to exit. This is different from
+ * ExecutorDecommission which is used by the driver when it initiates decommissioning.
+ *
+ * @param summary Detailed decommission summary including timing and migration statistics
+ */
+private[spark] case class ExecutorDecommissionFinished(
+    summary: DecommissionSummary)
+  extends ExecutorLossReason(ExecutorLossMessage.decommissionFinished + ": " + summary.toString)
+
+/**
  * Summary of executor decommission process including timing and migration details
  *
  * @param decommissionTime Total time taken for decommission process
@@ -114,8 +128,4 @@ private[spark] case class DecommissionSummary(
     f"${Utils.bytesToString(migrationInfo.shuffleMigrationStat.totalMigratedSize)} migrated, " +
     f"${migrationInfo.shuffleMigrationStat.numBlocksLeft} blocks not migrated."
   }
-}
-
-private[spark] object ExecutorLossMessage {
-  val decommissionFinished = "Finished decommissioning"
 }
