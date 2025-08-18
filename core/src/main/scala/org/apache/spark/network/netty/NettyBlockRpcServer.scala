@@ -22,8 +22,8 @@ import java.nio.ByteBuffer
 import scala.collection.JavaConverters._
 import scala.reflect.ClassTag
 
-import org.apache.spark.SparkException
-import org.apache.spark.internal.Logging
+import org.apache.spark.{SparkConf, SparkException}
+import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.network.BlockDataManager
 import org.apache.spark.network.buffer.NioManagedBuffer
 import org.apache.spark.network.client.{RpcResponseCallback, StreamCallbackWithID, TransportClient}
@@ -42,10 +42,66 @@ import org.apache.spark.storage.{BlockId, BlockManager, ShuffleBlockBatchId, Shu
 class NettyBlockRpcServer(
     appId: String,
     serializer: Serializer,
-    blockManager: BlockDataManager)
+    blockManager: BlockDataManager,
+    conf: Option[SparkConf] = None)
   extends RpcHandler with Logging {
 
   private val streamManager = new OneForOneStreamManager()
+
+  // Throttling configuration and state
+  private val sparkConf = conf.getOrElse {
+    // Try to get conf from BlockManager if available, otherwise create default
+    try {
+      blockManager.asInstanceOf[BlockManager].conf
+    } catch {
+      case _: Exception => new SparkConf()
+    }
+  }
+  private val throttleEnabled = sparkConf.get(config.SHUFFLE_UPLOAD_THROTTLE_ENABLED)
+  private val latencyThreshold = sparkConf.get(config.SHUFFLE_UPLOAD_THROTTLE_LATENCY_THRESHOLD)
+  private val throttleDelay = sparkConf.get(config.SHUFFLE_UPLOAD_THROTTLE_DELAY)
+
+  // Last recorded fetch latency for throttling decisions
+  @volatile private var lastRecordedFetchLatency = 0L
+
+  /**
+   * Check if upload throttling should be applied based on system load indicators.
+   * Returns true if there are signs of high network or I/O load.
+   */
+  private def shouldThrottleUpload(): Boolean = {
+    if (!throttleEnabled) {
+      false
+    } else {
+      try {
+        // Check if there are any indicators of high load
+        // For now, we'll use a simple heuristic based on the shuffle service's recent activity
+        val currentTime = System.currentTimeMillis()
+
+        // Simple adaptive throttling based on recent upload requests
+        // This can be enhanced later with more sophisticated metrics
+        val shouldThrottle = lastRecordedFetchLatency > latencyThreshold
+
+        if (shouldThrottle) {
+          logDebug(s"Throttling enabled due to high latency indicators " +
+            s"(last recorded: ${lastRecordedFetchLatency}ms, threshold: ${latencyThreshold}ms)")
+        }
+
+        shouldThrottle
+      } catch {
+        case _: Exception =>
+          // If we can't determine load for any reason, don't throttle
+          false
+      }
+    }
+  }
+
+  /**
+   * Update fetch latency indicator. This can be called from external components
+   * that have visibility into fetch performance.
+   */
+  def updateFetchLatencyIndicator(latencyMs: Long): Unit = {
+    lastRecordedFetchLatency = latencyMs
+  }
 
   override def receive(
       client: TransportClient,
@@ -116,6 +172,13 @@ class NettyBlockRpcServer(
           new StreamHandle(streamId, numBlockIds).toByteBuffer)
 
       case uploadBlock: UploadBlock =>
+        // Apply throttling if fetch latency is high
+        if (shouldThrottleUpload()) {
+          logDebug(s"Throttling upload request for block ${uploadBlock.blockId} " +
+            s"due to high fetch latency (delay: ${throttleDelay}ms)")
+          Thread.sleep(throttleDelay)
+        }
+
         // StorageLevel and ClassTag are serialized as bytes using our JavaSerializer.
         val (level, classTag) = deserializeMetadata(uploadBlock.metadata)
         val data = new NioManagedBuffer(ByteBuffer.wrap(uploadBlock.blockData))

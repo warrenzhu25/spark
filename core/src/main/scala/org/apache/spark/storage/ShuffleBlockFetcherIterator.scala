@@ -810,6 +810,21 @@ final class ShuffleBlockFetcherIterator(
       val fetchWaitTime = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startFetchWait)
       shuffleMetrics.incFetchWaitTime(fetchWaitTime)
 
+      // Report high fetch latency to the shuffle client for upload throttling
+      if (fetchWaitTime > 1000) { // Report if wait time > 1 second
+        try {
+          shuffleClient match {
+            case nettyService: org.apache.spark.network.netty.NettyBlockTransferService =>
+              nettyService.updateFetchLatencyMetrics(fetchWaitTime)
+            case _ =>
+              // Other transfer services don't support this feature
+          }
+        } catch {
+          case _: Exception =>
+            // Ignore errors in latency reporting
+        }
+      }
+
       result match {
         case SuccessFetchResult(blockId, mapIndex, address, size, buf, isNetworkReqDone) =>
           if (address != blockManager.blockManagerId) {

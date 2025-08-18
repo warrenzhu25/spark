@@ -65,9 +65,10 @@ private[spark] class NettyBlockTransferService(
 
   private[this] var transportContext: TransportContext = _
   private[this] var server: TransportServer = _
+  private[this] var rpcHandler: NettyBlockRpcServer = _
 
   override def init(blockDataManager: BlockDataManager): Unit = {
-    val rpcHandler = new NettyBlockRpcServer(conf.getAppId, serializer, blockDataManager)
+    rpcHandler = new NettyBlockRpcServer(conf.getAppId, serializer, blockDataManager, Some(conf))
     var serverBootstrap: Option[TransportServerBootstrap] = None
     var clientBootstrap: Option[TransportClientBootstrap] = None
     this.transportConf = SparkTransportConf.fromSparkConf(conf, "shuffle", numCores)
@@ -205,6 +206,16 @@ private[spark] class NettyBlockTransferService(
     }
 
     result.future
+  }
+
+  /**
+   * Update fetch latency metrics for upload throttling decisions.
+   * This should be called when fetch operations complete with high latency.
+   */
+  def updateFetchLatencyMetrics(latencyMs: Long): Unit = {
+    if (rpcHandler != null) {
+      rpcHandler.updateFetchLatencyIndicator(latencyMs)
+    }
   }
 
   override def close(): Unit = {

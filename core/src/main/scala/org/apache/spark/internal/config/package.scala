@@ -1312,6 +1312,33 @@ package object config {
       .intConf
       .createWithDefault(10)
 
+  private[spark] val SHUFFLE_UPLOAD_THROTTLE_ENABLED =
+    ConfigBuilder("spark.shuffle.upload.throttle.enabled")
+      .doc("Whether to enable throttling for shuffle block upload requests when fetch latency " +
+        "is high. This helps prevent overloading nodes that are experiencing high network " +
+        "latency during shuffle operations.")
+      .version("3.6.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  private[spark] val SHUFFLE_UPLOAD_THROTTLE_LATENCY_THRESHOLD =
+    ConfigBuilder("spark.shuffle.upload.throttle.latencyThreshold")
+      .doc("Threshold in milliseconds above which shuffle fetch latency is considered high. " +
+        "When fetch latency exceeds this threshold, upload block requests will be throttled " +
+        "to reduce load on the network.")
+      .version("3.6.0")
+      .timeConf(TimeUnit.MILLISECONDS)
+      .createWithDefault(5000)
+
+  private[spark] val SHUFFLE_UPLOAD_THROTTLE_DELAY =
+    ConfigBuilder("spark.shuffle.upload.throttle.delay")
+      .doc("Delay in milliseconds to apply to upload block requests when fetch latency " +
+        "exceeds the threshold. This delay helps reduce network congestion during periods " +
+        "of high shuffle latency.")
+      .version("3.6.0")
+      .timeConf(TimeUnit.MILLISECONDS)
+      .createWithDefault(100)
+
   private[spark] val REDUCER_MAX_BLOCKS_IN_FLIGHT_PER_ADDRESS =
     ConfigBuilder("spark.reducer.maxBlocksInFlightPerAddress")
       .doc("This configuration limits the number of remote blocks being fetched per reduce task " +
