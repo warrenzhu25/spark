@@ -29,7 +29,7 @@ class DecommissionSummarySuite extends SparkFunSuite {
     val migrationInfo = MigrationInfo(1000L, true, migrationStat)
     val summary = DecommissionSummary(
       decommissionTime = Duration.fromNanos(1000000000L), // 1 second
-      migrationTime = Duration.fromNanos(500000000L), // 0.5 seconds  
+      migrationTime = Duration.fromNanos(500000000L), // 0.5 seconds
       taskWaitingTime = Duration.fromNanos(100000000L), // 0.1 seconds
       migrationInfo = migrationInfo
     )
