@@ -436,8 +436,9 @@ private[storage] class BlockManagerDecommissioner(
   }
 
   private def buildShuffleStat(): MigrationStat = {
-    MigrationStat(migratingShuffles.size - numMigratedShuffles.get(),
-      migratedShufflesSize.get(), numMigratedShuffles.get())
+    // Ensure numBlocksLeft is never negative in case of tracking inconsistencies
+    val numBlocksLeft = Math.max(0, migratingShuffles.size - numMigratedShuffles.get())
+    MigrationStat(numBlocksLeft, migratedShufflesSize.get(), numMigratedShuffles.get())
   }
 }
 

@@ -96,7 +96,7 @@ private[spark] case class DecommissionSummary(
 ) {
   override def toString: String = {
     f"Decommission finished in ${decommissionTime.toMillis}%,d ms. " +
-    f"Migration finished in ${migrationTime.toMillis}%,d ms" +
+    f"Migration finished in ${migrationTime.toMillis}%,d ms " +
     f"(including ${taskWaitingTime.toMillis}%,d ms running task waiting time). " +
     f"${migrationInfo.shuffleMigrationStat.numMigratedBlock}%,d blocks of size " +
     f"${Utils.bytesToString(migrationInfo.shuffleMigrationStat.totalMigratedSize)} migrated, " +

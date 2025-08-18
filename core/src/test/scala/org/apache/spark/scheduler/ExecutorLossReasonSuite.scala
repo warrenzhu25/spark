@@ -40,7 +40,7 @@ class ExecutorLossReasonSuite extends SparkFunSuite {
       )
     )
     val expectedString = "Decommission finished in 1,000 ms. " +
-      "Migration finished in 500 ms" +
+      "Migration finished in 500 ms " +
       "(including 100 ms running task waiting time). " +
       "10 blocks of size 1024.0 B migrated, " +
       "2 blocks not migrated."

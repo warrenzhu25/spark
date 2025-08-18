@@ -349,31 +349,43 @@ private[spark] class CoarseGrainedExecutorBackend(
             Thread.sleep(initialSleepMillis)
           }
           while (true) {
+            logInfo("Checking to see if we can shutdown.")
             if (executor == null || executor.numRunningTasks == 0) {
               if (migrationEnabled) {
-                val MigrationInfo(migrationTime, allBlocksMigrated, shuffleStat) =
-                  env.blockManager.lastMigrationInfo().get
-                // We can only trust allBlocksMigrated boolean value if there were no tasks running
-                // since the start of computing it.
-                if (allBlocksMigrated && (migrationTime > lastTaskRunningTime)) {
-                  logInfo("No running tasks, all blocks migrated, stopping.")
-                  val taskWaitingDuration = Duration(lastTaskRunningTime - decommissionedTime.get,
-                    NANOSECONDS)
-                  val totalDecommissionTime = Duration(System.nanoTime() - decommissionedTime.get,
-                    NANOSECONDS)
-                  val decommissionSummary = DecommissionSummary(
-                    decommissionTime = totalDecommissionTime,
-                    migrationTime = totalDecommissionTime,
-                    taskWaitingTime = taskWaitingDuration,
-                    migrationInfo = MigrationInfo(migrationTime, allBlocksMigrated, shuffleStat))
-                  exitExecutor(0, ExecutorLossMessage.decommissionFinished +
-                    decommissionSummary.toString)
-                } else {
-                  logInfo("All blocks not yet migrated.")
+                logInfo("No running tasks, checking migrations")
+                env.blockManager.lastMigrationInfo() match {
+                  case Some(MigrationInfo(lastMigrationTimestamp, allBlocksMigrated,
+                    shuffleStat)) =>
+                    // We can only trust allBlocksMigrated boolean value if there were no
+                  // tasks running
+                    // since the start of computing it.
+                    if (allBlocksMigrated && (lastMigrationTimestamp > lastTaskRunningTime)) {
+                      logInfo("No running tasks, all blocks migrated, stopping.")
+                      val taskWaitingDuration = Duration(
+                        lastTaskRunningTime - decommissionedTime.get, NANOSECONDS)
+                      val totalDecommissionTime = Duration(
+                        System.nanoTime() - decommissionedTime.get, NANOSECONDS)
+                      val currentTime = System.nanoTime()
+                      val decommissionSummary = DecommissionSummary(
+                        decommissionTime = totalDecommissionTime,
+                        migrationTime = totalDecommissionTime,
+                        taskWaitingTime = taskWaitingDuration,
+                        migrationInfo = MigrationInfo(
+                          currentTime, allBlocksMigrated, shuffleStat))
+                      exitExecutor(0, ExecutorLossMessage.decommissionFinished +
+                        decommissionSummary.toString)
+                    } else {
+                      logInfo("All blocks not yet migrated.")
+                    }
+                  case None =>
+                    logWarning("No migration info available, proceeding with basic decommission.")
+                    exitExecutor(0, ExecutorLossMessage.decommissionFinished,
+                      notifyDriver = true)
                 }
               } else {
                 logInfo("No running tasks, no block migration configured, stopping.")
-                exitExecutor(0, ExecutorLossMessage.decommissionFinished, notifyDriver = true)
+                exitExecutor(0, ExecutorLossMessage.decommissionFinished,
+                  notifyDriver = true)
               }
             } else {
               logInfo(s"Blocked from shutdown by ${executor.numRunningTasks} running tasks")

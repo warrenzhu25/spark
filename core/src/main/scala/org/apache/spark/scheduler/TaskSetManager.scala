@@ -1151,12 +1151,12 @@ private[spark] class TaskSetManager(
           })
         }
 
-        def shouldSpeculateForExecutorDecommissionFinisheding(): Boolean = {
+        def shouldSpeculateForExecutorDecommissionFinished(): Boolean = {
           // TODO: Implement executor decommission state tracking
           false
         }
         val speculated = (runtimeMs > threshold) && checkMaySpeculate() ||
-          shouldSpeculateForExecutorDecommissionFinisheding()
+          shouldSpeculateForExecutorDecommissionFinished()
         if (speculated) {
           addPendingTask(index, speculatable = true)
           logInfo(
