@@ -431,3 +431,12 @@ private[storage] class BlockManagerDecommissioner(
     }
   }
 }
+
+private[spark] case class MigrationInfo(lastMigrationTime: Long,
+    allBlocksMigrated: Boolean,
+    shuffleMigrationStat: MigrationStat
+)
+
+private[spark] case class MigrationStat(numBlocksLeft: Int,
+    totalMigratedSize: Long,
+    numMigratedBlock: Int)
