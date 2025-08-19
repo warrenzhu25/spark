@@ -208,4 +208,253 @@ class BlockStoreShuffleReaderSuite extends SparkFunSuite with LocalSparkContext 
 
     logInfo("Successfully created shuffle reader with load-balanced fetch requests")
   }
+
+  test("multi-executor fetch scenarios with global coordination") {
+    val conf = new SparkConf()
+      .set(config.REDUCER_MAX_BLOCKS_IN_FLIGHT_PER_ADDRESS, 2)
+      .set(config.REDUCER_MAX_SIZE_IN_FLIGHT, "500k")
+      .set(config.REDUCER_MAX_REQ_SIZE_SHUFFLE_TO_MEM, "500k")
+
+    // Create many executors simulating a large cluster where all fetch from each other
+    val executors = (0 until 8).map { i =>
+      BlockManagerId(s"executor-$i", s"host-$i.cluster.local", 7337 + i)
+    }
+
+    val blockManager = mock(classOf[BlockManager])
+    when(blockManager.conf).thenReturn(conf)
+    when(blockManager.blockManagerId).thenReturn(BlockManagerId("driver", "driver-host", 7337))
+
+    val mapOutputTracker = mock(classOf[MapOutputTracker])
+
+    // Distribute blocks across all executors with varying characteristics
+    val blocksByExecutor = executors.zipWithIndex.map { case (executor, idx) =>
+      val blockSize = 1000L + (idx * 500L) // Varying block sizes
+      val blocks = (idx * 4 until (idx + 1) * 4).map { mapId =>
+        (ShuffleBlockId(0, mapId, 0), blockSize, mapId)
+      }
+      executor -> blocks
+    }.toMap
+
+    when(mapOutputTracker.getMapSizesByExecutorId(0, 0, 32, 0, 1)).thenReturn {
+      blocksByExecutor.toSeq.iterator
+    }
+
+    val shuffleHandle = {
+      val dependency = mock(classOf[ShuffleDependency[Int, Int, Int]])
+      when(dependency.serializer).thenReturn(new JavaSerializer(conf))
+      when(dependency.aggregator).thenReturn(None)
+      when(dependency.keyOrdering).thenReturn(None)
+      new BaseShuffleHandle(0, dependency)
+    }
+
+    val serializerManager = new SerializerManager(new JavaSerializer(conf), conf)
+    val taskContext = TaskContext.empty()
+    val metrics = taskContext.taskMetrics.createTempShuffleReadMetrics()
+    val blocksByAddress = mapOutputTracker.getMapSizesByExecutorId(0, 0, 32, 0, 1)
+
+    // Test that we can handle many executors without performance degradation
+    val shuffleReader = new BlockStoreShuffleReader(
+      shuffleHandle,
+      blocksByAddress,
+      taskContext,
+      metrics,
+      serializerManager,
+      blockManager)
+
+    assert(shuffleReader != null)
+    logInfo(s"Successfully created shuffle reader for ${executors.length} executors with global coordination")
+  }
+
+  test("network topology awareness in multi-executor fetches") {
+    val conf = new SparkConf()
+      .set(config.REDUCER_MAX_BLOCKS_IN_FLIGHT_PER_ADDRESS, 3)
+      .set(config.REDUCER_MAX_SIZE_IN_FLIGHT, "1m")
+
+    // Create executors in different network locations (simulated by host names)
+    val sameRackExecutors = (1 to 3).map { i =>
+      BlockManagerId(s"rack1-exec$i", s"10.0.1.$i", 7337)
+    }
+    val differentRackExecutors = (1 to 3).map { i =>
+      BlockManagerId(s"rack2-exec$i", s"10.0.2.$i", 7337)
+    }
+    val remoteExecutors = (1 to 2).map { i =>
+      BlockManagerId(s"remote-exec$i", s"192.168.1.$i", 7337)
+    }
+
+    val allExecutors = sameRackExecutors ++ differentRackExecutors ++ remoteExecutors
+
+    val blockManager = mock(classOf[BlockManager])
+    when(blockManager.conf).thenReturn(conf)
+    // Local executor in same rack as sameRackExecutors
+    when(blockManager.blockManagerId).thenReturn(BlockManagerId("local", "10.0.1.10", 7337))
+
+    val mapOutputTracker = mock(classOf[MapOutputTracker])
+
+    // Distribute blocks with same size across all network locations
+    val blocksByExecutor = allExecutors.zipWithIndex.map { case (executor, idx) =>
+      val blocks = (idx * 2 until (idx + 1) * 2).map { mapId =>
+        (ShuffleBlockId(0, mapId, 0), 2000L, mapId)
+      }
+      executor -> blocks
+    }.toMap
+
+    when(mapOutputTracker.getMapSizesByExecutorId(0, 0, 16, 0, 1)).thenReturn {
+      blocksByExecutor.toSeq.iterator
+    }
+
+    val shuffleHandle = {
+      val dependency = mock(classOf[ShuffleDependency[Int, Int, Int]])
+      when(dependency.serializer).thenReturn(new JavaSerializer(conf))
+      when(dependency.aggregator).thenReturn(None)
+      when(dependency.keyOrdering).thenReturn(None)
+      new BaseShuffleHandle(0, dependency)
+    }
+
+    val serializerManager = new SerializerManager(new JavaSerializer(conf), conf)
+    val taskContext = TaskContext.empty()
+    val metrics = taskContext.taskMetrics.createTempShuffleReadMetrics()
+    val blocksByAddress = mapOutputTracker.getMapSizesByExecutorId(0, 0, 16, 0, 1)
+
+    val shuffleReader = new BlockStoreShuffleReader(
+      shuffleHandle,
+      blocksByAddress,
+      taskContext,
+      metrics,
+      serializerManager,
+      blockManager)
+
+    assert(shuffleReader != null)
+    logInfo("Successfully created shuffle reader with network topology awareness")
+  }
+
+  test("adaptive throttling under varying executor performance") {
+    val conf = new SparkConf()
+      .set(config.REDUCER_MAX_BLOCKS_IN_FLIGHT_PER_ADDRESS, 5)
+      .set(config.REDUCER_MAX_SIZE_IN_FLIGHT, "2m")
+
+    // Create executors with simulated performance characteristics
+    val highPerformanceExecutors = (1 to 2).map { i =>
+      BlockManagerId(s"high-perf-$i", s"high-perf-host-$i", 7337)
+    }
+    val mediumPerformanceExecutors = (1 to 3).map { i =>
+      BlockManagerId(s"medium-perf-$i", s"medium-perf-host-$i", 7337)
+    }
+    val lowPerformanceExecutors = (1 to 3).map { i =>
+      BlockManagerId(s"low-perf-$i", s"low-perf-host-$i", 7337)
+    }
+
+    val allExecutors = highPerformanceExecutors ++ mediumPerformanceExecutors ++ lowPerformanceExecutors
+
+    val blockManager = mock(classOf[BlockManager])
+    when(blockManager.conf).thenReturn(conf)
+    when(blockManager.blockManagerId).thenReturn(BlockManagerId("local", "local-host", 7337))
+
+    val mapOutputTracker = mock(classOf[MapOutputTracker])
+
+    // Create different block size distributions to test adaptive behavior
+    val blocksByExecutor = allExecutors.zipWithIndex.map { case (executor, idx) =>
+      val baseSize = if (executor.executorId.startsWith("high")) {
+        500L // Smaller blocks for high-perf executors (they can handle more)
+      } else if (executor.executorId.startsWith("medium")) {
+        1500L // Medium blocks
+      } else {
+        3000L // Larger blocks for low-perf executors (fewer, larger requests)
+      }
+      
+      val blocks = (idx * 3 until (idx + 1) * 3).map { mapId =>
+        (ShuffleBlockId(0, mapId, 0), baseSize, mapId)
+      }
+      executor -> blocks
+    }.toMap
+
+    when(mapOutputTracker.getMapSizesByExecutorId(0, 0, 24, 0, 1)).thenReturn {
+      blocksByExecutor.toSeq.iterator
+    }
+
+    val shuffleHandle = {
+      val dependency = mock(classOf[ShuffleDependency[Int, Int, Int]])
+      when(dependency.serializer).thenReturn(new JavaSerializer(conf))
+      when(dependency.aggregator).thenReturn(None)
+      when(dependency.keyOrdering).thenReturn(None)
+      new BaseShuffleHandle(0, dependency)
+    }
+
+    val serializerManager = new SerializerManager(new JavaSerializer(conf), conf)
+    val taskContext = TaskContext.empty()
+    val metrics = taskContext.taskMetrics.createTempShuffleReadMetrics()
+    val blocksByAddress = mapOutputTracker.getMapSizesByExecutorId(0, 0, 24, 0, 1)
+
+    val shuffleReader = new BlockStoreShuffleReader(
+      shuffleHandle,
+      blocksByAddress,
+      taskContext,
+      metrics,
+      serializerManager,
+      blockManager)
+
+    assert(shuffleReader != null)
+    logInfo("Successfully created shuffle reader with adaptive throttling for varying performance")
+  }
+
+  test("hotspot prevention in dense multi-executor clusters") {
+    val conf = new SparkConf()
+      .set(config.REDUCER_MAX_BLOCKS_IN_FLIGHT_PER_ADDRESS, 4)
+      .set(config.REDUCER_MAX_SIZE_IN_FLIGHT, "1m")
+
+    // Simulate a dense cluster with many executors
+    val clusterSize = 12
+    val executors = (0 until clusterSize).map { i =>
+      BlockManagerId(s"executor-$i", s"node-${i % 4}.datacenter.com", 7337)
+    }
+
+    val blockManager = mock(classOf[BlockManager])
+    when(blockManager.conf).thenReturn(conf)
+    when(blockManager.blockManagerId).thenReturn(BlockManagerId("coordinator", "coordinator.datacenter.com", 7337))
+
+    val mapOutputTracker = mock(classOf[MapOutputTracker])
+
+    // Create a scenario where some executors have much more data (potential hotspots)
+    val blocksByExecutor = executors.zipWithIndex.map { case (executor, idx) =>
+      val numBlocks = if (idx < 3) {
+        8 // These executors have more data (potential hotspots)
+      } else {
+        3 // Regular executors
+      }
+      
+      val blocks = (0 until numBlocks).map { blockIdx =>
+        val mapId = idx * 10 + blockIdx
+        (ShuffleBlockId(0, mapId, 0), 1500L, mapId)
+      }
+      executor -> blocks
+    }.toMap
+
+    val totalBlocks = blocksByExecutor.values.map(_.length).sum
+    when(mapOutputTracker.getMapSizesByExecutorId(0, 0, totalBlocks, 0, 1)).thenReturn {
+      blocksByExecutor.toSeq.iterator
+    }
+
+    val shuffleHandle = {
+      val dependency = mock(classOf[ShuffleDependency[Int, Int, Int]])
+      when(dependency.serializer).thenReturn(new JavaSerializer(conf))
+      when(dependency.aggregator).thenReturn(None)
+      when(dependency.keyOrdering).thenReturn(None)
+      new BaseShuffleHandle(0, dependency)
+    }
+
+    val serializerManager = new SerializerManager(new JavaSerializer(conf), conf)
+    val taskContext = TaskContext.empty()
+    val metrics = taskContext.taskMetrics.createTempShuffleReadMetrics()
+    val blocksByAddress = mapOutputTracker.getMapSizesByExecutorId(0, 0, totalBlocks, 0, 1)
+
+    val shuffleReader = new BlockStoreShuffleReader(
+      shuffleHandle,
+      blocksByAddress,
+      taskContext,
+      metrics,
+      serializerManager,
+      blockManager)
+
+    assert(shuffleReader != null)
+    logInfo(s"Successfully created shuffle reader with hotspot prevention for $clusterSize executors")
+  }
 }

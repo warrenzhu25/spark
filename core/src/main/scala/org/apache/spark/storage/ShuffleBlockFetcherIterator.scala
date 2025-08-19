@@ -169,8 +169,20 @@ final class ShuffleBlockFetcherIterator(
   /** Track average fetch speed per executor (bytes per millisecond) */
   private[this] val avgFetchSpeedPerAddress = new HashMap[BlockManagerId, Double]()
 
+  /** Track active fetch counts across all executors for global coordination */
+  private[this] val globalActiveFetches = new AtomicLong(0)
+
+  /** Track executor failure rates to avoid problematic executors */
+  private[this] val executorFailureRates = new HashMap[BlockManagerId, Double]()
+
+  /** Track network saturation per executor to prevent overwhelming specific nodes */
+  private[this] val networkSaturationTracker = new HashMap[BlockManagerId, AtomicLong]()
+
   /** Maximum fetch history to keep for performance calculations */
   private[this] val maxFetchHistorySize = 10
+
+  /** Threshold for considering an executor as saturated (requests per second) */
+  private[this] val networkSaturationThreshold = 50
 
   /**
    * Count the retry times for the blocks due to Netty OOM. The block will stop retry if
@@ -204,8 +216,8 @@ final class ShuffleBlockFetcherIterator(
     this, shuffleClient, blockManager, mapOutputTracker, shuffleMetrics)
 
   /**
-   * Prioritize fetch requests based on executor load and performance to achieve better balance.
-   * This replaces the random ordering with intelligent load-aware distribution.
+   * Prioritize fetch requests based on global executor load, network topology, and performance.
+   * Enhanced for scenarios where all executors fetch from each other.
    */
   private def prioritizeRequestsByLoad(requests: ArrayBuffer[FetchRequest]): ArrayBuffer[FetchRequest] = {
     if (requests.isEmpty) return requests
@@ -214,54 +226,60 @@ final class ShuffleBlockFetcherIterator(
     val requestsByExecutor = requests.groupBy(_.address)
     val prioritizedRequests = new ArrayBuffer[FetchRequest]()
 
-    // Calculate load scores for each executor
+    // Calculate comprehensive load scores for each executor
     val executorLoadScores = requestsByExecutor.map { case (address, reqs) =>
       val totalBytes = reqs.map(_.size).sum
       val currentLoad = numBlocksInFlightPerAddress.getOrElse(address, 0)
-      val avgSpeed = avgFetchSpeedPerAddress.getOrElse(address, 1.0) // Default to 1.0 if unknown
+      val avgSpeed = avgFetchSpeedPerAddress.getOrElse(address, 1.0)
       val bytesAlreadyFetched = bytesFetchedPerAddress.get(address).map(_.get()).getOrElse(0L)
+      val failureRate = executorFailureRates.getOrElse(address, 0.0)
+      val networkSaturation = networkSaturationTracker.get(address).map(_.get()).getOrElse(0L)
 
-      // Score based on: inverse of current load + performance + fairness
+      // Enhanced scoring considering global state and network topology
       val loadScore = 1.0 / (currentLoad + 1.0) // Higher score for less loaded executors
-      val speedScore = avgSpeed / 1000.0 // Normalize speed score
+      val speedScore = math.min(avgSpeed / 1000.0, 2.0) // Cap speed advantage
       val fairnessScore = 1.0 / (bytesAlreadyFetched + 1.0) // Promote fairness
+      val reliabilityScore = 1.0 - math.min(failureRate, 0.8) // Penalize unreliable executors
+      val networkScore = 1.0 / (networkSaturation / 1000000.0 + 1.0) // Penalize saturated networks
+      
+      // Network topology awareness - prefer same-rack executors if available
+      val topologyScore = if (isInSameRack(blockManager.blockManagerId, address)) 1.2 else 1.0
+      
+      // Global coordination - penalize over-utilized executors across the cluster
+      val globalScore = calculateGlobalCoordinationScore(address)
 
-      val combinedScore = loadScore * 0.5 + speedScore * 0.3 + fairnessScore * 0.2
+      val combinedScore = (loadScore * 0.25 + speedScore * 0.2 + fairnessScore * 0.15 + 
+                          reliabilityScore * 0.15 + networkScore * 0.15 + globalScore * 0.1) * topologyScore
 
       address -> (combinedScore, totalBytes, reqs)
     }
 
-    // Sort executors by load score (higher score = higher priority)
+    // Sort executors by comprehensive score (higher score = higher priority)
     val sortedExecutors = executorLoadScores.toSeq.sortBy(-_._2._1)
 
-    // Distribute requests using round-robin within priority groups to ensure fairness
-    val executorQueues = sortedExecutors.map { case (addr, (_, _, reqs)) =>
-      addr -> reqs.to(collection.mutable.Queue)
-    }.toMap
-
-    // Round-robin distribution to balance load
-    while (executorQueues.values.exists(_.nonEmpty)) {
-      for ((executor, queue) <- sortedExecutors.map(_._1) if queue.nonEmpty) {
-        val queue = executorQueues(executor)
-        if (queue.nonEmpty) {
-          prioritizedRequests += queue.dequeue()
-        }
-      }
-    }
+    // Advanced distribution strategy to prevent hotspots
+    distributeRequestsWithHotspotPrevention(sortedExecutors, prioritizedRequests)
 
     logDebug(s"Prioritized ${requests.size} fetch requests across ${requestsByExecutor.size} executors " +
-      s"with load-aware ordering")
+      s"with enhanced global load-aware ordering")
 
     prioritizedRequests
   }
 
   /**
-   * Update fetch performance metrics for load balancing decisions.
+   * Update comprehensive fetch performance metrics for enhanced load balancing decisions.
    */
   private def updateFetchPerformanceMetrics(address: BlockManagerId, fetchSizeBytes: Long,
                                            fetchTimeMs: Long): Unit = {
     // Update bytes fetched counter
     bytesFetchedPerAddress.getOrElseUpdate(address, new AtomicLong(0)).addAndGet(fetchSizeBytes)
+
+    // Update global active fetches tracking
+    globalActiveFetches.decrementAndGet()
+
+    // Update network saturation tracking
+    val currentTime = System.currentTimeMillis()
+    networkSaturationTracker.getOrElseUpdate(address, new AtomicLong(currentTime)).set(currentTime)
 
     // Update completion times for performance tracking
     val completionTimes = fetchCompletionTimesPerAddress.getOrElseUpdate(address,
@@ -285,16 +303,147 @@ final class ShuffleBlockFetcherIterator(
   }
 
   /**
-   * Get current load factor for an executor to help with request balancing.
+   * Get comprehensive load factor for an executor considering global state.
    */
   private def getExecutorLoadFactor(address: BlockManagerId): Double = {
     val blocksInFlight = numBlocksInFlightPerAddress.getOrElse(address, 0)
     val avgSpeed = avgFetchSpeedPerAddress.getOrElse(address, 1.0)
     val bytesFetched = bytesFetchedPerAddress.get(address).map(_.get()).getOrElse(0L)
+    val failureRate = executorFailureRates.getOrElse(address, 0.0)
+    val networkSaturation = getNetworkSaturationLevel(address)
 
-    // Higher load factor means more loaded (worse for new requests)
-    val loadFactor = (blocksInFlight + 1.0) / avgSpeed + bytesFetched / 1000000.0 // Normalize bytes
-    loadFactor
+    // Enhanced load factor considering multiple dimensions
+    val baseLoadFactor = (blocksInFlight + 1.0) / math.max(avgSpeed, 0.1)
+    val fairnessPenalty = bytesFetched / 10000000.0 // Normalize bytes to MB
+    val reliabilityPenalty = failureRate * 10.0 // Heavily penalize unreliable executors
+    val saturationPenalty = networkSaturation * 5.0 // Penalize saturated networks
+    
+    val totalLoadFactor = baseLoadFactor + fairnessPenalty + reliabilityPenalty + saturationPenalty
+    totalLoadFactor
+  }
+
+  /**
+   * Check if two block managers are in the same network rack for topology awareness.
+   */
+  private def isInSameRack(local: BlockManagerId, remote: BlockManagerId): Boolean = {
+    // Simple heuristic: same host or same network prefix
+    if (local.host == remote.host) {
+      true
+    } else {
+      // Check if IPs are in same subnet (assumes /24 subnet)
+      try {
+        val localIP = java.net.InetAddress.getByName(local.host).getHostAddress
+        val remoteIP = java.net.InetAddress.getByName(remote.host).getHostAddress
+        localIP.substring(0, localIP.lastIndexOf('.')) == remoteIP.substring(0, remoteIP.lastIndexOf('.'))
+      } catch {
+        case _: Exception => false // If IP resolution fails, assume different racks
+      }
+    }
+  }
+
+  /**
+   * Calculate global coordination score to prevent cluster-wide hotspots.
+   */
+  private def calculateGlobalCoordinationScore(address: BlockManagerId): Double = {
+    val globalActive = globalActiveFetches.get()
+    val localActive = numBlocksInFlightPerAddress.getOrElse(address, 0)
+    
+    if (globalActive == 0) {
+      1.0 // No global load, all executors equally preferred
+    } else {
+      val executorShare = localActive.toDouble / globalActive.toDouble
+      val fairShare = 1.0 / (numBlocksInFlightPerAddress.size + 1) // +1 for this executor
+      
+      // Prefer executors that are below their fair share
+      if (executorShare <= fairShare) {
+        1.0 + (fairShare - executorShare) * 2.0 // Bonus for underloaded executors
+      } else {
+        math.max(0.1, 1.0 - (executorShare - fairShare) * 3.0) // Penalty for overloaded
+      }
+    }
+  }
+
+  /**
+   * Get current network saturation level for an executor.
+   */
+  private def getNetworkSaturationLevel(address: BlockManagerId): Double = {
+    val lastAccess = networkSaturationTracker.get(address).map(_.get()).getOrElse(0L)
+    val timeSinceLastAccess = System.currentTimeMillis() - lastAccess
+    
+    if (timeSinceLastAccess > 5000) { // More than 5 seconds ago
+      0.0 // Not saturated
+    } else {
+      // Calculate saturation based on recent activity
+      val recentActivity = numBlocksInFlightPerAddress.getOrElse(address, 0)
+      math.min(1.0, recentActivity.toDouble / networkSaturationThreshold)
+    }
+  }
+
+  /**
+   * Advanced request distribution to prevent hotspots in multi-executor fetch scenarios.
+   */
+  private def distributeRequestsWithHotspotPrevention(
+      sortedExecutors: Seq[(BlockManagerId, (Double, Long, ArrayBuffer[FetchRequest]))],
+      prioritizedRequests: ArrayBuffer[FetchRequest]): Unit = {
+    
+    val executorQueues = sortedExecutors.map { case (addr, (_, _, reqs)) =>
+      addr -> reqs.to(collection.mutable.Queue)
+    }.toMap
+
+    // Track distribution to prevent any single executor from being overwhelmed
+    val distributionTracker = collection.mutable.Map[BlockManagerId, Int]()
+    
+    // Multi-phase distribution for better balance
+    var phase = 0
+    val maxPhases = 3
+    
+    while (executorQueues.values.exists(_.nonEmpty) && phase < maxPhases) {
+      // In each phase, limit how many requests each executor can contribute
+      val requestsPerExecutorThisPhase = math.max(1, 
+        executorQueues.values.map(_.size).max / (maxPhases - phase))
+      
+      for ((executor, _) <- sortedExecutors if executorQueues(executor).nonEmpty) {
+        val queue = executorQueues(executor)
+        val distributed = distributionTracker.getOrElse(executor, 0)
+        val thisPhaseLimit = requestsPerExecutorThisPhase
+        
+        var requestsThisPhase = 0
+        while (queue.nonEmpty && requestsThisPhase < thisPhaseLimit) {
+          prioritizedRequests += queue.dequeue()
+          requestsThisPhase += 1
+        }
+        
+        distributionTracker(executor) = distributed + requestsThisPhase
+      }
+      
+      phase += 1
+    }
+    
+    // Ensure any remaining requests are distributed fairly
+    while (executorQueues.values.exists(_.nonEmpty)) {
+      for ((executor, _) <- sortedExecutors if executorQueues(executor).nonEmpty) {
+        val queue = executorQueues(executor)
+        if (queue.nonEmpty) {
+          prioritizedRequests += queue.dequeue()
+        }
+      }
+    }
+  }
+
+  /**
+   * Update failure tracking for an executor to avoid problematic nodes.
+   */
+  private def updateExecutorFailureRate(address: BlockManagerId, failed: Boolean): Unit = {
+    val currentRate = executorFailureRates.getOrElse(address, 0.0)
+    val decayFactor = 0.9 // Gradually forget old failures
+    
+    val newRate = if (failed) {
+      (currentRate * decayFactor) + 0.1 // Increase failure rate
+    } else {
+      currentRate * decayFactor // Gradually decrease failure rate
+    }
+    
+    executorFailureRates(address) = math.max(0.0, math.min(1.0, newRate))
   }
 
   /**
@@ -987,6 +1136,8 @@ final class ShuffleBlockFetcherIterator(
             reqsInFlight -= 1
             resetNettyOOMFlagIfPossible(maxReqSizeShuffleToMem)
             logDebug("Number of requests in flight " + reqsInFlight)
+            // Update executor success tracking
+            updateExecutorFailureRate(address, failed = false)
           }
 
           val in = if (buf.size == 0) {
@@ -1122,6 +1273,9 @@ final class ShuffleBlockFetcherIterator(
           }
 
         case FailureFetchResult(blockId, mapIndex, address, e) =>
+          // Update executor failure tracking
+          updateExecutorFailureRate(address, failed = true)
+          
           var errorMsg: String = null
           if (e.isInstanceOf[OutOfDirectMemoryError]) {
             errorMsg = s"Block $blockId fetch failed after $maxAttemptsOnNettyOOM " +
@@ -1369,6 +1523,9 @@ final class ShuffleBlockFetcherIterator(
     }
 
     def send(remoteAddress: BlockManagerId, request: FetchRequest): Unit = {
+      // Update global coordination tracking
+      globalActiveFetches.addAndGet(request.blocks.size)
+      
       if (request.forMergedMetas) {
         pushBasedFetchHelper.sendFetchMergedStatusRequest(request)
       } else {
@@ -1405,37 +1562,67 @@ final class ShuffleBlockFetcherIterator(
     }
 
     /**
-     * Calculate adaptive block limit for an executor based on its performance.
-     * Better performing executors get higher limits to maximize throughput.
+     * Calculate adaptive block limit considering global cluster state and multi-executor scenarios.
      */
     def getAdaptiveBlockLimit(address: BlockManagerId): Int = {
       val avgSpeed = avgFetchSpeedPerAddress.getOrElse(address, 1.0)
+      val failureRate = executorFailureRates.getOrElse(address, 0.0)
+      val networkSaturation = getNetworkSaturationLevel(address)
+      val globalCoordination = calculateGlobalCoordinationScore(address)
       val baseLimit = maxBlocksInFlightPerAddress.toDouble
 
-      // Adjust limit based on relative performance
-      // If avgSpeed is higher than 1.0, increase limit; if lower, decrease limit
-      val speedMultiplier = math.max(0.5, math.min(2.0, avgSpeed / 1000.0 + 0.8))
-      val adaptiveLimit = (baseLimit * speedMultiplier).toInt
+      // Multi-factor adaptive adjustment
+      val speedMultiplier = math.max(0.4, math.min(2.5, avgSpeed / 1000.0 + 0.7))
+      val reliabilityMultiplier = math.max(0.3, 1.0 - failureRate)
+      val saturationMultiplier = math.max(0.5, 1.0 - networkSaturation)
+      val coordinationMultiplier = math.max(0.6, globalCoordination)
+      
+      // Consider network topology - same rack gets slight preference
+      val topologyMultiplier = if (isInSameRack(blockManager.blockManagerId, address)) 1.1 else 1.0
+      
+      val adaptiveLimit = (baseLimit * speedMultiplier * reliabilityMultiplier * 
+                          saturationMultiplier * coordinationMultiplier * topologyMultiplier).toInt
 
-      // Ensure we stay within reasonable bounds
-      math.max(1, math.min(maxBlocksInFlightPerAddress * 2, adaptiveLimit))
+      // Dynamic bounds based on cluster state
+      val minLimit = math.max(1, maxBlocksInFlightPerAddress / 4)
+      val maxLimit = maxBlocksInFlightPerAddress * 3
+      
+      math.max(minLimit, math.min(maxLimit, adaptiveLimit))
     }
 
     /**
-     * Calculate adaptive request size for an executor based on its performance.
-     * Faster executors can handle larger requests.
+     * Calculate adaptive request size considering multi-executor coordination and network efficiency.
      */
     def getAdaptiveRequestSize(address: BlockManagerId): Long = {
       val avgSpeed = avgFetchSpeedPerAddress.getOrElse(address, 1.0)
+      val failureRate = executorFailureRates.getOrElse(address, 0.0)
+      val networkSaturation = getNetworkSaturationLevel(address)
+      val globalLoad = globalActiveFetches.get()
       val baseSize = targetRemoteRequestSize.toDouble
 
-      // Adjust request size based on performance
-      // Faster executors get larger requests to improve efficiency
-      val speedMultiplier = math.max(0.6, math.min(1.8, avgSpeed / 1000.0 + 0.9))
-      val adaptiveSize = (baseSize * speedMultiplier).toLong
+      // Multi-dimensional adaptive sizing
+      val speedMultiplier = math.max(0.5, math.min(2.0, avgSpeed / 1000.0 + 0.8))
+      val reliabilityMultiplier = math.max(0.4, 1.0 - failureRate * 0.8)
+      val saturationMultiplier = math.max(0.6, 1.0 - networkSaturation * 0.5)
+      
+      // Global load adaptation - reduce request size when cluster is busy
+      val globalLoadMultiplier = if (globalLoad > 100) {
+        math.max(0.7, 1.0 - (globalLoad - 100) / 1000.0)
+      } else {
+        1.0
+      }
+      
+      // Network topology consideration - larger requests for same-rack to reduce overhead
+      val topologyMultiplier = if (isInSameRack(blockManager.blockManagerId, address)) 1.2 else 1.0
+      
+      val adaptiveSize = (baseSize * speedMultiplier * reliabilityMultiplier * 
+                         saturationMultiplier * globalLoadMultiplier * topologyMultiplier).toLong
 
-      // Keep within reasonable bounds
-      math.max(baseSize / 2, math.min(baseSize * 2, adaptiveSize))
+      // Dynamic bounds based on cluster state and network conditions
+      val minSize = baseSize / 3
+      val maxSize = if (networkSaturation < 0.3) baseSize * 3 else baseSize * 2
+      
+      math.max(minSize.toLong, math.min(maxSize.toLong, adaptiveSize))
     }
   }
 
