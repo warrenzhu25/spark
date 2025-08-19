@@ -262,7 +262,8 @@ class BlockStoreShuffleReaderSuite extends SparkFunSuite with LocalSparkContext 
       blockManager)
 
     assert(shuffleReader != null)
-    logInfo(s"Successfully created shuffle reader for ${executors.length} executors with global coordination")
+    logInfo(s"Successfully created shuffle reader for ${executors.length} executors " +
+      s"with global coordination")
   }
 
   test("network topology awareness in multi-executor fetches") {
@@ -343,7 +344,8 @@ class BlockStoreShuffleReaderSuite extends SparkFunSuite with LocalSparkContext 
       BlockManagerId(s"low-perf-$i", s"low-perf-host-$i", 7337)
     }
 
-    val allExecutors = highPerformanceExecutors ++ mediumPerformanceExecutors ++ lowPerformanceExecutors
+    val allExecutors = highPerformanceExecutors ++ mediumPerformanceExecutors ++
+      lowPerformanceExecutors
 
     val blockManager = mock(classOf[BlockManager])
     when(blockManager.conf).thenReturn(conf)
@@ -360,7 +362,7 @@ class BlockStoreShuffleReaderSuite extends SparkFunSuite with LocalSparkContext 
       } else {
         3000L // Larger blocks for low-perf executors (fewer, larger requests)
       }
-      
+
       val blocks = (idx * 3 until (idx + 1) * 3).map { mapId =>
         (ShuffleBlockId(0, mapId, 0), baseSize, mapId)
       }
@@ -393,7 +395,8 @@ class BlockStoreShuffleReaderSuite extends SparkFunSuite with LocalSparkContext 
       blockManager)
 
     assert(shuffleReader != null)
-    logInfo("Successfully created shuffle reader with adaptive throttling for varying performance")
+    logInfo("Successfully created shuffle reader with adaptive throttling " +
+      "for varying performance")
   }
 
   test("hotspot prevention in dense multi-executor clusters") {
@@ -409,7 +412,8 @@ class BlockStoreShuffleReaderSuite extends SparkFunSuite with LocalSparkContext 
 
     val blockManager = mock(classOf[BlockManager])
     when(blockManager.conf).thenReturn(conf)
-    when(blockManager.blockManagerId).thenReturn(BlockManagerId("coordinator", "coordinator.datacenter.com", 7337))
+    when(blockManager.blockManagerId).thenReturn(
+      BlockManagerId("coordinator", "coordinator.datacenter.com", 7337))
 
     val mapOutputTracker = mock(classOf[MapOutputTracker])
 
@@ -420,7 +424,7 @@ class BlockStoreShuffleReaderSuite extends SparkFunSuite with LocalSparkContext 
       } else {
         3 // Regular executors
       }
-      
+
       val blocks = (0 until numBlocks).map { blockIdx =>
         val mapId = idx * 10 + blockIdx
         (ShuffleBlockId(0, mapId, 0), 1500L, mapId)
@@ -455,6 +459,7 @@ class BlockStoreShuffleReaderSuite extends SparkFunSuite with LocalSparkContext 
       blockManager)
 
     assert(shuffleReader != null)
-    logInfo(s"Successfully created shuffle reader with hotspot prevention for $clusterSize executors")
+    logInfo(s"Successfully created shuffle reader with hotspot prevention " +
+      s"for $clusterSize executors")
   }
 }
