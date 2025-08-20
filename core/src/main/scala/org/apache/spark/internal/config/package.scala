@@ -661,7 +661,7 @@ package object config {
     ConfigBuilder("spark.dynamicAllocation.shuffleTracking.dynamicTimeout.perMb")
       .version("3.5.1")
       .timeConf(TimeUnit.MILLISECONDS)
-      .checkValue(_ >= 0L, "Timeout must be >= 0.")
+      .checkValue(_ > 0L, "Dynamic timeout per MB must be positive")
       .createWithDefault(500L) // 120MB / min = 500ms / MB
 
   private[spark] val DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_ENABLED =

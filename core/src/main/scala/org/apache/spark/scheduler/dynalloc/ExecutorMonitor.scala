@@ -674,7 +674,11 @@ private[spark] class ExecutorMonitor(
         val _shuffleTimeout = if (shuffleIds != null && shuffleIds.nonEmpty) {
         if (conf.get(DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_ENABLED)) {
           val timeoutPerMb = conf.get(DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_PER_MB)
-          shuffleTotalBytes / 1024 / 1024 * timeoutPerMb
+          val shuffleSizeMb = Math.min(shuffleTotalBytes / 1024 / 1024, Long.MaxValue / timeoutPerMb)
+          val dynamicTimeout = shuffleSizeMb * timeoutPerMb
+          // Ensure dynamic timeout is at least as long as idle timeout to prevent
+          // premature executor removal for small shuffle data
+          Math.max(dynamicTimeout, idleTimeoutMs)
         } else {
           shuffleTimeoutMs
         }
