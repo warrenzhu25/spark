@@ -153,6 +153,12 @@ class BlockManagerMaster(
     driverEndpoint.askSync[Seq[BlockManagerId]](GetPeers(blockManagerId))
   }
 
+  /** Get ids of other nodes for shuffle and rdd migration in the cluster from the driver */
+  def getMigrationPeers(blockManagerId: BlockManagerId,
+    fetchBusyId: Option[BlockManagerId]): Seq[BlockManagerId] = {
+    driverEndpoint.askSync[Seq[BlockManagerId]](GetMigrationPeers(blockManagerId, fetchBusyId))
+  }
+
   /**
    * Get a list of unique shuffle service locations where an executor is successfully
    * registered in the past for block push/merge with push based shuffle.
