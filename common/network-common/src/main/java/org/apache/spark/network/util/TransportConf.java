@@ -284,6 +284,18 @@ public class TransportConf {
     return conf.getLong("spark.shuffle.maxChunksBeingTransferred", Long.MAX_VALUE);
   }
 
+  public int fetchBusyHighWatermark() {
+    return conf.getInt("spark.shuffle.fetchBusyHighWatermark", 0);
+  }
+
+  public int fetchBusyLowWatermark() {
+    return conf.getInt("spark.shuffle.fetchBusyLowWatermark", 0);
+  }
+
+  public int fetchBusyCoolDown() {
+    return conf.getInt("spark.shuffle.fetchBusyCoolDown", 0);
+  }
+
   /**
    * Percentage of io.serverThreads used by netty to process ChunkFetchRequest.
    * When the config `spark.shuffle.server.chunkFetchHandlerThreadsPercent` is set,
