@@ -57,15 +57,31 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
   private final long maxChunksBeingTransferred;
   private final boolean syncModeEnabled;
 
+  private final FetchBusyChecker fetchBusyChecker;
+
+  public ChunkFetchRequestHandler(
+      TransportClient client,
+      StreamManager streamManager,
+      Long maxChunksBeingTransferred,
+      boolean syncModeEnabled,
+      FetchBusyChecker fetchBusyChecker) {
+    this.client = client;
+    this.streamManager = streamManager;
+    this.maxChunksBeingTransferred = maxChunksBeingTransferred;
+    this.syncModeEnabled = syncModeEnabled;
+    this.fetchBusyChecker = fetchBusyChecker;
+  }
+
   public ChunkFetchRequestHandler(
       TransportClient client,
       StreamManager streamManager,
       Long maxChunksBeingTransferred,
       boolean syncModeEnabled) {
-    this.client = client;
-    this.streamManager = streamManager;
-    this.maxChunksBeingTransferred = maxChunksBeingTransferred;
-    this.syncModeEnabled = syncModeEnabled;
+    this(client, streamManager, maxChunksBeingTransferred, syncModeEnabled, null);
+  }
+
+  public boolean isFetchBusy() {
+    return fetchBusyChecker != null && fetchBusyChecker.isFetchBusy();
   }
 
   @Override
@@ -94,6 +110,10 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
       logger.info("Received req {} ms from {} to fetch block {}", waitTime,
           getRemoteAddress(channel),
           msg.streamChunkId);
+    }
+
+    if (fetchBusyChecker != null){
+      fetchBusyChecker.handle(waitTime);
     }
 
     if (maxChunksBeingTransferred < Long.MAX_VALUE) {
