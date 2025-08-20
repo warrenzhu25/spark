@@ -657,6 +657,19 @@ package object config {
       .checkValue(_ >= 0L, "Timeout must be >= 0.")
       .createWithDefault(Long.MaxValue)
 
+  private[spark] val DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_PER_MB =
+    ConfigBuilder("spark.dynamicAllocation.shuffleTracking.dynamicTimeout.perMb")
+      .version("3.5.1")
+      .timeConf(TimeUnit.MILLISECONDS)
+      .checkValue(_ > 0L, "Dynamic timeout per MB must be positive")
+      .createWithDefault(500L) // 120MB / min = 500ms / MB
+
+  private[spark] val DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_ENABLED =
+    ConfigBuilder("spark.dynamicAllocation.shuffleTracking.dynamicTimeout.enabled")
+      .version("3.5.1")
+      .booleanConf
+      .createWithDefault(false)
+
   private[spark] val DYN_ALLOCATION_SCHEDULER_BACKLOG_TIMEOUT =
     ConfigBuilder("spark.dynamicAllocation.schedulerBacklogTimeout")
       .version("1.2.0")
@@ -666,6 +679,31 @@ package object config {
     ConfigBuilder("spark.dynamicAllocation.sustainedSchedulerBacklogTimeout")
       .version("1.2.0")
       .fallbackConf(DYN_ALLOCATION_SCHEDULER_BACKLOG_TIMEOUT)
+
+  private[spark] val DYN_ALLOCATION_DIAGNOSIS_ENABLED =
+    ConfigBuilder("spark.dynamicAllocation.diagnosis.enabled")
+      .doc("Whether to do diagnosis when the number of running executors is greater than the " +
+        "number of max-needed executors for a certain period.")
+      .version("3.5.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  private[spark] val DYN_ALLOCATION_DIAGNOSIS_INTERVAL =
+    ConfigBuilder("spark.dynamicAllocation.diagnosis.interval")
+      .doc("The interval to do diagnosis when the number of running executors is greater than " +
+        "the number of max-needed executors.")
+      .version("3.5.0")
+      .timeConf(TimeUnit.SECONDS)
+      .createWithDefaultString("5m")
+
+  private[spark] val DYN_ALLOCATION_DIAGNOSIS_LOG_LEVEL =
+    ConfigBuilder("spark.dynamicAllocation.diagnosis.logLevel")
+      .doc("Log level for dynamic allocation diagnosis output. Can be DEBUG, INFO, WARN, or ERROR.")
+      .version("3.5.0")
+      .stringConf
+      .transform(_.toUpperCase(java.util.Locale.ROOT))
+      .checkValues(Set("DEBUG", "INFO", "WARN", "ERROR"))
+      .createWithDefault("WARN")
 
   private[spark] val LEGACY_LOCALITY_WAIT_RESET =
     ConfigBuilder("spark.locality.wait.legacyResetOnTaskLaunch")
