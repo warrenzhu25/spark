@@ -686,4 +686,152 @@ class ExecutorMonitorSuite extends SparkFunSuite {
     bus
   }
 
+  test("dynamic shuffle timeout calculation") {
+    conf
+      .set(DYN_ALLOCATION_SHUFFLE_TRACKING_TIMEOUT.key, "240s")
+      .set(DYN_ALLOCATION_SHUFFLE_TRACKING_ENABLED, true)
+      .set(DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_ENABLED, true)
+      .set(DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_PER_MB.key, "500")
+      .set(SHUFFLE_SERVICE_ENABLED, false)
+    monitor = new ExecutorMonitor(conf, client, null, clock, allocationManagerSource())
+
+    monitor.onExecutorAdded(SparkListenerExecutorAdded(clock.getTimeMillis(), "1", execInfo))
+    knownExecs += "1"
+
+    val stage1 = stageInfo(1, shuffleId = 0)
+    monitor.onJobStart(SparkListenerJobStart(1, clock.getTimeMillis(), Seq(stage1)))
+
+    val t1 = taskInfo("1", 1)
+    monitor.onTaskStart(SparkListenerTaskStart(1, 1, t1))
+
+    // Write 200MB of shuffle data (200 * 1024 * 1024 bytes)
+    val taskMetrics = TaskMetrics.empty
+    taskMetrics.shuffleWriteMetrics.incBytesWritten(200 * 1024 * 1024)
+    monitor.onTaskEnd(SparkListenerTaskEnd(1, 1, "foo", Success, t1,
+      new ExecutorMetrics, taskMetrics))
+    monitor.onJobEnd(SparkListenerJobEnd(1, clock.getTimeMillis(), JobSucceeded))
+
+    assert(monitor.isExecutorIdle("1"))
+
+    // Dynamic timeout should be 200MB * 500ms/MB = 100,000ms = 100s
+    val dynamicTimeoutNs = TimeUnit.MILLISECONDS.toNanos(100 * 1000)
+    val dynamicDeadline = clock.nanoTime() + dynamicTimeoutNs + 1
+
+    // Should not timeout before dynamic deadline
+    assert(monitor.timedOutExecutors(clock.nanoTime() + dynamicTimeoutNs -
+      TimeUnit.SECONDS.toNanos(1)).isEmpty)
+    // Should timeout after dynamic deadline
+    assert(monitor.timedOutExecutors(dynamicDeadline) === Seq("1"))
+  }
+
+  test("dynamic shuffle timeout with zero shuffle data") {
+    conf
+      .set(DYN_ALLOCATION_SHUFFLE_TRACKING_TIMEOUT.key, "240s")
+      .set(DYN_ALLOCATION_SHUFFLE_TRACKING_ENABLED, true)
+      .set(DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_ENABLED, true)
+      .set(DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_PER_MB.key, "500")
+      .set(SHUFFLE_SERVICE_ENABLED, false)
+    monitor = new ExecutorMonitor(conf, client, null, clock, allocationManagerSource())
+
+    monitor.onExecutorAdded(SparkListenerExecutorAdded(clock.getTimeMillis(), "1", execInfo))
+    knownExecs += "1"
+
+    val stage1 = stageInfo(1, shuffleId = 0)
+    monitor.onJobStart(SparkListenerJobStart(1, clock.getTimeMillis(), Seq(stage1)))
+
+    val t1 = taskInfo("1", 1)
+    monitor.onTaskStart(SparkListenerTaskStart(1, 1, t1))
+
+    // Write 0 bytes of shuffle data
+    val taskMetrics = TaskMetrics.empty
+    taskMetrics.shuffleWriteMetrics.incBytesWritten(0)
+    monitor.onTaskEnd(SparkListenerTaskEnd(1, 1, "foo", Success, t1,
+      new ExecutorMetrics, taskMetrics))
+    monitor.onJobEnd(SparkListenerJobEnd(1, clock.getTimeMillis(), JobSucceeded))
+
+    // With 0 shuffle data, should fall back to idle timeout
+    assert(monitor.timedOutExecutors(idleDeadline) === Seq("1"))
+  }
+
+  test("dynamic shuffle timeout disabled falls back to static timeout") {
+    conf
+      .set(DYN_ALLOCATION_SHUFFLE_TRACKING_TIMEOUT.key, "240s")
+      .set(DYN_ALLOCATION_SHUFFLE_TRACKING_ENABLED, true)
+      .set(DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_ENABLED, false)
+      .set(SHUFFLE_SERVICE_ENABLED, false)
+    monitor = new ExecutorMonitor(conf, client, null, clock, allocationManagerSource())
+
+    monitor.onExecutorAdded(SparkListenerExecutorAdded(clock.getTimeMillis(), "1", execInfo))
+    knownExecs += "1"
+
+    val stage1 = stageInfo(1, shuffleId = 0)
+    monitor.onJobStart(SparkListenerJobStart(1, clock.getTimeMillis(), Seq(stage1)))
+
+    val t1 = taskInfo("1", 1)
+    monitor.onTaskStart(SparkListenerTaskStart(1, 1, t1))
+
+    // Write 100MB of shuffle data
+    val taskMetrics = TaskMetrics.empty
+    taskMetrics.shuffleWriteMetrics.incBytesWritten(100 * 1024 * 1024)
+    monitor.onTaskEnd(SparkListenerTaskEnd(1, 1, "foo", Success, t1,
+      new ExecutorMetrics, taskMetrics))
+    monitor.onJobEnd(SparkListenerJobEnd(1, clock.getTimeMillis(), JobSucceeded))
+
+    // Should use static shuffle timeout (240s), not dynamic
+    assert(monitor.timedOutExecutors(shuffleDeadline) === Seq("1"))
+  }
+
+
+  test("timeout calculation with both cached RDD and shuffle data") {
+    conf
+      .set(DYN_ALLOCATION_SHUFFLE_TRACKING_TIMEOUT.key, "240s")
+      .set(DYN_ALLOCATION_SHUFFLE_TRACKING_ENABLED, true)
+      .set(DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_ENABLED, true)
+      .set(DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_PER_MB.key, "500")
+      .set(SHUFFLE_SERVICE_ENABLED, false)
+    monitor = new ExecutorMonitor(conf, client, null, clock, allocationManagerSource())
+
+    monitor.onExecutorAdded(SparkListenerExecutorAdded(clock.getTimeMillis(), "1", execInfo))
+    knownExecs += "1"
+
+    // Add cached RDD block
+    monitor.onBlockUpdated(rddUpdate(1, 0, "1"))
+
+    val stage1 = stageInfo(1, shuffleId = 0)
+    monitor.onJobStart(SparkListenerJobStart(1, clock.getTimeMillis(), Seq(stage1)))
+
+    val t1 = taskInfo("1", 1)
+    monitor.onTaskStart(SparkListenerTaskStart(1, 1, t1))
+
+    // Write 200MB of shuffle data (200 * 500ms = 100s dynamic timeout)
+    val taskMetrics = TaskMetrics.empty
+    taskMetrics.shuffleWriteMetrics.incBytesWritten(200 * 1024 * 1024)
+    monitor.onTaskEnd(SparkListenerTaskEnd(1, 1, "foo", Success, t1,
+      new ExecutorMetrics, taskMetrics))
+    monitor.onJobEnd(SparkListenerJobEnd(1, clock.getTimeMillis(), JobSucceeded))
+
+    // Should use storage timeout (120s) since it's longer than dynamic timeout (100s)
+    assert(monitor.timedOutExecutors(storageDeadline) === Seq("1"))
+    val dynamicDeadline = clock.nanoTime() + TimeUnit.MILLISECONDS.toNanos(100 * 1000) + 1
+    assert(monitor.timedOutExecutors(dynamicDeadline).isEmpty)
+  }
+
+  test("invalid configuration values are rejected") {
+    // Test negative timeout per MB
+    val negativeConf = new SparkConf()
+      .set(DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_PER_MB.key, "-100")
+
+    intercept[IllegalArgumentException] {
+      negativeConf.get(DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_PER_MB)
+    }
+
+    // Test zero timeout per MB
+    val zeroConf = new SparkConf()
+      .set(DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_PER_MB.key, "0")
+
+    intercept[IllegalArgumentException] {
+      zeroConf.get(DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_PER_MB)
+    }
+  }
+
 }

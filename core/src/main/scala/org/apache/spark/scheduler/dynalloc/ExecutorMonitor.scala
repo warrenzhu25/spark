@@ -580,10 +580,17 @@ private[spark] class ExecutorMonitor(
       val newDeadline = if (idleStart >= 0) {
         val _cacheTimeout = if (cachedBlocks.nonEmpty) storageTimeoutNs else 0
         val _shuffleTimeout = if (shuffleIds != null && shuffleIds.nonEmpty) {
-          shuffleTimeoutNs
+        if (conf.get(DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_ENABLED)) {
+          val timeoutPerMb = conf.get(DYN_ALLOCATION_SHUFFLE_TRACKING_DYNAMIC_TIMEOUT_PER_MB)
+          val shuffleSizeMb = Math.min(shuffleTotalBytes / 1024 / 1024,
+            Long.MaxValue / timeoutPerMb)
+          TimeUnit.MILLISECONDS.toNanos(shuffleSizeMb * timeoutPerMb)
         } else {
-          0
+          shuffleTimeoutNs
         }
+      } else {
+        0
+      }
         // timeout should be max of idleTimeout, storageTimeout and shuffleTimeout
         val timeout = Seq(_cacheTimeout, _shuffleTimeout, idleTimeoutNs).max
         val deadline = idleStart + timeout
