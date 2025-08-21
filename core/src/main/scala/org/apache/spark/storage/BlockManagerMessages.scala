@@ -61,6 +61,24 @@ private[spark] object BlockManagerMessages {
    */
   case object TriggerHeapHistogram extends ToBlockManagerMasterStorageEndpoint
 
+  /**
+   * Driver to Executor message providing shuffle fetch directives for load balancing.
+   */
+  case class ShuffleFetchDirective(
+      targetExecutor: String,
+      preferredSources: Seq[String],
+      maxRequestSize: Long,
+      throttleDelay: Int,
+      priority: Int) extends ToBlockManagerMasterStorageEndpoint
+
+  /**
+   * Driver to Executor message with dynamic shuffle configuration updates.
+   */
+  case class ShuffleConfigUpdate(
+      maxBytesInFlight: Long,
+      maxBlocksInFlightPerAddress: Int,
+      targetRequestSize: Long) extends ToBlockManagerMasterStorageEndpoint
+
   //////////////////////////////////////////////////////////////////////////////////
   // Messages from storage endpoints to the master.
   //////////////////////////////////////////////////////////////////////////////////
@@ -161,5 +179,26 @@ private[spark] object BlockManagerMessages {
     extends ToBlockManagerMaster
 
   case class RemoveShufflePushMergerLocation(host: String) extends ToBlockManagerMaster
+
+  /**
+   * Executor to Driver message containing shuffle load metrics for load balancing.
+   */
+  case class ShuffleLoadMetrics(
+      executorId: String,
+      bytesInFlight: Long,
+      activeConnections: Int,
+      networkCapacity: Long,
+      avgResponseTime: Long,
+      queueDepth: Int,
+      timestamp: Long) extends ToBlockManagerMaster
+
+  /**
+   * Executor to Driver message notifying shuffle fetch completion for load tracking.
+   */
+  case class ShuffleFetchCompleted(
+      executorId: String,
+      bytesTransferred: Long,
+      duration: Long,
+      sourceExecutors: Set[String]) extends ToBlockManagerMaster
 
 }
