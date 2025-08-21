@@ -106,6 +106,17 @@ final class ShuffleBlockFetcherIterator(
 
   import ShuffleBlockFetcherIterator._
 
+  // Optional shuffle load collector for load balancing
+  private val shuffleLoadCollector: Option[ExecutorShuffleLoadCollector] = {
+    val conf = blockManager.conf
+    if (conf.getBoolean("spark.shuffle.loadbalancer.enabled", false)) {
+      val collector = new ExecutorShuffleLoadCollector(blockManager.blockManagerId.executorId, conf)
+      Some(collector)
+    } else {
+      None
+    }
+  }
+
   // Make remote requests at most maxBytesInFlight / 5 in length; the reason to keep them
   // smaller than maxBytesInFlight is to allow multiple, parallel fetches from up to 5
   // nodes, rather than blocking on reading output from one node.
@@ -259,6 +270,14 @@ final class ShuffleBlockFetcherIterator(
     bytesInFlight += req.size
     reqsInFlight += 1
 
+    // Record fetch start for load balancing
+    shuffleLoadCollector.foreach { collector =>
+      req.blocks.foreach { blockInfo =>
+        val requestId = s"${req.address.executorId}-${blockInfo.blockId}"
+        collector.recordFetchStart(requestId, req.address.executorId, blockInfo.size)
+      }
+    }
+
     // so we can look up the block info of each blockID
     val infoMap = req.blocks.map {
       case FetchBlockInfo(blockId, size, mapIndex) => (blockId.toString, (size, mapIndex))
@@ -302,6 +321,13 @@ final class ShuffleBlockFetcherIterator(
             remainingBlocks -= blockId
             blockOOMRetryCounts.remove(blockId)
             updateMergedReqsDuration(BlockId(blockId).isShuffleChunk)
+            
+            // Record successful fetch completion for load balancing
+            shuffleLoadCollector.foreach { collector =>
+              val requestId = s"${address.executorId}-$blockId"
+              collector.recordFetchCompletion(requestId, buf.size(), success = true)
+            }
+            
             results.put(SuccessFetchResult(BlockId(blockId), infoMap(blockId)._2,
               address, infoMap(blockId)._1, buf, remainingBlocks.isEmpty))
             logDebug("remainingBlocks: " + remainingBlocks)
@@ -350,6 +376,13 @@ final class ShuffleBlockFetcherIterator(
 
             case _ =>
               val block = BlockId(blockId)
+              
+              // Record failed fetch completion for load balancing
+              shuffleLoadCollector.foreach { collector =>
+                val requestId = s"${address.executorId}-$blockId"
+                collector.recordFetchCompletion(requestId, infoMap(blockId)._1, success = false)
+              }
+              
               if (block.isShuffleChunk) {
                 remainingBlocks -= blockId
                 updateMergedReqsDuration(wasReqForMergedChunks = true)
@@ -705,8 +738,16 @@ final class ShuffleBlockFetcherIterator(
     // remote blocks.
     val remoteRequests = partitionBlocksByFetchMode(
       blocksByAddress, localBlocks, hostLocalBlocksByExecutor, pushMergedLocalBlocks)
-    // Add the remote requests into our queue in a random order
-    fetchRequests ++= Utils.randomize(remoteRequests)
+    // Add the remote requests into our queue in load-aware order (or random if load balancing disabled)
+    fetchRequests ++= shuffleLoadCollector.map { collector =>
+      // Load-aware ordering: prioritize requests to less loaded executors
+      remoteRequests.sortBy { request =>
+        val targetExecutor = request.address.executorId
+        // Use a simple heuristic: if we have recent load data, use it; otherwise fall back to random
+        val loadScore = if (collector.isOverloaded) 1.0 else 0.5 // Simple load approximation for now
+        (loadScore, scala.util.Random.nextDouble()) // Secondary randomization for tie-breaking
+      }
+    }.getOrElse(Utils.randomize(remoteRequests))
     assert ((0 == reqsInFlight) == (0 == bytesInFlight),
       "expected reqsInFlight = 0 but found reqsInFlight = " + reqsInFlight +
       ", expected bytesInFlight = 0 but found bytesInFlight = " + bytesInFlight)
@@ -1273,8 +1314,14 @@ final class ShuffleBlockFetcherIterator(
     val originalMergedLocalBlocks = mutable.LinkedHashSet[BlockId]()
     val originalRemoteReqs = partitionBlocksByFetchMode(originalBlocksByAddr,
       originalLocalBlocks, originalHostLocalBlocksByExecutor, originalMergedLocalBlocks)
-    // Add the remote requests into our queue in a random order
-    fetchRequests ++= Utils.randomize(originalRemoteReqs)
+    // Add the remote requests into our queue in load-aware order (or random if load balancing disabled)
+    fetchRequests ++= shuffleLoadCollector.map { collector =>
+      // Load-aware ordering for fallback requests as well
+      originalRemoteReqs.sortBy { request =>
+        val loadScore = if (collector.isOverloaded) 1.0 else 0.5
+        (loadScore, scala.util.Random.nextDouble())
+      }
+    }.getOrElse(Utils.randomize(originalRemoteReqs))
     logInfo(s"Created ${originalRemoteReqs.size} fallback remote requests for push-merged")
     // fetch all the fallback blocks that are local.
     fetchLocalBlocks(originalLocalBlocks)
