@@ -126,6 +126,9 @@ class BlockManagerMasterEndpoint(
   /** Whether rdd cache visibility tracking is enabled. */
   private val trackingCacheVisibility: Boolean = conf.get(RDD_CACHE_VISIBILITY_TRACKING_ENABLED)
 
+  /** Shuffle load balancer for intelligent fetch scheduling. */
+  private val shuffleLoadBalancer = new ShuffleLoadBalancer(conf)
+
   override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {
     case RegisterBlockManager(
       id, localDirs, maxOnHeapMemSize, maxOffHeapMemSize, endpoint, isReRegister) =>
@@ -216,6 +219,27 @@ class BlockManagerMasterEndpoint(
 
     case GetReplicateInfoForRDDBlocks(blockManagerId) =>
       context.reply(getReplicateInfoForRDDBlocks(blockManagerId))
+
+    case shuffleLoadMetrics: ShuffleLoadMetrics =>
+      shuffleLoadBalancer.updateExecutorLoad(shuffleLoadMetrics)
+      // Generate and send fetch directive if executor needs load balancing guidance
+      shuffleLoadBalancer.calculateOptimalFetchStrategy(shuffleLoadMetrics.executorId) match {
+        case Some(directive) =>
+          // Send directive to the executor (will be implemented in future phases)
+          logDebug(s"Generated fetch directive for executor ${shuffleLoadMetrics.executorId}: " +
+            s"preferred sources = ${directive.preferredSources}, " +
+            s"max request size = ${directive.maxRequestSize}")
+        case None =>
+          logDebug(s"No fetch directive needed for executor ${shuffleLoadMetrics.executorId}")
+      }
+      context.reply(true)
+
+    case shuffleFetchCompleted: ShuffleFetchCompleted =>
+      // Log completion for future analytics (will be enhanced in later phases)
+      logDebug(s"Shuffle fetch completed for executor ${shuffleFetchCompleted.executorId}: " +
+        s"${shuffleFetchCompleted.bytesTransferred} bytes in ${shuffleFetchCompleted.duration}ms " +
+        s"from sources ${shuffleFetchCompleted.sourceExecutors.mkString(",")}")
+      context.reply(true)
 
     case StopBlockManagerMaster =>
       context.reply(true)
@@ -542,6 +566,8 @@ class BlockManagerMasterEndpoint(
   private def removeExecutor(execId: String): Unit = {
     logInfo("Trying to remove executor " + execId + " from BlockManagerMaster.")
     blockManagerIdByExecutor.get(execId).foreach(removeBlockManager)
+    // Remove executor from shuffle load balancer
+    shuffleLoadBalancer.removeExecutor(execId)
   }
 
   /**
