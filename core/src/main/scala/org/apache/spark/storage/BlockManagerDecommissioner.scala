@@ -91,6 +91,17 @@ private[storage] class BlockManagerDecommissioner(
   private val permanentlyFailedBlocks =
     new java.util.concurrent.ConcurrentHashMap[ShuffleBlockInfo, AtomicInteger]()
 
+  // Overall migration timeout
+  private val migrationTimeoutMs =
+    conf.getLong("spark.storage.decommission.migration.timeout", 3600000L) // 1 hour
+
+  // Health check interval
+  private val healthCheckInterval =
+    conf.getLong("spark.storage.decommission.health.check.interval", 60000L) // 1 minute
+
+  // Last health check time
+  private val lastHealthCheck = new AtomicLong(0)
+
   /**
    * This runnable consumes any shuffle blocks in the queue for migration. This part of a
    * producer/consumer where the main migration loop updates the queue of blocks to be migrated
@@ -519,6 +530,9 @@ private[storage] class BlockManagerDecommissioner(
 
             logMigrationStatus()
             checkForStuckMigration()
+            checkMigrationTimeout()
+            performHealthCheck()
+            
             if (!stoppedRDD) {
               Thread.sleep(sleepInterval)
             }
@@ -580,6 +594,9 @@ private[storage] class BlockManagerDecommissioner(
           
           logMigrationStatus()
           checkForStuckMigration()
+          checkMigrationTimeout()
+          performHealthCheck()
+          
           if (!stoppedShuffle) {
             Thread.sleep(sleepInterval)
           }
@@ -1116,6 +1133,81 @@ private[storage] class BlockManagerDecommissioner(
           logError("Failed to restart stuck migration threads", e)
       }
     }
+  }
+
+  /**
+   * Check if overall migration has exceeded the timeout.
+   */
+  private def checkMigrationTimeout(): Unit = {
+    val currentTime = System.currentTimeMillis()
+    if (migrationStartTime.get() > 0) {
+      val elapsedTime = currentTime - migrationStartTime.get()
+      if (elapsedTime > migrationTimeoutMs) {
+        logError(s"Migration timeout exceeded after ${elapsedTime / 1000}s. " +
+          s"Stopping all migration to prevent indefinite hanging.")
+        stoppedRDD = true
+        stoppedShuffle = true
+        stopped = true
+      }
+    }
+  }
+
+  /**
+   * Perform periodic health checks and diagnostics.
+   */
+  private def performHealthCheck(): Unit = {
+    val currentTime = System.currentTimeMillis()
+    if (currentTime - lastHealthCheck.get() >= healthCheckInterval) {
+      lastHealthCheck.set(currentTime)
+      
+      try {
+        val stats = getMigrationStats()
+        val migrationComplete = isMigrationComplete()
+        
+        logInfo("=== Migration Health Check ===")
+        logInfo(s"Migration complete: $migrationComplete")
+        logInfo(s"RDD blocks migrated: ${stats("rddBlocksMigrated")}")
+        logInfo(s"Shuffle blocks migrated: ${stats("shuffleBlocksMigrated")}")
+        logInfo(s"Migration errors: ${stats("migrationErrors")}")
+        logInfo(s"Remaining shuffles: ${stats("remainingShuffles")}")
+        logInfo(s"Permanently failed blocks: ${stats("permanentlyFailedBlocks")}")
+        logInfo(s"Queued shuffle blocks: ${stats("queuedShuffleBlocks")}")
+        logInfo(s"Active migration threads: ${migrationPeers.values.count(_.keepRunning)}")
+        
+        // Auto-stop if migration appears complete
+        if (migrationComplete && !stopped) {
+          logInfo("Migration appears complete, stopping gracefully")
+          stoppedRDD = true
+          stoppedShuffle = true
+        }
+        
+        // Log peer statistics
+        val peerStats = getPeerMigrationStats()
+        if (peerStats.nonEmpty) {
+          logInfo("Per-peer migration stats:")
+          peerStats.foreach { case (peer, (blocks, bytes)) =>
+            logInfo(s"  ${peer.executorId}: $blocks blocks, " +
+              s"${org.apache.spark.util.Utils.bytesToString(bytes)}")
+          }
+        }
+        
+        logInfo("=== End Health Check ===")
+      } catch {
+        case NonFatal(e) =>
+          logWarning("Error during health check", e)
+      }
+    }
+  }
+
+  /**
+   * Check if migration is complete (all blocks migrated or permanently failed).
+   */
+  private def isMigrationComplete(): Boolean = {
+    val rddComplete = stoppedRDD || (!rddBlocksLeft && bm.getMigratableRDDBlocks().isEmpty)
+    val shuffleComplete = stoppedShuffle || 
+      (shufflesToMigrate.isEmpty && migratingShuffles.size == numMigratedShuffles.get())
+    
+    rddComplete && shuffleComplete
   }
 
   /*
