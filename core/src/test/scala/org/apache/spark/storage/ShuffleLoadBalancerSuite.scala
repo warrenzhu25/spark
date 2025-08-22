@@ -60,6 +60,8 @@ class ShuffleLoadBalancerSuite extends SparkFunSuite {
       activeConnections = 5, // 50% of baseline (10)
       networkCapacity = 1000000L,
       avgResponseTime = 350L, // 250ms above baseline (100ms)
+      avgWaitingTime = 75L,
+      avgNetworkTime = 125L,
       queueDepth = 5, // 100% of baseline (5)
       lastUpdateTime = System.currentTimeMillis()
     )
@@ -77,6 +79,8 @@ class ShuffleLoadBalancerSuite extends SparkFunSuite {
       activeConnections = 8,
       networkCapacity = 1000000L,
       avgResponseTime = 400L,
+      avgWaitingTime = 150L,
+      avgNetworkTime = 250L,
       queueDepth = 8,
       lastUpdateTime = System.currentTimeMillis()
     )
@@ -87,6 +91,8 @@ class ShuffleLoadBalancerSuite extends SparkFunSuite {
       activeConnections = 2,
       networkCapacity = 1000000L,
       avgResponseTime = 50L,
+      avgWaitingTime = 20L,
+      avgNetworkTime = 30L,
       queueDepth = 1,
       lastUpdateTime = System.currentTimeMillis()
     )
@@ -186,6 +192,8 @@ class ShuffleLoadBalancerSuite extends SparkFunSuite {
       activeConnections = 5,
       networkCapacity = 1000000L,
       avgResponseTime = 100L,
+      avgWaitingTime = 40L,
+      avgNetworkTime = 60L,
       queueDepth = 3,
       timestamp = System.currentTimeMillis() - 60000L // 1 minute ago
     )

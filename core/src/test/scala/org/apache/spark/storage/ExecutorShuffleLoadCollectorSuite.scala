@@ -40,14 +40,14 @@ class ExecutorShuffleLoadCollectorSuite extends SparkFunSuite {
     val metrics = ShuffleFetchMetrics("req-1", "executor-2", startTime)
 
     assert(!metrics.isCompleted)
-    assert(metrics.duration >= 0)
+    assert(metrics.totalDuration >= 0)
 
     Thread.sleep(10) // Small delay to ensure duration > 0
     metrics.endTime = Some(System.currentTimeMillis())
     metrics.bytesTransferred = 1024L
 
     assert(metrics.isCompleted)
-    assert(metrics.duration > 0)
+    assert(metrics.totalDuration > 0)
     assert(metrics.bytesTransferred === 1024L)
   }
 

@@ -106,7 +106,7 @@ class ShuffleLoadBalancingMessagesSuite extends SparkFunSuite {
       executorId = "executor-1",
       accumUpdates = Array.empty,
       blockManagerId = blockManagerId,
-      executorUpdates = Map.empty,
+      executorUpdates = scala.collection.mutable.Map.empty[(Int, Int), ExecutorMetrics],
       shuffleLoadMetrics = Some(shuffleMetrics)
     )
 
@@ -121,7 +121,7 @@ class ShuffleLoadBalancingMessagesSuite extends SparkFunSuite {
       executorId = "executor-1",
       accumUpdates = Array.empty,
       blockManagerId = blockManagerId,
-      executorUpdates = Map.empty
+      executorUpdates = scala.collection.mutable.Map.empty[(Int, Int), ExecutorMetrics]
     )
 
     assert(heartbeat.executorId === "executor-1")
