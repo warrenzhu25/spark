@@ -44,6 +44,8 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
     // Just replicate blocks quickly during testing, as there isn't another
     // workload we need to worry about.
     .set(config.STORAGE_DECOMMISSION_REPLICATION_REATTEMPT_INTERVAL, 10L)
+    // Fast peer wait timeout for testing
+    .set("spark.storage.decommission.max.peer.wait.time", "1000")
 
   private def registerShuffleBlocks(
       mockMigratableShuffleResolver: MigratableResolver,
@@ -469,6 +471,73 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
         // Verify total blocks migrated across all peers equals total shuffle blocks
         val totalMigrated = blockCounts.sum
         assert(totalMigrated === shuffleBlocks.size)
+      }
+    } finally {
+      bmDecomManager.stop()
+    }
+  }
+
+  test("block decom manager waits for insufficient peers then times out") {
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+
+    // Create a single shuffle block to migrate
+    val shuffleBlocks = Set((1, 1L, 1))
+    registerShuffleBlocks(migratableShuffleBlockResolver, shuffleBlocks)
+
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks()).thenReturn(Seq())
+    // Start with no peers, then add one peer after timeout should occur
+    when(bm.getPeers(mc.any())).thenReturn(Seq())
+
+    val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm)
+
+    try {
+      bmDecomManager.start()
+
+      // Wait for timeout (1 second configured in test conf)
+      Thread.sleep(1500)
+
+      // Should have stopped shuffle migration due to insufficient peers
+      assert(bmDecomManager.stoppedShuffle === true)
+      assert(bmDecomManager.numMigratedShuffles.get() === 0)
+    } finally {
+      bmDecomManager.stop()
+    }
+  }
+
+  test("block decom manager recovers when peers become available") {
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+
+    // Create shuffle blocks
+    val shuffleBlocks = Set((1, 1L, 1), (1, 2L, 1))
+    registerShuffleBlocks(migratableShuffleBlockResolver, shuffleBlocks)
+
+    val peer1 = BlockManagerId("exec1", "host1", 12345)
+
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks()).thenReturn(Seq())
+
+    val blockTransferService = mock(classOf[BlockTransferService])
+    when(bm.blockTransferService).thenReturn(blockTransferService)
+
+    // Start with no peers
+    when(bm.getPeers(mc.any())).thenReturn(Seq())
+
+    val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm)
+
+    try {
+      bmDecomManager.start()
+
+      // Wait briefly, then add peers
+      Thread.sleep(200)
+      when(bm.getPeers(mc.any())).thenReturn(Seq(peer1))
+
+      eventually(timeout(10.second), interval(100.milliseconds)) {
+        // Should not have stopped and should eventually migrate blocks
+        assert(bmDecomManager.stoppedShuffle === false)
+        assert(bmDecomManager.numMigratedShuffles.get() === shuffleBlocks.size)
       }
     } finally {
       bmDecomManager.stop()

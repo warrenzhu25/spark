@@ -49,6 +49,14 @@ private[storage] class BlockManagerDecommissioner(
   private val shutdownTimeoutMs =
     conf.get(config.STORAGE_DECOMMISSION_REPLICATION_REATTEMPT_INTERVAL) * 10
 
+  // Maximum time to wait for peers before giving up (in milliseconds)
+  private val maxPeerWaitTime =
+    conf.getLong("spark.storage.decommission.max.peer.wait.time", 300000L) // 5 minutes
+
+  // Minimum number of peers required for migration
+  private val minRequiredPeers =
+    conf.getInt("spark.storage.decommission.min.peers", 1)
+
   // Used for tracking if our migrations are complete. Readable for testing
   // Use AtomicLong for better thread safety and performance
   private[storage] val lastRDDMigrationTime = new AtomicLong(0)
@@ -63,6 +71,9 @@ private[storage] class BlockManagerDecommissioner(
 
   // Track migration start time for rate calculations
   private val migrationStartTime = new AtomicLong(0)
+
+  // Track when we started waiting for peers
+  private val peerWaitStartTime = new AtomicLong(0)
 
   // Periodic status logging
   private val statusLogInterval =
@@ -270,7 +281,7 @@ private[storage] class BlockManagerDecommissioner(
   @volatile private var stopped = false
   @volatile private[storage] var stoppedRDD =
     !conf.get(config.STORAGE_DECOMMISSION_RDD_BLOCKS_ENABLED)
-  @volatile private var stoppedShuffle =
+  @volatile private[storage] var stoppedShuffle =
     !conf.get(config.STORAGE_DECOMMISSION_SHUFFLE_BLOCKS_ENABLED)
 
   private val migrationPeers =
@@ -435,11 +446,15 @@ private[storage] class BlockManagerDecommissioner(
     override def run(): Unit = {
       logInfo("Attempting to migrate all RDD blocks")
       while (!stopped && !stoppedRDD) {
-        // Validate if we have peers to migrate to. Otherwise, give up migration.
-        if (!bm.getPeers(false).exists(_ != FallbackStorage.FALLBACK_BLOCK_MANAGER_ID)) {
-          logWarning("No available peers to receive RDD blocks, stop migration.")
-          stoppedRDD = true
+        // Validate if we have peers to migrate to. Otherwise, wait or give up migration.
+        val availablePeers = bm.getPeers(false)
+          .filter(_ != FallbackStorage.FALLBACK_BLOCK_MANAGER_ID)
+        if (availablePeers.size < minRequiredPeers) {
+          handleInsufficientPeers("RDD", availablePeers.size)
+          if (stoppedRDD) return
         } else {
+          // Reset peer wait time when we have sufficient peers
+          peerWaitStartTime.set(0)
           try {
             val startTime = System.nanoTime()
             logInfo("Attempting to migrate all cached RDD blocks")
@@ -542,13 +557,52 @@ private[storage] class BlockManagerDecommissioner(
     }
     // A peer may have entered a decommissioning state, don't transfer any new blocks
     deadPeers.foreach(migrationPeers.get(_).foreach(_.keepRunning = false))
-    // If we don't have anyone to migrate to give up
-    if (!migrationPeers.values.exists(_.keepRunning)) {
-      logWarning("No available peers to receive Shuffle blocks, stop migration.")
-      stoppedShuffle = true
+    // If we don't have anyone to migrate to, handle insufficient peers
+    val activePeers = migrationPeers.values.count(_.keepRunning)
+    if (activePeers < minRequiredPeers) {
+      handleInsufficientPeers("Shuffle", activePeers)
+    } else {
+      // Reset peer wait time when we have sufficient peers
+      peerWaitStartTime.set(0)
     }
     // If we found any new shuffles to migrate or otherwise have not migrated everything.
     newShufflesToMigrate.nonEmpty || migratingShuffles.size > numMigratedShuffles.get()
+  }
+
+  /**
+   * Handle insufficient peers for migration with retry logic.
+   */
+  private def handleInsufficientPeers(blockType: String, currentPeerCount: Int): Unit = {
+    val currentTime = System.currentTimeMillis()
+
+    // Start tracking wait time if not already started
+    if (peerWaitStartTime.get() == 0) {
+      peerWaitStartTime.set(currentTime)
+      logWarning(s"Insufficient peers for $blockType migration: $currentPeerCount < " +
+        s"$minRequiredPeers. Waiting up to ${maxPeerWaitTime / 1000}s for more peers...")
+    }
+
+    val waitTime = currentTime - peerWaitStartTime.get()
+    if (waitTime > maxPeerWaitTime) {
+      logError(s"Giving up $blockType migration after waiting ${waitTime / 1000}s for peers. " +
+        s"Required: $minRequiredPeers, Available: $currentPeerCount")
+      if (blockType == "RDD") {
+        stoppedRDD = true
+      } else {
+        stoppedShuffle = true
+      }
+    } else {
+      val remainingWait = maxPeerWaitTime - waitTime
+      logInfo(s"Still waiting for $blockType migration peers. " +
+        s"Required: $minRequiredPeers, Available: $currentPeerCount. " +
+        s"Will wait ${remainingWait / 1000}s more...")
+      try {
+        Thread.sleep(Math.min(5000L, remainingWait)) // Wait up to 5 seconds before retry
+      } catch {
+        case _: InterruptedException =>
+          if (blockType == "RDD") stoppedRDD = true else stoppedShuffle = true
+      }
+    }
   }
 
   /**
