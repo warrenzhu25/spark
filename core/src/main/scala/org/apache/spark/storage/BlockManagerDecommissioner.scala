@@ -979,21 +979,35 @@ private[storage] class BlockManagerDecommissioner(
   }
 
   /**
-   * Check if migration appears to be stuck and log warning if so.
+   * Check if migration appears to be stuck and take corrective action.
    */
   private def checkForStuckMigration(): Unit = {
     val currentTime = System.currentTimeMillis()
     val stuckThreshold =
       conf.getLong("spark.storage.decommission.stuck.threshold", 300000L) // 5 minutes
+    val recoveryEnabled =
+      conf.getBoolean("spark.storage.decommission.stuck.recovery.enabled", true)
 
+    // Check RDD migration
     if (!stoppedRDD && currentTime - lastRDDMigrationTime.get() > stuckThreshold) {
-      logWarning(s"RDD migration appears stuck - no progress for " +
-        s"${(currentTime - lastRDDMigrationTime.get()) / 1000}s")
+      val stuckTime = (currentTime - lastRDDMigrationTime.get()) / 1000
+      logWarning(s"RDD migration appears stuck - no progress for ${stuckTime}s")
+      
+      if (recoveryEnabled && stuckTime > stuckThreshold * 2 / 1000) {
+        logWarning("Stopping stuck RDD migration to prevent indefinite hanging")
+        stoppedRDD = true
+      }
     }
 
+    // Check shuffle migration
     if (!stoppedShuffle && currentTime - lastShuffleMigrationTime.get() > stuckThreshold) {
-      logWarning(s"Shuffle migration appears stuck - no progress for " +
-        s"${(currentTime - lastShuffleMigrationTime.get()) / 1000}s")
+      val stuckTime = (currentTime - lastShuffleMigrationTime.get()) / 1000
+      logWarning(s"Shuffle migration appears stuck - no progress for ${stuckTime}s")
+      
+      if (recoveryEnabled && stuckTime > stuckThreshold * 2 / 1000) {
+        logWarning("Attempting to recover stuck shuffle migration")
+        recoverStuckShuffleMigration()
+      }
     }
 
     // Check for stuck migration threads
@@ -1005,6 +1019,68 @@ private[storage] class BlockManagerDecommissioner(
       logWarning(s"Potential stuck shuffle migration detected: " +
         s"${stuckThreads.size} active threads, " +
         s"${shufflesToMigrate.size()} blocks in queue")
+      
+      if (recoveryEnabled && currentTime - lastShuffleMigrationTime.get() > stuckThreshold * 3) {
+        logWarning("Restarting stuck shuffle migration threads")
+        restartStuckMigrationThreads(stuckThreads)
+      }
+    }
+  }
+
+  /**
+   * Attempt to recover stuck shuffle migration by cleaning up and restarting.
+   */
+  private def recoverStuckShuffleMigration(): Unit = {
+    try {
+      logInfo("Attempting shuffle migration recovery")
+      
+      // Clean up failed blocks from queue
+      cleanupFailedBlocksFromQueue()
+      
+      // Reset migration state for blocks that may be stuck
+      val queueSize = shufflesToMigrate.size()
+      if (queueSize == 0) {
+        logInfo("No blocks in queue, stopping shuffle migration")
+        stoppedShuffle = true
+      } else {
+        logInfo(s"Recovery complete, $queueSize blocks remain in queue")
+        lastShuffleMigrationTime.set(System.nanoTime())
+      }
+    } catch {
+      case NonFatal(e) =>
+        logError("Failed to recover stuck shuffle migration", e)
+        stoppedShuffle = true
+    }
+  }
+
+  /**
+   * Restart stuck migration threads by stopping and recreating them.
+   */
+  private def restartStuckMigrationThreads(stuckThreads: Map[BlockManagerId, ShuffleMigrationRunnable]): Unit = {
+    try {
+      logInfo(s"Restarting ${stuckThreads.size} stuck migration threads")
+      
+      // Stop stuck threads
+      stuckThreads.values.foreach(_.keepRunning = false)
+      
+      // Remove them from the migration peers map
+      stuckThreads.keys.foreach(migrationPeers.remove)
+      
+      // Recreate threads for these peers if they're still live
+      val livePeers = bm.getPeers(false).toSet
+      val peersToRestart = stuckThreads.keys.filter(livePeers.contains)
+      
+      peersToRestart.foreach { peer =>
+        logInfo(s"Restarting migration thread for $peer")
+        val runnable = new ShuffleMigrationRunnable(peer)
+        shuffleMigrationPool.foreach(_.submit(runnable))
+        migrationPeers(peer) = runnable
+      }
+      
+      logInfo(s"Restarted ${peersToRestart.size} migration threads")
+    } catch {
+      case NonFatal(e) =>
+        logError("Failed to restart stuck migration threads", e)
     }
   }
 
