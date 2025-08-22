@@ -311,6 +311,17 @@ class BlockManagerMaster(
     }
   }
 
+  /** Send shuffle load metrics to the driver. */
+  def sendShuffleLoadMetrics(metrics: ShuffleLoadMetrics): Boolean = {
+    try {
+      driverEndpoint.askSync[Boolean](metrics)
+    } catch {
+      case e: Exception =>
+        logWarning(s"Failed to send shuffle load metrics: ${e.getMessage}")
+        false
+    }
+  }
+
 }
 
 private[spark] object BlockManagerMaster {

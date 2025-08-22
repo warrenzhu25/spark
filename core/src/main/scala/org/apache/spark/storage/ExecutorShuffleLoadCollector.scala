@@ -34,12 +34,23 @@ private[spark] case class ShuffleFetchMetrics(
     requestId: String,
     sourceExecutor: String,
     startTime: Long,
+    var queuedTime: Option[Long] = None,
+    var networkStartTime: Option[Long] = None,
     var endTime: Option[Long] = None,
     var bytesTransferred: Long = 0L,
     var failed: Boolean = false) {
 
-  def duration: Long = endTime.map(_ - startTime).getOrElse(System.currentTimeMillis() - startTime)
+  def totalDuration: Long = endTime.map(_ - startTime).getOrElse(
+    System.currentTimeMillis() - startTime)
+  def waitingTime: Long = networkStartTime.map(_ - startTime).getOrElse(0L)
+  def networkTime: Long = (networkStartTime, endTime) match {
+    case (Some(start), Some(end)) => end - start
+    case (Some(start), None) => System.currentTimeMillis() - start
+    case _ => 0L
+  }
+  def queueingTime: Long = queuedTime.map(_ - startTime).getOrElse(0L)
   def isCompleted: Boolean = endTime.isDefined
+  def isNetworkActive: Boolean = networkStartTime.isDefined && endTime.isEmpty
 }
 
 /**
@@ -57,18 +68,22 @@ private[spark] class ExecutorShuffleLoadCollector(
   private val totalRequests = new AtomicLong(0L)
   private val totalBytes = new AtomicLong(0L)
   private val totalDuration = new AtomicLong(0L)
+  private val totalWaitingTime = new AtomicLong(0L)
+  private val totalNetworkTime = new AtomicLong(0L)
 
   // Track individual fetch requests for detailed metrics
   private val activeFetches = new ConcurrentHashMap[String, ShuffleFetchMetrics]()
 
   // Configuration
-  private val reportingInterval = conf.getLong("spark.shuffle.loadbalancer.reportingIntervalMs", 5000L)
-  private val maxConcurrentFetches = conf.getInt("spark.shuffle.loadbalancer.maxConcurrentFetches", 100)
-  private val networkCapacityBytes = conf.getLong("spark.shuffle.loadbalancer.networkCapacityBytes", 
-    100L * 1024L * 1024L) // Default 100 MB/s
+  private val reportingInterval = conf.getLong(
+    "spark.shuffle.loadbalancer.reportingIntervalMs", 5000L)
+  private val maxConcurrentFetches = conf.getInt(
+    "spark.shuffle.loadbalancer.maxConcurrentFetches", 100)
+  private val networkCapacityBytes = conf.getLong(
+    "spark.shuffle.loadbalancer.networkCapacityBytes", 100L * 1024L * 1024L)
 
   // Scheduled executor for periodic reporting
-  private val reportingExecutor: ScheduledExecutorService = 
+  private val reportingExecutor: ScheduledExecutorService =
     ThreadUtils.newDaemonSingleThreadScheduledExecutor("shuffle-load-reporter")
   private var reportingTask: Option[ScheduledFuture[_]] = None
 
@@ -80,7 +95,7 @@ private[spark] class ExecutorShuffleLoadCollector(
    */
   def start(reporter: ShuffleLoadMetrics => Unit): Unit = {
     metricsReporter = Some(reporter)
-    
+
     val task = reportingExecutor.scheduleAtFixedRate(
       new Runnable {
         override def run(): Unit = {
@@ -96,7 +111,7 @@ private[spark] class ExecutorShuffleLoadCollector(
       reportingInterval,
       TimeUnit.MILLISECONDS
     )
-    
+
     reportingTask = Some(task)
     logInfo(s"Started shuffle load collector for executor $executorId with " +
       s"${reportingInterval}ms reporting interval")
@@ -118,11 +133,11 @@ private[spark] class ExecutorShuffleLoadCollector(
   def recordFetchStart(requestId: String, sourceExecutor: String, requestSize: Long): Unit = {
     val metrics = ShuffleFetchMetrics(requestId, sourceExecutor, System.currentTimeMillis())
     activeFetches.put(requestId, metrics)
-    
+
     bytesInFlight.addAndGet(requestSize)
     activeConnections.incrementAndGet()
     queueDepth.incrementAndGet()
-    
+
     logDebug(s"Started fetch request $requestId from $sourceExecutor, size: $requestSize bytes")
   }
 
@@ -133,11 +148,11 @@ private[spark] class ExecutorShuffleLoadCollector(
     Option(activeFetches.remove(requestId)).foreach { metrics =>
       val endTime = System.currentTimeMillis()
       val duration = endTime - metrics.startTime
-      
+
       metrics.endTime = Some(endTime)
       metrics.bytesTransferred = bytesTransferred
       metrics.failed = !success
-      
+
       // Update global counters
       bytesInFlight.addAndGet(-bytesTransferred)
       activeConnections.decrementAndGet()
@@ -145,7 +160,9 @@ private[spark] class ExecutorShuffleLoadCollector(
       totalRequests.incrementAndGet()
       totalBytes.addAndGet(bytesTransferred)
       totalDuration.addAndGet(duration)
-      
+      totalWaitingTime.addAndGet(metrics.waitingTime)
+      totalNetworkTime.addAndGet(metrics.networkTime)
+
       logDebug(s"Completed fetch request $requestId: $bytesTransferred bytes in ${duration}ms, " +
         s"success: $success")
     }
@@ -166,14 +183,35 @@ private[spark] class ExecutorShuffleLoadCollector(
   }
 
   /**
+   * Record when a fetch request moves from queued to active network state.
+   */
+  def recordFetchNetworkStart(requestId: String): Unit = {
+    Option(activeFetches.get(requestId)).foreach { metrics =>
+      metrics.networkStartTime = Some(System.currentTimeMillis())
+      logDebug(s"Network transfer started for request $requestId after " +
+        s"${metrics.waitingTime}ms waiting time")
+    }
+  }
+
+  /**
+   * Record when a fetch request is initially queued (before network transfer).
+   */
+  def recordFetchQueued(requestId: String): Unit = {
+    Option(activeFetches.get(requestId)).foreach { metrics =>
+      metrics.queuedTime = Some(System.currentTimeMillis())
+      queueDepth.incrementAndGet()
+      logDebug(s"Request $requestId queued after ${metrics.queueingTime}ms")
+    }
+  }
+
+  /**
    * Get current load metrics snapshot.
    */
   def getCurrentMetrics: ShuffleLoadMetrics = {
-    val avgResponseTime = if (totalRequests.get() > 0) {
-      totalDuration.get() / totalRequests.get()
-    } else {
-      0L
-    }
+    val requests = totalRequests.get()
+    val avgResponseTime = if (requests > 0) totalDuration.get() / requests else 0L
+    val avgWaitingTime = if (requests > 0) totalWaitingTime.get() / requests else 0L
+    val avgNetworkTime = if (requests > 0) totalNetworkTime.get() / requests else 0L
 
     ShuffleLoadMetrics(
       executorId = executorId,
@@ -181,6 +219,8 @@ private[spark] class ExecutorShuffleLoadCollector(
       activeConnections = activeConnections.get(),
       networkCapacity = networkCapacityBytes,
       avgResponseTime = avgResponseTime,
+      avgWaitingTime = avgWaitingTime,
+      avgNetworkTime = avgNetworkTime,
       queueDepth = queueDepth.get(),
       timestamp = System.currentTimeMillis()
     )
@@ -197,7 +237,8 @@ private[spark] class ExecutorShuffleLoadCollector(
         s"bytesInFlight=${metrics.bytesInFlight}, " +
         s"activeConnections=${metrics.activeConnections}, " +
         s"queueDepth=${metrics.queueDepth}, " +
-        s"avgResponseTime=${metrics.avgResponseTime}ms")
+        s"avgResponseTime=${metrics.avgResponseTime}ms " +
+        s"(waiting=${metrics.avgWaitingTime}ms, network=${metrics.avgNetworkTime}ms)")
     }
   }
 
@@ -207,16 +248,16 @@ private[spark] class ExecutorShuffleLoadCollector(
   def isOverloaded: Boolean = {
     val currentMetrics = getCurrentMetrics
     val loadThreshold = conf.getDouble("spark.shuffle.loadbalancer.overloadThreshold", 0.8)
-    
+
     val capacityUtilization = if (networkCapacityBytes > 0) {
       currentMetrics.bytesInFlight.toDouble / networkCapacityBytes
     } else {
       0.0
     }
-    
+
     val connectionPressure = currentMetrics.activeConnections.toDouble / maxConcurrentFetches
-    val queuePressure = currentMetrics.queueDepth.toDouble / 10.0 // Assume 10 as reasonable queue depth
-    
+    val queuePressure = currentMetrics.queueDepth.toDouble / 10.0
+
     val loadScore = (capacityUtilization + connectionPressure + queuePressure) / 3.0
     loadScore > loadThreshold
   }
@@ -226,7 +267,7 @@ private[spark] class ExecutorShuffleLoadCollector(
    */
   def getCompletedFetchStats: Map[String, Any] = {
     val completedFetches = activeFetches.asScala.values.filter(_.isCompleted).toSeq
-    
+
     if (completedFetches.isEmpty) {
       Map(
         "count" -> 0,
@@ -237,9 +278,9 @@ private[spark] class ExecutorShuffleLoadCollector(
     } else {
       val successCount = completedFetches.count(!_.failed)
       val totalBytes = completedFetches.map(_.bytesTransferred).sum
-      val avgDuration = completedFetches.map(_.duration).sum / completedFetches.size
+      val avgDuration = completedFetches.map(_.totalDuration).sum / completedFetches.size
       val successRate = successCount.toDouble / completedFetches.size
-      
+
       Map(
         "count" -> completedFetches.size,
         "totalBytes" -> totalBytes,
@@ -259,6 +300,8 @@ private[spark] class ExecutorShuffleLoadCollector(
     totalRequests.set(0L)
     totalBytes.set(0L)
     totalDuration.set(0L)
+    totalWaitingTime.set(0L)
+    totalNetworkTime.set(0L)
     activeFetches.clear()
   }
 }

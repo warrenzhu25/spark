@@ -189,6 +189,8 @@ private[spark] object BlockManagerMessages {
       activeConnections: Int,
       networkCapacity: Long,
       avgResponseTime: Long,
+      avgWaitingTime: Long,
+      avgNetworkTime: Long,
       queueDepth: Int,
       timestamp: Long) extends ToBlockManagerMaster
 

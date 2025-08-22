@@ -20,7 +20,6 @@ package org.apache.spark.storage
 import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.JavaConverters._
-import scala.collection.mutable
 
 import org.apache.spark.SparkConf
 import org.apache.spark.internal.Logging
@@ -35,6 +34,8 @@ private[spark] case class ExecutorLoadState(
     activeConnections: Int,
     networkCapacity: Long,
     avgResponseTime: Long,
+    avgWaitingTime: Long,
+    avgNetworkTime: Long,
     queueDepth: Int,
     lastUpdateTime: Long) {
 
@@ -43,12 +44,19 @@ private[spark] case class ExecutorLoadState(
    * Score ranges from 0.0 (no load) to 1.0+ (overloaded).
    */
   def loadScore: Double = {
-    val capacityUtilization = if (networkCapacity > 0) bytesInFlight.toDouble / networkCapacity else 0.0
+    val capacityUtilization = if (networkCapacity > 0) {
+      bytesInFlight.toDouble / networkCapacity
+    } else {
+      0.0
+    }
     val connectionPressure = activeConnections.toDouble / 10.0 // Assume 10 as baseline
     val queuePressure = queueDepth.toDouble / 5.0 // Assume 5 as baseline
-    val responsePressure = Math.max(0.0, (avgResponseTime - 100.0) / 500.0) // 100ms baseline, 500ms max
+    val responsePressure = Math.max(0.0, (avgResponseTime - 100.0) / 500.0) // 100ms baseline
+    val waitingPressure = Math.max(0.0, (avgWaitingTime - 50.0) / 200.0) // 50ms baseline, 200ms max
+    val networkPressure = Math.max(0.0, (avgNetworkTime - 50.0) / 300.0) // 50ms baseline, 300ms max
 
-    (capacityUtilization + connectionPressure + queuePressure + responsePressure) / 4.0
+    (capacityUtilization + connectionPressure + queuePressure + responsePressure +
+      waitingPressure + networkPressure) / 6.0
   }
 
   /**
@@ -63,7 +71,8 @@ private[spark] case class ExecutorLoadState(
    * Calculate the recommended maximum request size for this executor.
    */
   def recommendedRequestSize(baseRequestSize: Long, conf: SparkConf): Long = {
-    val minRequestSize = conf.getLong("spark.shuffle.loadbalancer.minRequestSize", 1024 * 1024) // 1MB
+    val minRequestSize = conf.getLong(
+      "spark.shuffle.loadbalancer.minRequestSize", 1024 * 1024) // 1MB
     val reductionFactor = Math.max(0.1, 1.0 - loadScore)
     Math.max(minRequestSize, (baseRequestSize * reductionFactor).toLong)
   }
@@ -79,7 +88,8 @@ private[spark] class ShuffleLoadBalancer(conf: SparkConf) extends Logging {
   private val executorLoadStates = new ConcurrentHashMap[String, ExecutorLoadState]()
 
   // Configuration parameters
-  private val loadUpdateTimeoutMs = conf.getLong("spark.shuffle.loadbalancer.updateTimeoutMs", 30000)
+  private val loadUpdateTimeoutMs = conf.getLong(
+    "spark.shuffle.loadbalancer.updateTimeoutMs", 30000)
   private val maxPreferredSources = conf.getInt("spark.shuffle.loadbalancer.maxPreferredSources", 3)
 
   /**
@@ -92,12 +102,15 @@ private[spark] class ShuffleLoadBalancer(conf: SparkConf) extends Logging {
       activeConnections = metrics.activeConnections,
       networkCapacity = metrics.networkCapacity,
       avgResponseTime = metrics.avgResponseTime,
+      avgWaitingTime = metrics.avgWaitingTime,
+      avgNetworkTime = metrics.avgNetworkTime,
       queueDepth = metrics.queueDepth,
       lastUpdateTime = metrics.timestamp
     )
 
     executorLoadStates.put(metrics.executorId, loadState)
-    logDebug(s"Updated load state for executor ${metrics.executorId}: load score = ${loadState.loadScore}")
+    logDebug(s"Updated load state for executor ${metrics.executorId}: " +
+      s"load score = ${loadState.loadScore}")
   }
 
   /**
@@ -128,7 +141,13 @@ private[spark] class ShuffleLoadBalancer(conf: SparkConf) extends Logging {
       val recommendedRequestSize = targetState.recommendedRequestSize(
         conf.getLong("spark.reducer.maxSizeInFlight", 48) * 1024 * 1024 / 5, conf)
       val throttleDelay = if (targetState.isOverloaded(conf)) 10 else 0
-      val priority = if (targetState.loadScore < 0.5) 1 else if (targetState.loadScore < 0.8) 2 else 3
+      val priority = if (targetState.loadScore < 0.5) {
+        1
+      } else if (targetState.loadScore < 0.8) {
+        2
+      } else {
+        3
+      }
 
       ShuffleFetchDirective(
         targetExecutor = targetExecutor,

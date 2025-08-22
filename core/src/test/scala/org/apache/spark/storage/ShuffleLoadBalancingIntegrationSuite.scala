@@ -28,31 +28,24 @@ class ShuffleLoadBalancingIntegrationSuite extends SparkFunSuite {
     val conf = new SparkConf()
       .set("spark.shuffle.loadbalancer.overloadThreshold", "0.6")
       .set("spark.shuffle.loadbalancer.reportingIntervalMs", "100")
-    
     val loadBalancer = new ShuffleLoadBalancer(conf)
     val collector = new ExecutorShuffleLoadCollector("test-executor", conf)
-    
     try {
       // Test basic integration
       val reportedMetrics = mutable.ArrayBuffer[ShuffleLoadMetrics]()
-      
       collector.start { metrics =>
         reportedMetrics += metrics
         loadBalancer.updateExecutorLoad(metrics)
       }
-      
       // Add some load to the collector
       collector.recordFetchStart("req-1", "source-executor", 1024L)
-      
       // Wait for metrics to be reported
       Thread.sleep(200)
-      
       // Verify metrics were reported and processed by load balancer
       assert(reportedMetrics.nonEmpty)
       val loadState = loadBalancer.getExecutorLoadState("test-executor")
       assert(loadState.isDefined)
       assert(loadState.get.bytesInFlight > 0)
-      
     } finally {
       collector.stop()
     }
@@ -61,9 +54,7 @@ class ShuffleLoadBalancingIntegrationSuite extends SparkFunSuite {
   test("Load balancer generates appropriate directives based on collector metrics") {
     val conf = new SparkConf()
       .set("spark.shuffle.loadbalancer.overloadThreshold", "0.5")
-    
     val loadBalancer = new ShuffleLoadBalancer(conf)
-    
     // Add a heavily loaded executor
     val heavyLoadMetrics = ShuffleLoadMetrics(
       executorId = "heavy-executor",
@@ -71,10 +62,11 @@ class ShuffleLoadBalancingIntegrationSuite extends SparkFunSuite {
       activeConnections = 10,
       networkCapacity = 10 * 1024 * 1024L, // 10MB capacity
       avgResponseTime = 500L,
+      avgWaitingTime = 200L,
+      avgNetworkTime = 300L,
       queueDepth = 8,
       timestamp = System.currentTimeMillis()
     )
-    
     // Add a lightly loaded executor
     val lightLoadMetrics = ShuffleLoadMetrics(
       executorId = "light-executor",
@@ -82,23 +74,21 @@ class ShuffleLoadBalancingIntegrationSuite extends SparkFunSuite {
       activeConnections = 2,
       networkCapacity = 10 * 1024 * 1024L, // 10MB capacity
       avgResponseTime = 50L,
+      avgWaitingTime = 20L,
+      avgNetworkTime = 30L,
       queueDepth = 1,
       timestamp = System.currentTimeMillis()
     )
-    
     loadBalancer.updateExecutorLoad(heavyLoadMetrics)
     loadBalancer.updateExecutorLoad(lightLoadMetrics)
-    
     // Get strategy for heavy executor
     val heavyStrategy = loadBalancer.calculateOptimalFetchStrategy("heavy-executor")
     assert(heavyStrategy.isDefined)
-    
     val directive = heavyStrategy.get
     assert(directive.targetExecutor === "heavy-executor")
     assert(directive.preferredSources.contains("light-executor")) // Should prefer light executor
     assert(directive.throttleDelay > 0) // Should throttle heavy executor
     assert(directive.priority === 3) // High priority due to high load
-    
     // Light executor should get better treatment
     val lightStrategy = loadBalancer.calculateOptimalFetchStrategy("light-executor")
     assert(lightStrategy.isDefined)
@@ -108,17 +98,14 @@ class ShuffleLoadBalancingIntegrationSuite extends SparkFunSuite {
   test("Cluster load statistics reflect current state") {
     val conf = new SparkConf()
     val loadBalancer = new ShuffleLoadBalancer(conf)
-    
     // Initially empty cluster
     val emptyStats = loadBalancer.getClusterLoadStats
     assert(emptyStats("activeExecutors") === 0.0)
-    
     // Add executors with different loads
     loadBalancer.updateExecutorLoad(ShuffleLoadMetrics(
-      "executor-1", 1000000L, 5, 10000000L, 100L, 2, System.currentTimeMillis()))
+      "executor-1", 1000000L, 5, 10000000L, 100L, 40L, 60L, 2, System.currentTimeMillis()))
     loadBalancer.updateExecutorLoad(ShuffleLoadMetrics(
-      "executor-2", 5000000L, 8, 10000000L, 200L, 5, System.currentTimeMillis()))
-    
+      "executor-2", 5000000L, 8, 10000000L, 200L, 100L, 100L, 5, System.currentTimeMillis()))
     val stats = loadBalancer.getClusterLoadStats
     assert(stats("activeExecutors") === 2.0)
     assert(stats("avgLoadScore") > 0.0)
@@ -129,20 +116,17 @@ class ShuffleLoadBalancingIntegrationSuite extends SparkFunSuite {
     val conf = new SparkConf()
       .set("spark.reducer.maxSizeInFlight", "48") // 48MB base
     val loadBalancer = new ShuffleLoadBalancer(conf)
-    
     // Add executors with varying loads
-    val lightLoad = ShuffleLoadMetrics("light", 1000000L, 2, 10000000L, 50L, 1, System.currentTimeMillis())
-    val heavyLoad = ShuffleLoadMetrics("heavy", 8000000L, 8, 10000000L, 400L, 8, System.currentTimeMillis())
-    
+    val lightLoad = ShuffleLoadMetrics("light", 1000000L, 2, 10000000L, 50L, 20L, 30L, 1,
+      System.currentTimeMillis())
+    val heavyLoad = ShuffleLoadMetrics("heavy", 8000000L, 8, 10000000L, 400L, 150L, 250L, 8,
+      System.currentTimeMillis())
     loadBalancer.updateExecutorLoad(lightLoad)
     loadBalancer.updateExecutorLoad(heavyLoad)
-    
     val configUpdates = loadBalancer.generateConfigUpdates()
     assert(configUpdates.length === 2)
-    
     val lightConfig = configUpdates.find(_._1 == "light").get._2
     val heavyConfig = configUpdates.find(_._1 == "heavy").get._2
-    
     // Heavy executor should get reduced limits
     assert(heavyConfig.maxBlocksInFlightPerAddress === 3)
     // Light executor should get normal/increased limits
@@ -153,16 +137,12 @@ class ShuffleLoadBalancingIntegrationSuite extends SparkFunSuite {
     val conf = new SparkConf()
       .set("spark.shuffle.loadbalancer.overloadThreshold", "0.5")
       .set("spark.shuffle.loadbalancer.networkCapacityBytes", "1048576") // 1MB
-    
     val collector = new ExecutorShuffleLoadCollector("test-executor", conf)
-    
     // Initially not overloaded
     assert(!collector.isOverloaded)
-    
     // Add load close to capacity
     collector.recordFetchStart("req-1", "source-1", 600000L) // 600KB
     assert(collector.isOverloaded) // Should be overloaded (60% > 50% threshold)
-    
     // Complete the request - should reduce load
     collector.recordFetchCompletion("req-1", 600000L, success = true)
     assert(!collector.isOverloaded) // Should no longer be overloaded
@@ -171,16 +151,14 @@ class ShuffleLoadBalancingIntegrationSuite extends SparkFunSuite {
   test("Load balancing respects executor removal") {
     val conf = new SparkConf()
     val loadBalancer = new ShuffleLoadBalancer(conf)
-    
     // Add executor
-    val metrics = ShuffleLoadMetrics("executor-1", 1000L, 1, 1000000L, 100L, 1, System.currentTimeMillis())
+    val metrics = ShuffleLoadMetrics("executor-1", 1000L, 1, 1000000L, 100L, 40L, 60L, 1,
+      System.currentTimeMillis())
     loadBalancer.updateExecutorLoad(metrics)
     assert(loadBalancer.getExecutorLoadState("executor-1").isDefined)
-    
     // Remove executor
     loadBalancer.removeExecutor("executor-1")
     assert(loadBalancer.getExecutorLoadState("executor-1").isEmpty)
-    
     // Cluster stats should reflect removal
     val stats = loadBalancer.getClusterLoadStats
     assert(stats("activeExecutors") === 0.0)

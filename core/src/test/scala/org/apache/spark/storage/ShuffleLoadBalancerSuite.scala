@@ -37,6 +37,8 @@ class ShuffleLoadBalancerSuite extends SparkFunSuite {
       activeConnections: Int = 5,
       networkCapacity: Long = 1000000L,
       avgResponseTime: Long = 100L,
+      avgWaitingTime: Long = 50L,
+      avgNetworkTime: Long = 50L,
       queueDepth: Int = 3): ShuffleLoadMetrics = {
     ShuffleLoadMetrics(
       executorId = executorId,
@@ -44,6 +46,8 @@ class ShuffleLoadBalancerSuite extends SparkFunSuite {
       activeConnections = activeConnections,
       networkCapacity = networkCapacity,
       avgResponseTime = avgResponseTime,
+      avgWaitingTime = avgWaitingTime,
+      avgNetworkTime = avgNetworkTime,
       queueDepth = queueDepth,
       timestamp = System.currentTimeMillis()
     )
@@ -107,9 +111,12 @@ class ShuffleLoadBalancerSuite extends SparkFunSuite {
     val loadBalancer = createLoadBalancer()
 
     // Add multiple executors with different load levels
-    loadBalancer.updateExecutorLoad(createLoadMetrics("executor-1", bytesInFlight = 100000L)) // low load
-    loadBalancer.updateExecutorLoad(createLoadMetrics("executor-2", bytesInFlight = 500000L)) // medium load
-    loadBalancer.updateExecutorLoad(createLoadMetrics("executor-3", bytesInFlight = 900000L)) // high load
+    loadBalancer.updateExecutorLoad(
+      createLoadMetrics("executor-1", bytesInFlight = 100000L)) // low load
+    loadBalancer.updateExecutorLoad(
+      createLoadMetrics("executor-2", bytesInFlight = 500000L)) // medium load
+    loadBalancer.updateExecutorLoad(
+      createLoadMetrics("executor-3", bytesInFlight = 900000L)) // high load
 
     val strategy = loadBalancer.calculateOptimalFetchStrategy("executor-3")
     assert(strategy.isDefined)
@@ -125,10 +132,14 @@ class ShuffleLoadBalancerSuite extends SparkFunSuite {
     val loadBalancer = createLoadBalancer()
 
     // Add executors with different load levels
-    loadBalancer.updateExecutorLoad(createLoadMetrics("executor-1", bytesInFlight = 100000L)) // lowest load
-    loadBalancer.updateExecutorLoad(createLoadMetrics("executor-2", bytesInFlight = 300000L)) // medium load
-    loadBalancer.updateExecutorLoad(createLoadMetrics("executor-3", bytesInFlight = 800000L)) // highest load
-    loadBalancer.updateExecutorLoad(createLoadMetrics("executor-4", bytesInFlight = 200000L)) // low load
+    loadBalancer.updateExecutorLoad(
+      createLoadMetrics("executor-1", bytesInFlight = 100000L)) // lowest load
+    loadBalancer.updateExecutorLoad(
+      createLoadMetrics("executor-2", bytesInFlight = 300000L)) // medium load
+    loadBalancer.updateExecutorLoad(
+      createLoadMetrics("executor-3", bytesInFlight = 800000L)) // highest load
+    loadBalancer.updateExecutorLoad(
+      createLoadMetrics("executor-4", bytesInFlight = 200000L)) // low load
 
     val preferredSources = loadBalancer.getPreferredSourceExecutors("executor-3")
 
@@ -190,8 +201,10 @@ class ShuffleLoadBalancerSuite extends SparkFunSuite {
     val loadBalancer = createLoadBalancer()
 
     // Add executors with different load levels
-    loadBalancer.updateExecutorLoad(createLoadMetrics("executor-1", bytesInFlight = 100000L)) // low load
-    loadBalancer.updateExecutorLoad(createLoadMetrics("executor-2", bytesInFlight = 800000L)) // high load
+    loadBalancer.updateExecutorLoad(
+      createLoadMetrics("executor-1", bytesInFlight = 100000L)) // low load
+    loadBalancer.updateExecutorLoad(
+      createLoadMetrics("executor-2", bytesInFlight = 800000L)) // high load
 
     val configUpdates = loadBalancer.generateConfigUpdates()
     assert(configUpdates.length === 2)

@@ -30,6 +30,8 @@ class ShuffleLoadBalancingMessagesSuite extends SparkFunSuite {
       activeConnections = 5,
       networkCapacity = 1000000L,
       avgResponseTime = 100L,
+      avgWaitingTime = 50L,
+      avgNetworkTime = 50L,
       queueDepth = 3,
       timestamp = System.currentTimeMillis()
     )
@@ -39,6 +41,8 @@ class ShuffleLoadBalancingMessagesSuite extends SparkFunSuite {
     assert(metrics.activeConnections === 5)
     assert(metrics.networkCapacity === 1000000L)
     assert(metrics.avgResponseTime === 100L)
+    assert(metrics.avgWaitingTime === 50L)
+    assert(metrics.avgNetworkTime === 50L)
     assert(metrics.queueDepth === 3)
   }
 
@@ -91,6 +95,8 @@ class ShuffleLoadBalancingMessagesSuite extends SparkFunSuite {
       activeConnections = 5,
       networkCapacity = 1000000L,
       avgResponseTime = 100L,
+      avgWaitingTime = 50L,
+      avgNetworkTime = 50L,
       queueDepth = 3,
       timestamp = System.currentTimeMillis()
     )
