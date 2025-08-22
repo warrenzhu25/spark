@@ -161,12 +161,21 @@ private[storage] class BlockManagerDecommissioner(
     private def nextShuffleBlockToMigrate(): Option[(ShuffleBlockInfo, Int)] = {
       // Check if this peer should take the next block based on load balancing
       if (!Thread.currentThread().isInterrupted && keepRunning) {
-        val nextBlock = getNextBlockForPeer(peer)
-        if (nextBlock.isEmpty) {
-          // No block assigned to this peer, wait briefly
-          Thread.sleep(100)
+        try {
+          val nextBlock = getNextBlockForPeer(peer)
+          if (nextBlock.isEmpty) {
+            // No block assigned to this peer, wait briefly
+            Thread.sleep(100)
+          }
+          nextBlock
+        } catch {
+          case _: InterruptedException =>
+            Thread.currentThread().interrupt()
+            None
+          case NonFatal(e) =>
+            logWarning(s"Error getting next block for $peer", e)
+            None
         }
-        nextBlock
       } else {
         None
       }
@@ -385,64 +394,80 @@ private[storage] class BlockManagerDecommissioner(
   /**
    * Load-aware block assignment to peers. Uses a combination of round-robin and load balancing
    * to ensure even distribution of shuffle blocks across peers.
+   * Thread-safe implementation with proper synchronization.
    */
   private def getNextBlockForPeer(targetPeer: BlockManagerId): Option[(ShuffleBlockInfo, Int)] = {
-    if (shufflesToMigrate.isEmpty) {
-      return None
-    }
+    // Use synchronized block to prevent race conditions during queue access
+    this.synchronized {
+      if (shufflesToMigrate.isEmpty) {
+        return None
+      }
 
-    // Get current load for all active peers
-    val activePeers = migrationPeers.keys.filter(peer =>
-      migrationPeers.get(peer).exists(_.keepRunning)).toSeq
+      // Get current load for all active peers - snapshot to avoid inconsistency
+      val activePeersSnapshot = migrationPeers.toMap.filter { case (peer, runnable) =>
+        runnable.keepRunning
+      }.keys.toSeq
 
-    if (activePeers.isEmpty) {
-      return None
-    }
+      if (activePeersSnapshot.isEmpty) {
+        return None
+      }
 
-    // Peek at the next block to determine optimal placement
-    val peekResult = Option(shufflesToMigrate.peek())
-    peekResult match {
-      case Some((shuffleBlockInfo, _)) =>
-        // Find the best target for this shuffle based on existing shuffle distribution
-        findBestTargetForShuffle(shuffleBlockInfo.shuffleId, activePeers) match {
-          case Some(bestTarget) if bestTarget == targetPeer =>
-            // This peer is the best target, assign the block
-            Option(shufflesToMigrate.poll()) match {
-              case Some(block) =>
-                // Track assignment to this peer
-                peerMigrationCounts.computeIfAbsent(targetPeer, _ => new AtomicInteger(0))
-                  .incrementAndGet()
-                Some(block)
-              case None => None
-            }
-          case Some(bestTarget) =>
-            // Another peer is better suited, don't assign to this peer
-            logDebug(s"Block ${shuffleBlockInfo} better suited for ${bestTarget.executorId} " +
-              s"than ${targetPeer.executorId}")
-            None
-          case None =>
-            // Fallback to original load balancing if shuffle size info unavailable
-            val peerLoads = activePeers.map { peer =>
-              val count = peerMigrationCounts.getOrDefault(peer, new AtomicInteger(0)).get()
-              (peer, count)
-            }
+      // Peek at the next block to determine optimal placement
+      val peekResult = Option(shufflesToMigrate.peek())
+      peekResult match {
+        case Some((shuffleBlockInfo, _)) =>
+          // Check if this block is permanently failed
+          if (permanentlyFailedBlocks.containsKey(shuffleBlockInfo)) {
+            // Remove permanently failed block and try next
+            shufflesToMigrate.poll()
+            return getNextBlockForPeer(targetPeer)
+          }
 
-            val minLoad = peerLoads.minBy(_._2)._2
-            val lightLoadedPeers = peerLoads.filter(_._2 <= minLoad + 1).map(_._1)
-
-            if (lightLoadedPeers.contains(targetPeer)) {
+          // Find the best target for this shuffle based on existing shuffle distribution
+          findBestTargetForShuffle(shuffleBlockInfo.shuffleId, activePeersSnapshot) match {
+            case Some(bestTarget) if bestTarget == targetPeer =>
+              // This peer is the best target, assign the block
               Option(shufflesToMigrate.poll()) match {
                 case Some(block) =>
+                  // Track assignment to this peer
                   peerMigrationCounts.computeIfAbsent(targetPeer, _ => new AtomicInteger(0))
                     .incrementAndGet()
                   Some(block)
                 case None => None
               }
-            } else {
+            case Some(bestTarget) =>
+              // Another peer is better suited, don't assign to this peer
+              logDebug(s"Block ${shuffleBlockInfo} better suited for ${bestTarget.executorId} " +
+                s"than ${targetPeer.executorId}")
               None
-            }
-        }
-      case None => None
+            case None =>
+              // Fallback to original load balancing if shuffle size info unavailable
+              val peerLoads = activePeersSnapshot.map { peer =>
+                val count = peerMigrationCounts.getOrDefault(peer, new AtomicInteger(0)).get()
+                (peer, count)
+              }
+
+              if (peerLoads.nonEmpty) {
+                val minLoad = peerLoads.minBy(_._2)._2
+                val lightLoadedPeers = peerLoads.filter(_._2 <= minLoad + 1).map(_._1)
+
+                if (lightLoadedPeers.contains(targetPeer)) {
+                  Option(shufflesToMigrate.poll()) match {
+                    case Some(block) =>
+                      peerMigrationCounts.computeIfAbsent(targetPeer, _ => new AtomicInteger(0))
+                        .incrementAndGet()
+                      Some(block)
+                    case None => None
+                  }
+                } else {
+                  None
+                }
+              } else {
+                None
+              }
+          }
+        case None => None
+      }
     }
   }
 
@@ -671,20 +696,22 @@ private[storage] class BlockManagerDecommissioner(
    * Clean up failed blocks from the migration queue periodically.
    */
   private def cleanupFailedBlocksFromQueue(): Unit = {
-    val iterator = shufflesToMigrate.iterator()
-    var removedCount = 0
-    
-    while (iterator.hasNext) {
-      val (shuffleBlock, retryCount) = iterator.next()
-      if (permanentlyFailedBlocks.containsKey(shuffleBlock) || 
-          retryCount >= maxReplicationFailuresForDecommission) {
-        iterator.remove()
-        removedCount += 1
+    this.synchronized {
+      val iterator = shufflesToMigrate.iterator()
+      var removedCount = 0
+      
+      while (iterator.hasNext) {
+        val (shuffleBlock, retryCount) = iterator.next()
+        if (permanentlyFailedBlocks.containsKey(shuffleBlock) || 
+            retryCount >= maxReplicationFailuresForDecommission) {
+          iterator.remove()
+          removedCount += 1
+        }
       }
-    }
-    
-    if (removedCount > 0) {
-      logInfo(s"Cleaned up $removedCount failed blocks from migration queue")
+      
+      if (removedCount > 0) {
+        logInfo(s"Cleaned up $removedCount failed blocks from migration queue")
+      }
     }
   }
 
@@ -1055,32 +1082,39 @@ private[storage] class BlockManagerDecommissioner(
 
   /**
    * Restart stuck migration threads by stopping and recreating them.
+   * Thread-safe implementation.
    */
   private def restartStuckMigrationThreads(stuckThreads: Map[BlockManagerId, ShuffleMigrationRunnable]): Unit = {
-    try {
-      logInfo(s"Restarting ${stuckThreads.size} stuck migration threads")
-      
-      // Stop stuck threads
-      stuckThreads.values.foreach(_.keepRunning = false)
-      
-      // Remove them from the migration peers map
-      stuckThreads.keys.foreach(migrationPeers.remove)
-      
-      // Recreate threads for these peers if they're still live
-      val livePeers = bm.getPeers(false).toSet
-      val peersToRestart = stuckThreads.keys.filter(livePeers.contains)
-      
-      peersToRestart.foreach { peer =>
-        logInfo(s"Restarting migration thread for $peer")
-        val runnable = new ShuffleMigrationRunnable(peer)
-        shuffleMigrationPool.foreach(_.submit(runnable))
-        migrationPeers(peer) = runnable
+    this.synchronized {
+      try {
+        logInfo(s"Restarting ${stuckThreads.size} stuck migration threads")
+        
+        // Stop stuck threads
+        stuckThreads.values.foreach(_.keepRunning = false)
+        
+        // Remove them from the migration peers map
+        stuckThreads.keys.foreach(migrationPeers.remove)
+        
+        // Recreate threads for these peers if they're still live
+        val livePeers = bm.getPeers(false).toSet
+        val peersToRestart = stuckThreads.keys.filter(livePeers.contains)
+        
+        peersToRestart.foreach { peer =>
+          logInfo(s"Restarting migration thread for $peer")
+          // Reset peer stats
+          peerMigrationCounts.putIfAbsent(peer, new AtomicInteger(0))
+          peerMigrationBytes.putIfAbsent(peer, new AtomicLong(0))
+          
+          val runnable = new ShuffleMigrationRunnable(peer)
+          shuffleMigrationPool.foreach(_.submit(runnable))
+          migrationPeers(peer) = runnable
+        }
+        
+        logInfo(s"Restarted ${peersToRestart.size} migration threads")
+      } catch {
+        case NonFatal(e) =>
+          logError("Failed to restart stuck migration threads", e)
       }
-      
-      logInfo(s"Restarted ${peersToRestart.size} migration threads")
-    } catch {
-      case NonFatal(e) =>
-        logError("Failed to restart stuck migration threads", e)
     }
   }
 
