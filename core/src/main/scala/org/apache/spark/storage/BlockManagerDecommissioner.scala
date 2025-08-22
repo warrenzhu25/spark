@@ -87,6 +87,10 @@ private[storage] class BlockManagerDecommissioner(
   // Track consecutive rounds with no progress
   private val consecutiveIdleRounds = new AtomicInteger(0)
 
+  // Track permanently failed blocks to avoid infinite retries
+  private val permanentlyFailedBlocks =
+    new java.util.concurrent.ConcurrentHashMap[ShuffleBlockInfo, AtomicInteger]()
+
   /**
    * This runnable consumes any shuffle blocks in the queue for migration. This part of a
    * producer/consumer where the main migration loop updates the queue of blocks to be migrated
@@ -148,6 +152,8 @@ private[storage] class BlockManagerDecommissioner(
         logWarning(s"Give up migrating $shuffleBlock since it's been " +
           s"failed for $maxReplicationFailuresForDecommission times")
         migrationErrors.incrementAndGet()
+        // Mark this block as permanently failed to avoid future retries
+        permanentlyFailedBlocks.put(shuffleBlock, new AtomicInteger(failureNum))
         false
       }
     }
@@ -541,6 +547,12 @@ private[storage] class BlockManagerDecommissioner(
 
           logInfo(s"Finished current round refreshing migratable shuffle blocks, " +
             s"waiting for ${sleepInterval}ms before the next round refreshing.")
+          
+          // Periodically clean up failed blocks from queue
+          if (consecutiveNoNewBlocks % 5 == 0) {
+            cleanupFailedBlocksFromQueue()
+          }
+          
           logMigrationStatus()
           checkForStuckMigration()
           if (!stoppedShuffle) {
@@ -575,13 +587,20 @@ private[storage] class BlockManagerDecommissioner(
     // Update the queue of shuffles to be migrated
     logInfo("Start refreshing migratable shuffle blocks")
     val localShuffles = bm.migratableResolver.getStoredShuffles().toSet
-    val newShufflesToMigrate = (localShuffles.diff(migratingShuffles)).toSeq
+    
+    // Filter out permanently failed blocks
+    val eligibleShuffles = localShuffles.filterNot(permanentlyFailedBlocks.containsKey)
+    val newShufflesToMigrate = (eligibleShuffles.diff(migratingShuffles)).toSeq
       .sortBy(b => (b.shuffleId, b.mapId))
+    
     shufflesToMigrate.addAll(newShufflesToMigrate.map(x => (x, 0)).asJava)
     migratingShuffles ++= newShufflesToMigrate
+    
     val remainedShuffles = migratingShuffles.size - numMigratedShuffles.get()
+    val failedCount = permanentlyFailedBlocks.size()
     logInfo(s"${newShufflesToMigrate.size} of ${localShuffles.size} local shuffles " +
-      s"are added. In total, $remainedShuffles shuffles are remained.")
+      s"are added. In total, $remainedShuffles shuffles are remained, " +
+      s"$failedCount permanently failed.")
 
     // Update the threads doing migrations
     val livePeerSet = bm.getPeers(false).toSet
@@ -645,6 +664,27 @@ private[storage] class BlockManagerDecommissioner(
         case _: InterruptedException =>
           if (blockType == "RDD") stoppedRDD = true else stoppedShuffle = true
       }
+    }
+  }
+
+  /**
+   * Clean up failed blocks from the migration queue periodically.
+   */
+  private def cleanupFailedBlocksFromQueue(): Unit = {
+    val iterator = shufflesToMigrate.iterator()
+    var removedCount = 0
+    
+    while (iterator.hasNext) {
+      val (shuffleBlock, retryCount) = iterator.next()
+      if (permanentlyFailedBlocks.containsKey(shuffleBlock) || 
+          retryCount >= maxReplicationFailuresForDecommission) {
+        iterator.remove()
+        removedCount += 1
+      }
+    }
+    
+    if (removedCount > 0) {
+      logInfo(s"Cleaned up $removedCount failed blocks from migration queue")
     }
   }
 
@@ -864,7 +904,9 @@ private[storage] class BlockManagerDecommissioner(
       "migrationErrors" -> migrationErrors.get().toLong,
       "lastRDDMigrationTime" -> lastRDDMigrationTime.get(),
       "lastShuffleMigrationTime" -> lastShuffleMigrationTime.get(),
-      "remainingShuffles" -> (migratingShuffles.size - numMigratedShuffles.get()).toLong
+      "remainingShuffles" -> (migratingShuffles.size - numMigratedShuffles.get()).toLong,
+      "permanentlyFailedBlocks" -> permanentlyFailedBlocks.size().toLong,
+      "queuedShuffleBlocks" -> shufflesToMigrate.size().toLong
     )
   }
 
