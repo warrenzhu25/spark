@@ -80,6 +80,13 @@ private[storage] class BlockManagerDecommissioner(
     conf.getLong("spark.storage.decommission.status.log.interval", 30000L)
   private var lastStatusLog = 0L
 
+  // Maximum consecutive rounds with no progress before auto-stopping
+  private val maxIdleRounds =
+    conf.getInt("spark.storage.decommission.max.idle.rounds", 10)
+
+  // Track consecutive rounds with no progress
+  private val consecutiveIdleRounds = new AtomicInteger(0)
+
   /**
    * This runnable consumes any shuffle blocks in the queue for migration. This part of a
    * producer/consumer where the main migration loop updates the queue of blocks to be migrated
@@ -162,7 +169,7 @@ private[storage] class BlockManagerDecommissioner(
     override def run(): Unit = {
       logInfo(s"Starting shuffle block migration thread for $peer")
       // Once a block fails to transfer to an executor stop trying to transfer more blocks
-      while (keepRunning) {
+      while (keepRunning && !Thread.currentThread().isInterrupted) {
         try {
           nextShuffleBlockToMigrate() match {
             case Some((shuffleBlockInfo, retryCount)) =>
@@ -466,9 +473,24 @@ private[storage] class BlockManagerDecommissioner(
               s"Migrated ${migrationResult.migratedCount} blocks, " +
               s"failed ${migrationResult.failedCount} blocks. " +
               s"Waiting ${sleepInterval}ms before next round.")
+
+            // Check for progress and idle termination
+            if (migrationResult.migratedCount == 0 && !migrationResult.hasMoreBlocks) {
+              val idleCount = consecutiveIdleRounds.incrementAndGet()
+              logInfo(s"No RDD migration progress for $idleCount consecutive rounds")
+              if (idleCount >= maxIdleRounds) {
+                logInfo("Stopping RDD migration due to no progress for multiple rounds")
+                stoppedRDD = true
+              }
+            } else {
+              consecutiveIdleRounds.set(0) // Reset idle counter on progress
+            }
+
             logMigrationStatus()
             checkForStuckMigration()
-            Thread.sleep(sleepInterval)
+            if (!stoppedRDD) {
+              Thread.sleep(sleepInterval)
+            }
           } catch {
             case _: InterruptedException =>
               logInfo(s"Stop RDD blocks migration${if (!stopped && !stoppedRDD) " unexpectedly"}.")
@@ -490,19 +512,40 @@ private[storage] class BlockManagerDecommissioner(
 
   private val shuffleBlockMigrationRefreshRunnable = new Runnable {
     val sleepInterval = conf.get(config.STORAGE_DECOMMISSION_REPLICATION_REATTEMPT_INTERVAL)
+    private var consecutiveNoNewBlocks = 0
 
     override def run(): Unit = {
       logInfo("Attempting to migrate all shuffle blocks")
       while (!stopped && !stoppedShuffle) {
         try {
           val startTime = System.nanoTime()
-          shuffleBlocksLeft = refreshMigratableShuffleBlocks()
+          val previousMigrated = numMigratedShuffles.get()
+          val hasNewBlocks = refreshMigratableShuffleBlocks()
+          shuffleBlocksLeft = hasNewBlocks
           lastShuffleMigrationTime.set(startTime)
+
+          // Check if migration is making progress
+          val currentMigrated = numMigratedShuffles.get()
+          val madeMigrationProgress = currentMigrated > previousMigrated
+
+          if (!hasNewBlocks && !madeMigrationProgress) {
+            consecutiveNoNewBlocks += 1
+            logInfo(s"No shuffle migration progress for $consecutiveNoNewBlocks rounds")
+            if (consecutiveNoNewBlocks >= maxIdleRounds) {
+              logInfo("Stopping shuffle migration due to no progress for multiple rounds")
+              stoppedShuffle = true
+            }
+          } else {
+            consecutiveNoNewBlocks = 0 // Reset counter on progress
+          }
+
           logInfo(s"Finished current round refreshing migratable shuffle blocks, " +
             s"waiting for ${sleepInterval}ms before the next round refreshing.")
           logMigrationStatus()
           checkForStuckMigration()
-          Thread.sleep(sleepInterval)
+          if (!stoppedShuffle) {
+            Thread.sleep(sleepInterval)
+          }
         } catch {
           case _: InterruptedException if stopped =>
             logInfo("Stop refreshing migratable shuffle blocks.")
