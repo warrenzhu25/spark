@@ -23,6 +23,7 @@ import org.apache.spark.{MapOutputTracker, SparkEnv}
 import org.apache.spark.internal.Logging
 import org.apache.spark.rpc.{IsolatedThreadSafeRpcEndpoint, RpcCallContext, RpcEnv}
 import org.apache.spark.storage.BlockManagerMessages._
+import org.apache.spark.storage.ShuffleRebalanceMessages._
 import org.apache.spark.util.{ThreadUtils, Utils}
 
 /**
@@ -93,6 +94,12 @@ class BlockManagerStorageEndpoint(
       // 2. Once a replica of a visible block is cached and reported, driver will also ask the
       //    the block manager to mark the block as visible immediately.
       context.reply(blockManager.blockInfoManager.tryMarkBlockAsVisible(blockId))
+
+    case SendShuffleBlocks(targetExecutor, blocks, operationId, priority) =>
+      // Handle shuffle rebalancing request from driver
+      doAsync[Boolean](s"transferring ${blocks.length} blocks to $targetExecutor", context) {
+        handleShuffleBlockTransfer(targetExecutor, blocks, operationId, priority)
+      }
   }
 
   private def doAsync[T](actionMessage: String, context: RpcCallContext)(body: => T): Unit = {
@@ -108,6 +115,44 @@ class BlockManagerStorageEndpoint(
     future.failed.foreach { t =>
       logError(s"Error in $actionMessage", t)
       context.sendFailure(t)
+    }
+  }
+
+  /**
+   * Handle shuffle block transfer request from the driver.
+   * This method transfers the requested blocks to the target executor using message-based approach.
+   */
+  private def handleShuffleBlockTransfer(
+      targetExecutor: BlockManagerId,
+      blocks: Seq[(BlockId, Long)],
+      operationId: String,
+      priority: Int): Boolean = {
+    logInfo(s"Received request to transfer ${blocks.length} blocks to $targetExecutor " +
+      s"(operation: $operationId)")
+
+    try {
+      // Use Spark's existing block replication mechanism for each block
+      val maxReplicas = 1 // One additional copy on target executor
+      var allSuccessful = true
+      blocks.foreach { case (blockId, _) =>
+        val success = blockManager.replicateBlock(blockId, Set(targetExecutor), maxReplicas)
+        if (!success) {
+          logWarning(s"Failed to replicate block $blockId to $targetExecutor")
+          allSuccessful = false
+        }
+      }
+      if (allSuccessful) {
+        logInfo(s"Successfully transferred ${blocks.length} blocks to $targetExecutor " +
+          s"for permanent multi-location storage")
+        true
+      } else {
+        logWarning(s"Some blocks failed to transfer to $targetExecutor")
+        false
+      }
+    } catch {
+      case e: Exception =>
+        logError(s"Failed to transfer blocks to $targetExecutor: ${e.getMessage}", e)
+        false
     }
   }
 
