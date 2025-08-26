@@ -18,10 +18,13 @@
 package org.apache.spark.storage
 
 import java.io.IOException
+import java.util.concurrent.TimeoutException
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable
+import scala.concurrent.duration.Duration
 import scala.util.control.NonFatal
 
 import org.apache.spark._
@@ -43,12 +46,91 @@ private[storage] class BlockManagerDecommissioner(
   private val fallbackStorage = FallbackStorage.getFallbackStorage(conf)
   private val maxReplicationFailuresForDecommission =
     conf.get(config.STORAGE_DECOMMISSION_MAX_REPLICATION_FAILURE_PER_BLOCK)
+  private val enableSizeBasedTimeouts =
+    conf.get(config.STORAGE_DECOMMISSION_SHUFFLE_UPLOAD_TIMEOUT_ENABLED)
+  private val timeoutMbPerSec =
+    conf.get(config.STORAGE_DECOMMISSION_SHUFFLE_UPLOAD_TIMEOUT_MB_PER_SEC)
+
+  // Hardcoded thresholds (no longer configurable)
+  private val minUploadThroughputBytesPerSec = 100L * 1024 * 1024 // 100 MB/sec
 
   // Used for tracking if our migrations are complete. Readable for testing
   @volatile private[storage] var lastRDDMigrationTime: Long = 0
   @volatile private[storage] var lastShuffleMigrationTime: Long = 0
   @volatile private[storage] var rddBlocksLeft: Boolean = true
   @volatile private[storage] var shuffleBlocksLeft: Boolean = true
+
+  // Track upload statistics per executor for shuffle migration
+  private[storage] case class UploadStats(
+    var totalBytes: Long = 0L,
+    var totalTimeMs: Long = 0L,
+    var firstUploadTime: Long = 0L,
+    var timeoutCount: Int = 0) {
+
+    def addUpload(bytes: Long, durationMs: Long): Unit = {
+      if (firstUploadTime == 0L) {
+        firstUploadTime = System.currentTimeMillis()
+      }
+      totalBytes += bytes
+      totalTimeMs += durationMs
+    }
+
+    def addTimeout(): Unit = {
+      timeoutCount += 1
+    }
+
+    def currentThroughputBytesPerSec: Double = {
+      if (totalTimeMs == 0L) 0.0 else (totalBytes * 1000.0) / totalTimeMs
+    }
+
+    def isTooSlow(minThroughput: Long): Boolean = {
+      totalTimeMs > 0 && currentThroughputBytesPerSec < minThroughput
+    }
+
+    def hasTooManyTimeouts(maxTimeouts: Int = 3): Boolean = {
+      timeoutCount >= maxTimeouts
+    }
+  }
+
+  private[storage] val uploadStats =
+    mutable.Map[BlockManagerId, UploadStats]()
+
+  /**
+   * Calculate upload timeout based on block size and expected throughput.
+   * Uses simple MB/sec rate with automatic scaling and minimum timeout.
+   */
+  private[storage] def calculateUploadTimeout(blockSizeBytes: Long): Duration = {
+    val blockSizeMB = blockSizeBytes.toDouble / (1024 * 1024)
+    val expectedSeconds = blockSizeMB / timeoutMbPerSec
+    val timeoutWithBuffer = (expectedSeconds * 1.5).toLong // 50% buffer for network variance
+    val finalTimeoutSeconds = Math.max(30, timeoutWithBuffer) // Minimum 30 seconds
+    Duration(finalTimeoutSeconds, TimeUnit.SECONDS)
+  }
+
+  /**
+   * Upload a block with optional size-based timeout.
+   * When size-based timeouts are enabled, throws TimeoutException if upload exceeds timeout.
+   * When disabled, waits indefinitely (original behavior).
+   */
+  private def uploadBlockSyncWithTimeout(
+      hostname: String,
+      port: Int,
+      execId: String,
+      blockId: BlockId,
+      buffer: org.apache.spark.network.buffer.ManagedBuffer,
+      level: StorageLevel,
+      blockSizeBytes: Long): Unit = {
+    val future = bm.blockTransferService.uploadBlock(
+      hostname, port, execId, blockId, buffer, level, null)
+
+    if (enableSizeBasedTimeouts) {
+      val timeout = calculateUploadTimeout(blockSizeBytes)
+      ThreadUtils.awaitResult(future, timeout)
+    } else {
+      // Original behavior: wait indefinitely
+      ThreadUtils.awaitResult(future, Duration.Inf)
+    }
+  }
 
   /**
    * This runnable consumes any shuffle blocks in the queue for migration. This part of a
@@ -68,6 +150,36 @@ private[storage] class BlockManagerDecommissioner(
    */
   private class ShuffleMigrationRunnable(peer: BlockManagerId) extends Runnable {
     @volatile var keepRunning = true
+
+    private def isThroughputTooSlow(): Boolean = {
+      uploadStats.get(peer) match {
+        case Some(stats) => stats.isTooSlow(minUploadThroughputBytesPerSec)
+        case None => false
+      }
+    }
+
+    private def hasTooManyTimeouts(): Boolean = {
+      if (enableSizeBasedTimeouts) {
+        uploadStats.get(peer) match {
+          case Some(stats) => stats.hasTooManyTimeouts()
+          case None => false
+        }
+      } else {
+        false // Never consider timeouts when feature is disabled
+      }
+    }
+
+    private def recordUpload(bytes: Long, durationMs: Long): Unit = {
+      val stats = uploadStats.getOrElseUpdate(peer, UploadStats())
+      stats.addUpload(bytes, durationMs)
+    }
+
+    private def recordTimeout(): Unit = {
+      if (enableSizeBasedTimeouts) {
+        val stats = uploadStats.getOrElseUpdate(peer, UploadStats())
+        stats.addTimeout()
+      }
+    }
 
     private def allowRetry(shuffleBlock: ShuffleBlockInfo, failureNum: Int): Boolean = {
       if (failureNum < maxReplicationFailuresForDecommission) {
@@ -104,32 +216,65 @@ private[storage] class BlockManagerDecommissioner(
           // We only migrate a shuffle block when both index file and data file exist.
           if (blocks.isEmpty) {
             logInfo(s"Ignore deleted shuffle block $shuffleBlockInfo")
+          } else if (isThroughputTooSlow()) {
+            val stats = uploadStats(peer)
+            logInfo(s"Upload throughput too slow for $peer " +
+              s"(${Utils.bytesToString(stats.currentThroughputBytesPerSec.toLong)}/sec < " +
+              s"${Utils.bytesToString(minUploadThroughputBytesPerSec)}/sec), stopping migration")
+            keepRunning = false
+            // Re-add the block to queue for other threads to pick up
+            if (!allowRetry(shuffleBlockInfo, retryCount)) {
+              numMigratedShuffles.incrementAndGet()
+            }
+          } else if (hasTooManyTimeouts()) {
+            val stats = uploadStats(peer)
+            logInfo(s"Too many upload timeouts for $peer " +
+              s"(${stats.timeoutCount} timeouts), stopping migration")
+            keepRunning = false
+            // Re-add the block to queue for other threads to pick up
+            if (!allowRetry(shuffleBlockInfo, retryCount)) {
+              numMigratedShuffles.incrementAndGet()
+            }
           } else {
             logInfo(s"Got migration sub-blocks $blocks. Trying to migrate $shuffleBlockInfo " +
               s"to $peer ($retryCount / $maxReplicationFailuresForDecommission)")
             // Migrate the components of the blocks.
             try {
+              val totalBytes = blocks.map(b => b._2.size()).sum
               val startTime = System.currentTimeMillis()
               if (fallbackStorage.isDefined && peer == FallbackStorage.FALLBACK_BLOCK_MANAGER_ID) {
                 fallbackStorage.foreach(_.copy(shuffleBlockInfo, bm))
               } else {
                 blocks.foreach { case (blockId, buffer) =>
                   logDebug(s"Migrating sub-block ${blockId}")
-                  bm.blockTransferService.uploadBlockSync(
+                  uploadBlockSyncWithTimeout(
                     peer.host,
                     peer.port,
                     peer.executorId,
                     blockId,
                     buffer,
                     StorageLevel.DISK_ONLY,
-                    null) // class tag, we don't need for shuffle
+                    buffer.size())
                   logDebug(s"Migrated sub-block $blockId")
                 }
               }
+              val durationMs = System.currentTimeMillis() - startTime
+              recordUpload(totalBytes, durationMs)
+              val stats = uploadStats(peer)
               logInfo(s"Migrated $shuffleBlockInfo (" +
-                s"size: ${Utils.bytesToString(blocks.map(b => b._2.size()).sum)}) to $peer " +
-                s"in ${System.currentTimeMillis() - startTime} ms")
+                s"size: ${Utils.bytesToString(totalBytes)}) to $peer " +
+                s"in ${durationMs} ms. " +
+                s"Throughput: " +
+                s"${Utils.bytesToString(stats.currentThroughputBytesPerSec.toLong)}/sec")
             } catch {
+              case e: TimeoutException =>
+                recordTimeout()
+                val totalBytes = blocks.map(b => b._2.size()).sum
+                val timeout = calculateUploadTimeout(totalBytes)
+                logWarning(s"Upload timeout for $shuffleBlockInfo to $peer " +
+                  s"(${Utils.bytesToString(totalBytes)} in ${timeout.toMillis}ms), " +
+                  s"total timeouts: ${uploadStats(peer).timeoutCount}")
+                keepRunning = false
               case e @ ( _ : IOException | _ : SparkException) =>
                 // If a block got deleted before netty opened the file handle, then trying to
                 // load the blocks now will fail. This is most likely to occur if we start
