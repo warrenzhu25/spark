@@ -20,6 +20,7 @@ package org.apache.spark
 import java.util.concurrent.TimeUnit
 
 import scala.collection.mutable
+import scala.collection.mutable.ArrayBuffer
 
 import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito._
@@ -1858,6 +1859,103 @@ class ExecutorAllocationManagerSuite extends SparkFunSuite {
       .set(config.DYN_ALLOCATION_DIAGNOSIS_INTERVAL.key, "1s")
     val managerDefault = createManager(confDefault, clock = clock)
     assert(managerDefault != null)
+  }
+
+  test("diagnosis events posted to event listener") {
+    val clock = new ManualClock(2020L)
+    val conf = createConf(1, 20, 1)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_ENABLED, true)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_INTERVAL.key, "1s")
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_LOG_LEVEL, "WARN")
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_POST_EVENTS, true)
+
+    // Create a custom listener to capture diagnosis events
+    val capturedEvents = new ArrayBuffer[SparkListenerExecutorAllocationDiagnosis]()
+    val customListener = new SparkListener {
+      override def onExecutorAllocationDiagnosis(
+          diagnosis: SparkListenerExecutorAllocationDiagnosis): Unit = {
+        capturedEvents += diagnosis
+      }
+    }
+
+    val manager = createManager(conf, clock = clock)
+    listenerBus.addToManagementQueue(customListener)
+
+    // Add 3 executors
+    (1 to 3).foreach { i => onExecutorAddedDefaultProfile(manager, s"executor-$i") }
+    assert(manager.executorMonitor.executorCount === 3)
+
+    // Make executor-1 busy with 1 task
+    val taskInfo1 = createTaskInfo(1, 1, "executor-1")
+    post(SparkListenerTaskStart(1, 1, taskInfo1))
+
+    // Let some time pass for idle executors
+    clock.advance(5000) // 5 seconds
+
+    // Set max needed executors to 1 (less than running 3)
+    post(SparkListenerStageSubmitted(createStageInfo(0, 1)))
+    manager invokePrivate _updateAndSyncNumExecutorsTarget(clock.nanoTime())
+    assert(maxNumExecutorsNeededPerResourceProfile(manager, defaultProfile) == 1)
+
+    // Trigger diagnosis after interval
+    clock.advance(1000) // diagnosis interval is 1s
+    schedule(manager)
+
+    // Verify event was posted
+    assert(capturedEvents.nonEmpty, "Expected diagnosis event to be posted")
+    assert(capturedEvents.size === 1, s"Expected 1 event, got ${capturedEvents.size}")
+
+    val event = capturedEvents.head
+    assert(event.time === clock.getTimeMillis())
+    assert(event.runningExecutors === 3)
+    assert(event.maxNeededExecutors === 1)
+    assert(event.intervalSeconds === 1)
+
+    // Verify summary data
+    val summary = event.summary
+    assert(summary.running === 3)
+    assert(summary.idle === 2) // executor-2 and executor-3 are idle
+    assert(summary.idleTime.isDefined)
+    assert(summary.idleTime.get.min === 6) // 6 seconds idle time
+    assert(summary.activeTasks.isDefined)
+    assert(summary.activeTasks.get.max === 1) // executor-1 has 1 active task
+  }
+
+  test("diagnosis events can be disabled via configuration") {
+    val clock = new ManualClock(2020L)
+    val conf = createConf(1, 20, 1)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_ENABLED, true)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_INTERVAL.key, "1s")
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_POST_EVENTS, false) // Disable events
+
+    // Create a custom listener to capture diagnosis events
+    val capturedEvents = new ArrayBuffer[SparkListenerExecutorAllocationDiagnosis]()
+    val customListener = new SparkListener {
+      override def onExecutorAllocationDiagnosis(
+          diagnosis: SparkListenerExecutorAllocationDiagnosis): Unit = {
+        capturedEvents += diagnosis
+      }
+    }
+
+    val manager = createManager(conf, clock = clock)
+    listenerBus.addToManagementQueue(customListener)
+
+    // Add 2 executors
+    (1 to 2).foreach { i => onExecutorAddedDefaultProfile(manager, s"executor-$i") }
+    assert(manager.executorMonitor.executorCount === 2)
+
+    // Set max needed executors to 0 (less than running 2)
+    post(SparkListenerStageSubmitted(createStageInfo(0, 0)))
+    manager invokePrivate _updateAndSyncNumExecutorsTarget(clock.nanoTime())
+    assert(maxNumExecutorsNeededPerResourceProfile(manager, defaultProfile) == 0)
+
+    // Let time pass and trigger diagnosis
+    clock.advance(5000)
+    clock.advance(1000) // diagnosis interval is 1s
+    schedule(manager)
+
+    // Verify NO event was posted when disabled
+    assert(capturedEvents.isEmpty, "Expected no events when postEvents is disabled")
   }
 
   test("SPARK-26758 check executor target number after idle time out ") {
