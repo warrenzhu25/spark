@@ -708,6 +708,85 @@ package object config {
       .booleanConf
       .createWithDefault(false)
 
+  // Shuffle Rebalance Configuration
+
+  private[spark] val SHUFFLE_REBALANCE_ENABLED =
+    ConfigBuilder("spark.shuffle.rebalance.enabled")
+      .doc("Whether to enable shuffle data rebalancing between executors to balance " +
+        "data distribution")
+      .version("3.6.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  private[spark] val SHUFFLE_REBALANCE_THRESHOLD =
+    ConfigBuilder("spark.shuffle.rebalance.threshold")
+      .doc("Imbalance ratio threshold above which shuffle rebalancing is triggered. " +
+        "If max_executor_size / avg_executor_size > threshold, rebalancing is initiated")
+      .version("3.6.0")
+      .doubleConf
+      .checkValue(_ > 1.0, "Threshold must be greater than 1.0")
+      .createWithDefault(1.5)
+
+  private[spark] val SHUFFLE_REBALANCE_MIN_SIZE_MB =
+    ConfigBuilder("spark.shuffle.rebalance.minSizeMB")
+      .doc("Minimum size difference in MB required between executors to trigger " +
+        "shuffle rebalancing")
+      .version("3.6.0")
+      .longConf
+      .checkValue(_ > 0, "Minimum size must be positive")
+      .createWithDefault(100L)
+
+  private[spark] val SHUFFLE_REBALANCE_CHECK_INTERVAL_MS =
+    ConfigBuilder("spark.shuffle.rebalance.checkIntervalMs")
+      .doc("Interval in milliseconds to check for shuffle imbalance")
+      .version("3.6.0")
+      .longConf
+      .checkValue(_ > 0, "Check interval must be positive")
+      .createWithDefault(30000L)
+
+  private[spark] val SHUFFLE_REBALANCE_MAX_CONCURRENT =
+    ConfigBuilder("spark.shuffle.rebalance.maxConcurrent")
+      .doc("Maximum number of concurrent shuffle rebalancing operations")
+      .version("3.6.0")
+      .intConf
+      .checkValue(_ > 0, "Max concurrent must be positive")
+      .createWithDefault(2)
+
+  // Multi-location shuffle support
+
+  private[spark] val SHUFFLE_REBALANCE_ENABLE_MULTI_LOCATION =
+    ConfigBuilder("spark.shuffle.rebalance.enableMultiLocation")
+      .doc("Whether to enable multi-location support for shuffle blocks during rebalancing")
+      .version("3.6.0")
+      .booleanConf
+      .createWithDefault(true)
+
+  private[spark] val SHUFFLE_REBALANCE_MAX_LOCATIONS_PER_BLOCK =
+    ConfigBuilder("spark.shuffle.rebalance.maxLocationsPerBlock")
+      .doc("Maximum number of locations to maintain for each shuffle block")
+      .version("3.6.0")
+      .intConf
+      .checkValue(_ > 0, "Max locations must be positive")
+      .createWithDefault(2)
+
+  private[spark] val SHUFFLE_REBALANCE_CLEANUP_DELAY_MS =
+    ConfigBuilder("spark.shuffle.rebalance.cleanupDelayMs")
+      .doc("Delay in milliseconds before cleaning up old shuffle block locations after rebalancing")
+      .version("3.6.0")
+      .longConf
+      .checkValue(_ >= 0, "Cleanup delay must be non-negative")
+      .createWithDefault(60000L) // 1 minute
+
+  private[spark] val SHUFFLE_REBALANCE_LOCATION_SELECTION_STRATEGY =
+    ConfigBuilder("spark.shuffle.rebalance.locationSelectionStrategy")
+      .doc("Strategy for selecting best location when multiple are available: " +
+        "ROUND_ROBIN, LOCALITY_PREFERRED, LOAD_BALANCED")
+      .version("3.6.0")
+      .stringConf
+      .checkValue(Set("ROUND_ROBIN", "LOCALITY_PREFERRED", "LOAD_BALANCED").contains,
+        "Invalid location selection strategy")
+      .createWithDefault("LOCALITY_PREFERRED")
+
   private[spark] val SHUFFLE_SERVICE_DB_ENABLED =
     ConfigBuilder("spark.shuffle.service.db.enabled")
       .doc("Whether to use db in ExternalShuffleService. Note that this only affects " +
