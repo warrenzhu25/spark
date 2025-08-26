@@ -87,10 +87,16 @@ private[spark] class ShuffleLoadBalancer(conf: SparkConf) extends Logging {
   // Thread-safe map to store executor load states
   private val executorLoadStates = new ConcurrentHashMap[String, ExecutorLoadState]()
 
+  // Historical data for predictive load balancing
+  private val executorHistory = new ConcurrentHashMap[String, ExecutorHistoryTracker]()
+
   // Configuration parameters
   private val loadUpdateTimeoutMs = conf.getLong(
     "spark.shuffle.loadbalancer.updateTimeoutMs", 30000)
   private val maxPreferredSources = conf.getInt("spark.shuffle.loadbalancer.maxPreferredSources", 3)
+  private val historyWindowSize = conf.getInt("spark.shuffle.loadbalancer.historyWindowSize", 20)
+  private val predictionEnabled = conf.getBoolean(
+    "spark.shuffle.loadbalancer.predictionEnabled", true)
 
   /**
    * Update the load state for an executor based on received metrics.
@@ -109,6 +115,14 @@ private[spark] class ShuffleLoadBalancer(conf: SparkConf) extends Logging {
     )
 
     executorLoadStates.put(metrics.executorId, loadState)
+
+    // Update historical data for predictive analysis
+    if (predictionEnabled) {
+      val history = executorHistory.computeIfAbsent(metrics.executorId,
+        _ => new ExecutorHistoryTracker(historyWindowSize))
+      history.addDataPoint(loadState)
+    }
+
     logDebug(s"Updated load state for executor ${metrics.executorId}: " +
       s"load score = ${loadState.loadScore}")
   }
@@ -234,5 +248,110 @@ private[spark] class ShuffleLoadBalancer(conf: SparkConf) extends Logging {
         "activeExecutors" -> allStates.size.toDouble
       )
     }
+  }
+
+  /**
+   * Predict future load for an executor based on historical patterns.
+   */
+  def predictExecutorLoad(executorId: String, forecastWindowMs: Long): Option[Double] = {
+    if (!predictionEnabled) return None
+
+    executorHistory.asScala.get(executorId).flatMap { history =>
+      history.predictLoad(forecastWindowMs)
+    }
+  }
+
+  /**
+   * Get executors likely to become hotspots in the near future.
+   */
+  def getPredictedHotspots(forecastWindowMs: Long = 60000): Seq[String] = {
+    if (!predictionEnabled) return Seq.empty
+
+    executorHistory.asScala.flatMap { case (executorId, history) =>
+      history.predictLoad(forecastWindowMs).filter(_ > 0.7).map(_ => executorId)
+    }.toSeq
+  }
+
+  /**
+   * Tracks historical load data for an executor to enable predictive load balancing.
+   */
+  private class ExecutorHistoryTracker(maxWindowSize: Int) {
+    private val dataPoints = scala.collection.mutable.Queue[TimestampedLoadData]()
+
+    def addDataPoint(loadState: ExecutorLoadState): Unit = {
+      synchronized {
+        val dataPoint = TimestampedLoadData(
+          timestamp = loadState.lastUpdateTime,
+          loadScore = loadState.loadScore,
+          avgResponseTime = loadState.avgResponseTime,
+          bytesInFlight = loadState.bytesInFlight,
+          activeConnections = loadState.activeConnections
+        )
+
+        dataPoints.enqueue(dataPoint)
+
+        // Maintain sliding window
+        while (dataPoints.size > maxWindowSize) {
+          dataPoints.dequeue()
+        }
+      }
+    }
+
+    def predictLoad(forecastWindowMs: Long): Option[Double] = {
+      synchronized {
+        if (dataPoints.size < 3) return None // Need minimum data for prediction
+
+        val currentTime = System.currentTimeMillis()
+        val recentPoints = dataPoints.filter(_.timestamp > currentTime - forecastWindowMs * 2)
+
+        if (recentPoints.size < 2) return None
+
+        // Simple linear trend prediction
+        val timeDeltas = recentPoints.zip(recentPoints.tail).map { case (prev, curr) =>
+          curr.timestamp - prev.timestamp
+        }
+        val loadDeltas = recentPoints.zip(recentPoints.tail).map { case (prev, curr) =>
+          curr.loadScore - prev.loadScore
+        }
+
+        if (timeDeltas.nonEmpty && timeDeltas.sum > 0) {
+          val avgLoadChangeRate = loadDeltas.sum / timeDeltas.sum
+          val currentLoad = recentPoints.last.loadScore
+          val predictedLoad = currentLoad + (avgLoadChangeRate * forecastWindowMs)
+
+          Some(math.max(0.0, math.min(1.0, predictedLoad))) // Clamp to [0, 1]
+        } else {
+          Some(recentPoints.last.loadScore) // No change prediction
+        }
+      }
+    }
+
+    def getTrend: LoadTrend.Value = {
+      synchronized {
+        if (dataPoints.size < 3) return LoadTrend.STABLE
+
+        val recent = dataPoints.takeRight(5)
+        val loadChanges = recent.zip(recent.tail).map { case (prev, curr) =>
+          curr.loadScore - prev.loadScore
+        }
+
+        val avgChange = loadChanges.sum / loadChanges.size
+        if (avgChange > 0.05) LoadTrend.INCREASING
+        else if (avgChange < -0.05) LoadTrend.DECREASING
+        else LoadTrend.STABLE
+      }
+    }
+  }
+
+  private case class TimestampedLoadData(
+      timestamp: Long,
+      loadScore: Double,
+      avgResponseTime: Long,
+      bytesInFlight: Long,
+      activeConnections: Int)
+
+  private object LoadTrend extends Enumeration {
+    type LoadTrend = Value
+    val INCREASING, DECREASING, STABLE = Value
   }
 }

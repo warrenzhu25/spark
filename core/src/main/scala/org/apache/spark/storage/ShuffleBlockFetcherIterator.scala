@@ -747,15 +747,8 @@ final class ShuffleBlockFetcherIterator(
     // Add the remote requests into our queue in load-aware order
     // (or random if load balancing disabled)
     fetchRequests ++= shuffleLoadCollector.map { collector =>
-      // Load-aware ordering: prioritize requests to less loaded executors
-      remoteRequests.sortBy { request =>
-        val targetExecutor = request.address.executorId
-        // Use a simple heuristic: if we have recent load data, use it;
-        // otherwise fall back to random
-        val loadScore = if (collector.isOverloaded) 1.0 else 0.5
-        // Simple load approximation for now
-        (loadScore, scala.util.Random.nextDouble()) // Secondary randomization for tie-breaking
-      }
+      // Intelligent load-aware request routing
+      intelligentRequestRouting(remoteRequests, collector)
     }.getOrElse(Utils.randomize(remoteRequests))
     assert ((0 == reqsInFlight) == (0 == bytesInFlight),
       "expected reqsInFlight = 0 but found reqsInFlight = " + reqsInFlight +
@@ -1284,11 +1277,44 @@ final class ShuffleBlockFetcherIterator(
             bytesInFlight + fetchReqQueue.front.size <= maxBytesInFlight))
     }
 
+    /**
+     * Calculate dynamic block limit based on executor load and performance characteristics.
+     */
+    def getDynamicBlockLimit(remoteAddress: BlockManagerId): Int = {
+      shuffleLoadCollector.map { collector =>
+        val executorId = remoteAddress.executorId
+        val baseLimit = maxBlocksInFlightPerAddress
+
+        // Adjust limit based on executor load state
+        val loadScore = getExecutorLoadScore(executorId, collector)
+        val loadMultiplier = if (loadScore > 0.7) {
+          // High load: reduce batch size to avoid overwhelming
+          0.5
+        } else if (loadScore > 0.4) {
+          // Medium load: slightly reduce batch size
+          0.75
+        } else {
+          // Low load: allow larger batches for better throughput
+          1.2
+        }
+
+        // Apply circuit breaker: drastically reduce limit for overloaded executors
+        val circuitBreakerMultiplier = if (isExecutorCircuitOpen(executorId, collector)) {
+          0.1 // Only allow minimal requests
+        } else {
+          1.0
+        }
+
+        math.max(1, (baseLimit * loadMultiplier * circuitBreakerMultiplier).toInt)
+      }.getOrElse(maxBlocksInFlightPerAddress) // Fallback to static limit if no load balancing
+    }
+
     // Checks if sending a new fetch request will exceed the max no. of blocks being fetched from a
     // given remote address.
     def isRemoteAddressMaxedOut(remoteAddress: BlockManagerId, request: FetchRequest): Boolean = {
-      numBlocksInFlightPerAddress.getOrElse(remoteAddress, 0) + request.blocks.size >
-        maxBlocksInFlightPerAddress
+      val currentBlocks = numBlocksInFlightPerAddress.getOrElse(remoteAddress, 0)
+      val dynamicLimit = getDynamicBlockLimit(remoteAddress)
+      currentBlocks + request.blocks.size > dynamicLimit
     }
   }
 
@@ -1394,6 +1420,290 @@ final class ShuffleBlockFetcherIterator(
       if (defRequests.isEmpty) deferredFetchRequests.remove(address)
     }
     removedChunkIds
+  }
+
+  /**
+   * Intelligent request routing that considers executor load, latency, and capacity
+   * to optimize shuffle fetch performance and minimize long tail times.
+   */
+  private def intelligentRequestRouting(
+      requests: ArrayBuffer[FetchRequest],
+      collector: ExecutorShuffleLoadCollector): ArrayBuffer[FetchRequest] = {
+
+    // Get load balancing policy from configuration
+    val policyName = blockManager.conf.get("spark.shuffle.loadbalancer.policy", "LATENCY_AWARE")
+    val policy = LoadBalancingPolicy.fromString(policyName)
+
+    policy match {
+      case LoadBalancingPolicy.ROUND_ROBIN =>
+        roundRobinRouting(requests)
+
+      case LoadBalancingPolicy.LEAST_LOADED =>
+        leastLoadedRouting(requests, collector)
+
+      case LoadBalancingPolicy.LATENCY_AWARE =>
+        latencyAwareRequestRouting(requests, collector)
+
+      case LoadBalancingPolicy.PREDICTIVE =>
+        predictiveRouting(requests, collector)
+
+      case LoadBalancingPolicy.ADAPTIVE =>
+        adaptiveRouting(requests, collector)
+
+      case LoadBalancingPolicy.RANDOM =>
+        ArrayBuffer() ++ Utils.randomize(requests)
+
+      case _ =>
+        // Default: basic load awareness
+        basicLoadAwareRouting(requests, collector)
+    }
+  }
+
+  /**
+   * Round-robin request distribution.
+   */
+  private def roundRobinRouting(requests: ArrayBuffer[FetchRequest]): ArrayBuffer[FetchRequest] = {
+    requests.sortBy(req => req.address.executorId.hashCode)
+  }
+
+  /**
+   * Route requests to least loaded executors.
+   */
+  private def leastLoadedRouting(
+      requests: ArrayBuffer[FetchRequest],
+      collector: ExecutorShuffleLoadCollector): ArrayBuffer[FetchRequest] = {
+    requests.sortBy { req =>
+      val executorId = req.address.executorId
+      val loadScore = getExecutorLoadScore(executorId, collector)
+      (loadScore, scala.util.Random.nextDouble()) // Tie-breaking randomization
+    }
+  }
+
+  /**
+   * Predictive routing that anticipates future load patterns.
+   */
+  private def predictiveRouting(
+      requests: ArrayBuffer[FetchRequest],
+      collector: ExecutorShuffleLoadCollector): ArrayBuffer[FetchRequest] = {
+    requests.sortBy { req =>
+      val executorId = req.address.executorId
+      val currentLoad = getExecutorLoadScore(executorId, collector)
+
+      // Apply predictive penalty for executors likely to become overloaded
+      val predictivePenalty = if (isPredictedHotspot(executorId)) 0.3 else 0.0
+
+      // Circuit breaker penalty
+      val circuitPenalty = if (isExecutorCircuitOpen(executorId, collector)) 10.0 else 0.0
+
+      val routingScore = currentLoad + predictivePenalty + circuitPenalty
+      (routingScore, scala.util.Random.nextDouble())
+    }
+  }
+
+  /**
+   * Adaptive routing that changes behavior based on cluster conditions.
+   */
+  private def adaptiveRouting(
+      requests: ArrayBuffer[FetchRequest],
+      collector: ExecutorShuffleLoadCollector): ArrayBuffer[FetchRequest] = {
+
+    val clusterLoadLevel = getClusterLoadLevel(collector)
+
+    clusterLoadLevel match {
+      case ClusterLoadLevel.LOW =>
+        // Under low load, prioritize throughput with larger batches
+        roundRobinRouting(requests)
+
+      case ClusterLoadLevel.MEDIUM =>
+        // Under medium load, balance load distribution
+        leastLoadedRouting(requests, collector)
+
+      case ClusterLoadLevel.HIGH =>
+        // Under high load, focus on latency and avoid overloading
+        latencyAwareRequestRouting(requests, collector)
+
+      case ClusterLoadLevel.CRITICAL =>
+        // Under critical load, use predictive routing to prevent hotspots
+        predictiveRouting(requests, collector)
+    }
+  }
+
+  /**
+   * Determine current cluster load level.
+   */
+  private def getClusterLoadLevel(
+      collector: ExecutorShuffleLoadCollector): ClusterLoadLevel.Value = {
+    // Simple heuristic based on local collector state
+    // In full implementation, this would query cluster-wide metrics
+    if (collector.isOverloaded) {
+      ClusterLoadLevel.HIGH
+    } else {
+      ClusterLoadLevel.MEDIUM
+    }
+  }
+
+  /**
+   * Check if an executor is predicted to become a hotspot.
+   */
+  private def isPredictedHotspot(executorId: String): Boolean = {
+    // Placeholder for predictive logic
+    // In full implementation, this would query the ShuffleLoadBalancer's prediction
+    false
+  }
+
+  /**
+   * Advanced latency-aware request routing that considers multiple factors.
+   */
+  private def latencyAwareRequestRouting(
+      requests: ArrayBuffer[FetchRequest],
+      collector: ExecutorShuffleLoadCollector): ArrayBuffer[FetchRequest] = {
+
+    val requestSize = requests.map(_.size).sum
+    val avgRequestSize = if (requests.nonEmpty) requestSize / requests.length else 0L
+
+    requests.sortBy { req =>
+      val executorId = req.address.executorId
+      val loadScore = getExecutorLoadScore(executorId, collector)
+      val requestSizeRatio = req.size.toDouble / math.max(avgRequestSize, 1L)
+
+      // Apply circuit breaker: heavily penalize overloaded executors
+      val circuitBreakerPenalty = if (isExecutorCircuitOpen(executorId, collector)) 10.0 else 0.0
+
+      // Calculate routing score considering multiple factors
+      val routingScore = (loadScore * 0.6) + (requestSizeRatio * 0.3) + circuitBreakerPenalty
+      (routingScore, scala.util.Random.nextDouble())
+    }
+  }
+
+  /**
+   * Basic load-aware routing for fallback compatibility.
+   */
+  private def basicLoadAwareRouting(
+      requests: ArrayBuffer[FetchRequest],
+      collector: ExecutorShuffleLoadCollector): ArrayBuffer[FetchRequest] = {
+    requests.sortBy { req =>
+      val executorId = req.address.executorId
+      val loadScore = if (collector.isOverloaded) 1.0 else 0.5
+      (loadScore, scala.util.Random.nextDouble())
+    }
+  }
+
+  /**
+   * Get the current load score for a target executor.
+   */
+  private def getExecutorLoadScore(
+      executorId: String,
+      collector: ExecutorShuffleLoadCollector): Double = {
+    // For now, use local collector overload state as approximation
+    // In a full implementation, this would query the driver's ShuffleLoadBalancer
+    if (collector.isOverloaded) 0.8 else 0.2
+  }
+
+  // Circuit breaker state management
+  private val circuitBreakerStates =
+    new java.util.concurrent.ConcurrentHashMap[String, CircuitBreakerState]()
+
+  /**
+   * Check if circuit breaker is open for a specific executor.
+   */
+  private def isExecutorCircuitOpen(
+      executorId: String,
+      collector: ExecutorShuffleLoadCollector): Boolean = {
+    val state = circuitBreakerStates.computeIfAbsent(executorId, _ => new CircuitBreakerState())
+    state.isOpen(collector.isOverloaded)
+  }
+
+  /**
+   * Circuit breaker state for individual executors with automatic recovery.
+   */
+  private class CircuitBreakerState {
+    private val failureThreshold =
+      blockManager.conf.getInt("spark.shuffle.loadbalancer.circuitBreaker.failureThreshold", 5)
+    private val recoveryTimeMs =
+      blockManager.conf.getLong("spark.shuffle.loadbalancer.circuitBreaker.recoveryTimeMs", 30000)
+    @volatile private var state: CircuitState.Value = CircuitState.CLOSED
+    @volatile private var consecutiveFailures = 0
+    @volatile private var lastFailureTime = 0L
+    @volatile private var lastSuccessTime = System.currentTimeMillis()
+    def isOpen(isCurrentlyOverloaded: Boolean): Boolean = {
+      val currentTime = System.currentTimeMillis()
+      state match {
+        case CircuitState.CLOSED =>
+          if (isCurrentlyOverloaded) {
+            consecutiveFailures += 1
+            lastFailureTime = currentTime
+            if (consecutiveFailures >= failureThreshold) {
+              state = CircuitState.OPEN
+              logWarning(s"Circuit breaker opened for executor due to " +
+                s"$consecutiveFailures consecutive failures")
+              true
+            } else {
+              false
+            }
+          } else {
+            consecutiveFailures = 0
+            lastSuccessTime = currentTime
+            false
+          }
+        case CircuitState.OPEN =>
+          if (currentTime - lastFailureTime > recoveryTimeMs) {
+            state = CircuitState.HALF_OPEN
+            logInfo(s"Circuit breaker transitioning to half-open for recovery attempt")
+            false // Allow one request to test recovery
+          } else {
+            true // Still open
+          }
+        case CircuitState.HALF_OPEN =>
+          if (!isCurrentlyOverloaded) {
+            state = CircuitState.CLOSED
+            consecutiveFailures = 0
+            lastSuccessTime = currentTime
+            logInfo(s"Circuit breaker closed after successful recovery")
+            false
+          } else {
+            state = CircuitState.OPEN
+            lastFailureTime = currentTime
+            logWarning(s"Circuit breaker reopened after failed recovery attempt")
+            true
+          }
+      }
+    }
+
+    def getState: CircuitState.Value = state
+    def getConsecutiveFailures: Int = consecutiveFailures
+    def getHealthScore: Double = {
+      val timeSinceLastSuccess = System.currentTimeMillis() - lastSuccessTime
+      val healthDecay = math.min(1.0, timeSinceLastSuccess / (recoveryTimeMs * 2.0))
+      math.max(0.0, 1.0 - healthDecay - (consecutiveFailures * 0.1))
+    }
+  }
+
+  private object CircuitState extends Enumeration {
+    type CircuitState = Value
+    val CLOSED, OPEN, HALF_OPEN = Value
+  }
+
+  private object LoadBalancingPolicy extends Enumeration {
+    type LoadBalancingPolicy = Value
+    val ROUND_ROBIN, LEAST_LOADED, LATENCY_AWARE, PREDICTIVE, ADAPTIVE, RANDOM = Value
+    def fromString(policy: String): LoadBalancingPolicy = {
+      // scalastyle:off caselocale
+      policy.toUpperCase match {
+      // scalastyle:on caselocale
+        case "ROUND_ROBIN" => ROUND_ROBIN
+        case "LEAST_LOADED" => LEAST_LOADED
+        case "LATENCY_AWARE" => LATENCY_AWARE
+        case "PREDICTIVE" => PREDICTIVE
+        case "ADAPTIVE" => ADAPTIVE
+        case "RANDOM" => RANDOM
+        case _ => LATENCY_AWARE // Default
+      }
+    }
+  }
+
+  private object ClusterLoadLevel extends Enumeration {
+    type ClusterLoadLevel = Value
+    val LOW, MEDIUM, HIGH, CRITICAL = Value
   }
 }
 

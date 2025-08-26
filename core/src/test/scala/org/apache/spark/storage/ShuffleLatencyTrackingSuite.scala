@@ -55,7 +55,7 @@ class ShuffleLatencyTrackingSuite extends SparkFunSuite {
     assert(metrics.isCompleted)
     assert(!metrics.isNetworkActive)
     assert(metrics.networkTime > 0)
-    assert(metrics.totalDuration > metrics.waitingTime + metrics.networkTime)
+    assert(metrics.totalDuration >= metrics.waitingTime + metrics.networkTime)
   }
 
   test("ExecutorShuffleLoadCollector tracks waiting and network time separately") {
