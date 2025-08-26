@@ -528,6 +528,25 @@ package object config {
       .bytesConf(ByteUnit.BYTE)
       .createOptional
 
+  private[spark] val STORAGE_DECOMMISSION_SHUFFLE_UPLOAD_TIMEOUT_ENABLED =
+    ConfigBuilder("spark.storage.decommission.shuffleUpload.timeout.enabled")
+      .doc("When true, enables size-based upload timeouts for shuffle block migration. " +
+        "Uploads will timeout based on block size and expected throughput, preventing " +
+        "infinite waits on slow or unresponsive executors. When false, uploads will " +
+        "wait indefinitely (original behavior).")
+      .version("3.5.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  private[spark] val STORAGE_DECOMMISSION_SHUFFLE_UPLOAD_TIMEOUT_MB_PER_SEC =
+    ConfigBuilder("spark.storage.decommission.shuffleUpload.timeout.mbPerSec")
+      .doc("Expected upload throughput in MB per second for calculating size-based timeouts. " +
+        "Larger files get proportionally longer timeouts. For example, 1 MB/sec means a " +
+        "100MB block gets ~150 second timeout (with 50% buffer + 30 second minimum).")
+      .version("3.5.0")
+      .intConf
+      .createWithDefault(1)
+
   private[spark] val STORAGE_REPLICATION_TOPOLOGY_FILE =
     ConfigBuilder("spark.storage.replication.topologyFile")
       .version("2.1.0")

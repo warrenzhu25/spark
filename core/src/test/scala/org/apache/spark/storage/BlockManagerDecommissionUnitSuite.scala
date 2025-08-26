@@ -308,6 +308,10 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
     when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
     when(bm.getMigratableRDDBlocks())
       .thenReturn(Seq(storedBlock1))
+    when(blockTransferService.uploadBlock(mc.any(), mc.any(), mc.any(),
+      mc.any(), mc.any(), mc.any(), mc.any())).thenReturn {
+      Future.successful(())
+    }
 
     val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm)
 
@@ -324,7 +328,7 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
         verify(bm, least(1)).replicateBlock(
           mc.eq(storedBlockId1), mc.any(), mc.any(), mc.eq(Some(3)))
         verify(blockTransferService, times(2))
-          .uploadBlockSync(mc.eq("host2"), mc.eq(bmPort), mc.eq("exec2"), mc.any(), mc.any(),
+          .uploadBlock(mc.eq("host2"), mc.eq(bmPort), mc.eq("exec2"), mc.any(), mc.any(),
             mc.eq(StorageLevel.DISK_ONLY), mc.isNull())
         // Since we never "finish" the RDD blocks, make sure the time is always moving forward.
         assert(bmDecomManager.rddBlocksLeft)
@@ -382,5 +386,145 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
     } finally {
       bmDecomManager.stop()
     }
+  }
+
+  test("shuffle migration stops when upload throughput is too slow") {
+    val blockTransferService = mock(classOf[BlockTransferService])
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+
+    // Create multiple shuffle blocks
+    val shuffleBlocks = Set((1, 1L, 1), (1, 2L, 1), (1, 3L, 1))
+    registerShuffleBlocks(migratableShuffleBlockResolver, shuffleBlocks)
+
+    // Mock buffers with moderate size
+    val mockBuffer = mock(classOf[ManagedBuffer])
+    when(mockBuffer.size()).thenReturn(50L * 1024 * 1024) // 50MB per buffer
+
+    shuffleBlocks.foreach { case (shuffleId: Int, mapId: Long, reduceId: Int) =>
+      when(migratableShuffleBlockResolver.getMigrationBlocks(
+        ShuffleBlockInfo(shuffleId, mapId)))
+        .thenReturn(List(
+          (ShuffleIndexBlockId(shuffleId, mapId, reduceId), mockBuffer),
+          (ShuffleDataBlockId(shuffleId, mapId, reduceId), mockBuffer)))
+    }
+
+    // Mock uploadBlock to introduce delays simulating slow upload
+    import scala.concurrent.Future
+    when(blockTransferService.uploadBlock(mc.any(), mc.any(), mc.any(),
+      mc.any(), mc.any(), mc.any(), mc.any())).thenAnswer { _ =>
+      Thread.sleep(2000) // 2 second delay per block, making it slower than 100MB/sec threshold
+      Future.successful(())
+    }
+
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks()).thenReturn(Seq())
+    when(bm.getPeers(mc.any()))
+      .thenReturn(Seq(BlockManagerId("exec2", "host2", 12345)))
+    when(bm.blockTransferService).thenReturn(blockTransferService)
+
+    // Use default config since throughput checking is now hardcoded
+    val confWithHighThroughput = sparkConf.clone()
+
+    val bmDecomManager = new BlockManagerDecommissioner(confWithHighThroughput, bm)
+
+    try {
+      bmDecomManager.start()
+
+      eventually(timeout(30.second), interval(100.milliseconds)) {
+        // Verify that upload stats tracking is working and throughput is detected as slow
+        val exec2Id = BlockManagerId("exec2", "host2", 12345)
+        assert(bmDecomManager.uploadStats.contains(exec2Id))
+        val stats = bmDecomManager.uploadStats(exec2Id)
+        assert(stats.totalBytes > 0)
+        assert(stats.totalTimeMs > 0)
+
+        // Should detect slow throughput (2 seconds for 100MB = 50 MB/sec < 100 MB/sec threshold)
+        assert(stats.currentThroughputBytesPerSec < 100L * 1024 * 1024)
+
+        // Should have stopped migration due to slow throughput
+        assert(bmDecomManager.shufflesToMigrate.size() > 0)
+      }
+    } finally {
+      bmDecomManager.stop()
+    }
+  }
+
+  test("shuffle migration stops when uploads timeout based on block size") {
+    val blockTransferService = mock(classOf[BlockTransferService])
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+
+    // Create shuffle blocks with different sizes
+    val shuffleBlocks = Set((1, 1L, 1), (1, 2L, 1))
+    registerShuffleBlocks(migratableShuffleBlockResolver, shuffleBlocks)
+
+    // Mock different sized buffers
+    val smallBuffer = mock(classOf[ManagedBuffer])
+    when(smallBuffer.size()).thenReturn(10L * 1024 * 1024) // 10MB
+    val largeBuffer = mock(classOf[ManagedBuffer])
+    when(largeBuffer.size()).thenReturn(100L * 1024 * 1024) // 100MB
+
+    // Return different sized buffers for different blocks
+    when(migratableShuffleBlockResolver.getMigrationBlocks(ShuffleBlockInfo(1, 1L)))
+      .thenReturn(List(
+        (ShuffleIndexBlockId(1, 1L, 1), smallBuffer),
+        (ShuffleDataBlockId(1, 1L, 1), smallBuffer)))
+    when(migratableShuffleBlockResolver.getMigrationBlocks(ShuffleBlockInfo(1, 2L)))
+      .thenReturn(List(
+        (ShuffleIndexBlockId(1, 2L, 1), largeBuffer),
+        (ShuffleDataBlockId(1, 2L, 1), largeBuffer)))
+
+    // Mock uploadBlock to return a future that times out
+    import scala.concurrent.{Future, TimeoutException}
+    when(blockTransferService.uploadBlock(mc.any(), mc.any(), mc.any(),
+      mc.any(), mc.any(), mc.any(), mc.any())).thenReturn {
+      Future.failed(new TimeoutException("Upload timed out"))
+    }
+
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks()).thenReturn(Seq())
+    when(bm.getPeers(mc.any()))
+      .thenReturn(Seq(BlockManagerId("exec2", "host2", 12345)))
+    when(bm.blockTransferService).thenReturn(blockTransferService)
+
+    // Set very high throughput expectation to trigger timeouts quickly
+    val confWithShortTimeout = sparkConf.clone()
+      .set(config.STORAGE_DECOMMISSION_SHUFFLE_UPLOAD_TIMEOUT_ENABLED, true)
+      .set(config.STORAGE_DECOMMISSION_SHUFFLE_UPLOAD_TIMEOUT_MB_PER_SEC, 1000) // 1000 MB/sec
+
+    val bmDecomManager = new BlockManagerDecommissioner(confWithShortTimeout, bm)
+
+    try {
+      bmDecomManager.start()
+
+      eventually(timeout(100.second), interval(10.milliseconds)) {
+        // Should stop migration due to timeouts
+        val exec2Id = BlockManagerId("exec2", "host2", 12345)
+        assert(bmDecomManager.uploadStats.contains(exec2Id))
+        val stats = bmDecomManager.uploadStats(exec2Id)
+        assert(stats.timeoutCount > 0)
+
+        // Should have blocks remaining in queue due to timeout stopping migration
+        assert(bmDecomManager.shufflesToMigrate.size() > 0)
+      }
+    } finally {
+      bmDecomManager.stop()
+    }
+  }
+
+  test("timeout calculation is size-based with automatic scaling") {
+    val bmDecomManager = new BlockManagerDecommissioner(sparkConf, mock(classOf[BlockManager]))
+
+    // Test small blocks get minimum timeout (30 seconds)
+    val smallBlockTimeout = bmDecomManager.calculateUploadTimeout(1024 * 1024) // 1MB
+    assert(smallBlockTimeout.toSeconds >= 30) // At least 30 second minimum
+
+    // Test large blocks get scaled timeouts (10GB at 1MB/sec = ~15360 seconds with 50% buffer)
+    val largeBlockTimeout = bmDecomManager.calculateUploadTimeout(10L * 1024 * 1024 * 1024) // 10GB
+    assert(largeBlockTimeout.toSeconds > smallBlockTimeout.toSeconds)
+    assert(largeBlockTimeout.toSeconds > 10000) // Should be much larger for huge blocks
+
+    bmDecomManager.stop()
   }
 }
