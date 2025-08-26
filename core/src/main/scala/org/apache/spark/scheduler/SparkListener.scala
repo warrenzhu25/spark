@@ -29,6 +29,7 @@ import org.apache.spark.annotation.{DeveloperApi, Since}
 import org.apache.spark.executor.{ExecutorMetrics, TaskMetrics}
 import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.scheduler.cluster.ExecutorInfo
+import org.apache.spark.scheduler.dynalloc.ExecutorMonitor
 import org.apache.spark.storage.{BlockManagerId, BlockUpdatedInfo}
 
 @DeveloperApi
@@ -302,6 +303,15 @@ case class SparkListenerLogStart(sparkVersion: String) extends SparkListenerEven
 case class SparkListenerResourceProfileAdded(resourceProfile: ResourceProfile)
   extends SparkListenerEvent
 
+@DeveloperApi
+case class SparkListenerExecutorAllocationDiagnosis(
+    time: Long,
+    runningExecutors: Int,
+    maxNeededExecutors: Int,
+    intervalSeconds: Long,
+    summary: ExecutorMonitor.ExecutorSummary)
+  extends SparkListenerEvent
+
 /**
  * Interface for listening to events from the Spark scheduler. Most applications should probably
  * extend SparkListener or SparkFirehoseListener directly, rather than implementing this class.
@@ -445,6 +455,12 @@ private[spark] trait SparkListenerInterface {
   def onExecutorUnexcluded(executorUnexcluded: SparkListenerExecutorUnexcluded): Unit
 
   /**
+   * Called when executor allocation diagnosis is performed.
+   */
+  def onExecutorAllocationDiagnosis(
+      diagnosis: SparkListenerExecutorAllocationDiagnosis): Unit
+
+  /**
    * Called when the driver excludes a node for a Spark application.
    */
   @deprecated("use onNodeExcluded instead", "3.1.0")
@@ -567,6 +583,9 @@ abstract class SparkListener extends SparkListenerInterface {
       executorUnblacklisted: SparkListenerExecutorUnblacklisted): Unit = { }
   override def onExecutorUnexcluded(
       executorUnexcluded: SparkListenerExecutorUnexcluded): Unit = { }
+
+  override def onExecutorAllocationDiagnosis(
+      diagnosis: SparkListenerExecutorAllocationDiagnosis): Unit = { }
 
   override def onNodeBlacklisted(
       nodeBlacklisted: SparkListenerNodeBlacklisted): Unit = { }

@@ -705,6 +705,15 @@ package object config {
       .checkValues(Set("DEBUG", "INFO", "WARN", "ERROR"))
       .createWithDefault("WARN")
 
+  private[spark] val DYN_ALLOCATION_DIAGNOSIS_POST_EVENTS =
+    ConfigBuilder("spark.dynamicAllocation.diagnosis.postEvents")
+      .doc("Whether to post diagnosis events to the Spark event bus in addition to logging. " +
+        "This allows external monitoring systems and custom listeners to receive " +
+        "executor allocation diagnosis data.")
+      .version("3.5.0")
+      .booleanConf
+      .createWithDefault(true)
+
   private[spark] val LEGACY_LOCALITY_WAIT_RESET =
     ConfigBuilder("spark.locality.wait.legacyResetOnTaskLaunch")
     .doc("Whether to use the legacy behavior of locality wait, which resets the delay timer " +

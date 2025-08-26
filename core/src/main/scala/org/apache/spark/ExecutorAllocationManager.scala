@@ -126,6 +126,7 @@ private[spark] class ExecutorAllocationManager(
   private val diagnosisEnabled = conf.get(DYN_ALLOCATION_DIAGNOSIS_ENABLED)
   private val diagnosisInterval = conf.get(DYN_ALLOCATION_DIAGNOSIS_INTERVAL)
   private val diagnosisLogLevel = conf.get(DYN_ALLOCATION_DIAGNOSIS_LOG_LEVEL)
+  private val diagnosisPostEvents = conf.get(DYN_ALLOCATION_DIAGNOSIS_POST_EVENTS)
 
   // During testing, the methods to actually kill and add executors are mocked out
   private val testing = conf.get(DYN_ALLOCATION_TESTING)
@@ -667,6 +668,59 @@ private[spark] class ExecutorAllocationManager(
     logDebug("Clearing timer to add executors because there are no more pending tasks")
     addTime = NOT_SET
     numExecutorsToAddPerResourceProfileId.transform { case (_, _) => 1 }
+  }
+
+  /**
+   * Performs diagnosis of executor over-allocation if enabled.
+   * Logs diagnostic information when running executors exceed max needed for a configured interval.
+   */
+  private def performDiagnosis(): Unit = {
+    val now = clock.getTimeMillis()
+
+    // Only compute expensive values when diagnosis is due or we need to check initial condition
+    if (diagnosisTime == NOT_SET || now >= diagnosisTime) {
+      val running = executorMonitor.executorCount
+      val maxNeeded = numExecutorsTargetPerResourceProfileId.keys
+        .map(maxNumExecutorsNeededPerResourceProfile).sum
+      if (running > maxNeeded) {
+        if (diagnosisTime == NOT_SET) {
+          // First time detecting over-allocation, set timer
+          diagnosisTime = now + TimeUnit.SECONDS.toMillis(diagnosisInterval)
+        } else {
+          // Timer expired, log diagnosis and reset
+          val summary = executorMonitor.getExecutorSummary(running)
+          val message = s"Running executors ($running) > max needed executors ($maxNeeded) for " +
+            s"$diagnosisInterval seconds. The summary of executors:\n" +
+            s"$summary"
+          diagnosisLogLevel match {
+            case "DEBUG" => logDebug(message)
+            case "INFO" => logInfo(message)
+            case "WARN" => logWarning(message)
+            case "ERROR" => logError(message)
+            case _ =>
+              logWarning(s"Invalid diagnosis log level '$diagnosisLogLevel', using WARN")
+              logWarning(message)
+          }
+
+          // Post event to listener bus if enabled
+          if (diagnosisPostEvents) {
+            val event = SparkListenerExecutorAllocationDiagnosis(
+              time = now,
+              runningExecutors = running,
+              maxNeededExecutors = maxNeeded,
+              intervalSeconds = diagnosisInterval,
+              summary = summary
+            )
+            listenerBus.post(event)
+          }
+
+          diagnosisTime = NOT_SET
+        }
+      } else {
+        // Condition no longer met, reset timer
+        diagnosisTime = NOT_SET
+      }
+    }
   }
 
   private case class StageAttempt(stageId: Int, stageAttemptId: Int) {

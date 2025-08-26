@@ -171,6 +171,12 @@ public class SparkFirehoseListener implements SparkListenerInterface {
   }
 
   @Override
+  public final void onExecutorAllocationDiagnosis(
+      SparkListenerExecutorAllocationDiagnosis diagnosis) {
+    onEvent(diagnosis);
+  }
+
+  @Override
   public final void onNodeBlacklisted(SparkListenerNodeBlacklisted nodeBlacklisted) {
     onEvent(nodeBlacklisted);
   }
