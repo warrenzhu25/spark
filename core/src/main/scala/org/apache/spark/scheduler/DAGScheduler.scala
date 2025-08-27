@@ -142,6 +142,10 @@ private[spark] class DAGScheduler(
 
   private[spark] val metricsSource: DAGSchedulerSource = new DAGSchedulerSource(this)
 
+  // Shuffle rebalancing manager for optimizing shuffle data distribution
+  private[scheduler] val shuffleRebalanceManager = new ShuffleRebalanceManager(
+    sc.conf, mapOutputTracker, blockManagerMaster)
+
   private[scheduler] val nextJobId = new AtomicInteger(0)
   private[scheduler] def numTotalJobs: Int = nextJobId.get()
   private val nextStageId = new AtomicInteger(0)
@@ -1951,6 +1955,11 @@ private[spark] class DAGScheduler(
                 // available.
                 mapOutputTracker.registerMapOutput(
                   shuffleStage.shuffleDep.shuffleId, smt.partitionId, status)
+
+                // Check if shuffle rebalancing is needed after this task completion
+                val completedTasks = shuffleStage.numTasks - shuffleStage.pendingPartitions.size
+                shuffleRebalanceManager.checkAndInitiateShuffleRebalance(
+                  shuffleStage, completedTasks)
               }
             } else {
               logInfo(s"Ignoring $smt completion from an older attempt of indeterminate stage")
@@ -3013,6 +3022,9 @@ private[spark] class DAGScheduler(
     }
     Utils.tryLogNonFatalError {
       eventProcessLoop.stop()
+    }
+    Utils.tryLogNonFatalError {
+      shuffleRebalanceManager.stop()
     }
     Utils.tryLogNonFatalError {
       taskScheduler.stop(exitCode)

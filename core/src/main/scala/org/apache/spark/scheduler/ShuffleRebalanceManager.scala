@@ -61,9 +61,13 @@ private[spark] class ShuffleRebalanceManager(
 
   /**
    * Check if shuffle rebalancing is needed for a given stage and initiate rebalancing if necessary.
+   * This is called during stage execution when some tasks have completed.
    */
-  def checkAndInitiateShuffleRebalance(stage: ShuffleMapStage): Unit = {
+  def checkAndInitiateShuffleRebalance(stage: ShuffleMapStage, completedTasks: Int): Unit = {
     if (!shuffleRebalanceEnabled) return
+
+    val completionRatio = completedTasks.toDouble / stage.numTasks
+    if (completionRatio < 0.25 || completionRatio >= 1.0) return
 
     val shuffleId = stage.shuffleDep.shuffleId
     val executorSizes = getExecutorShuffleSizes(shuffleId)

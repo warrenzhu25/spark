@@ -112,7 +112,7 @@ class ShuffleRebalanceManagerSuite extends SparkFunSuite {
     val stage = createMockShuffleMapStage(1)
 
     // This should not trigger any moves
-    shuffleMoveManager.checkAndInitiateShuffleRebalance(stage)
+    shuffleMoveManager.checkAndInitiateShuffleRebalance(stage, 5) // Simulate 5 completed tasks
 
     // Verify no transfers were initiated (message-based approach)
   }
