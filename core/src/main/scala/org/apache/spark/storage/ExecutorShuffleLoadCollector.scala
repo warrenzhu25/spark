@@ -90,6 +90,10 @@ private[spark] class ExecutorShuffleLoadCollector(
   // Callback for sending metrics to driver
   private var metricsReporter: Option[ShuffleLoadMetrics => Unit] = None
 
+  // Server-side metrics provider (injected from network layer)
+  @volatile private var serverMetricsProvider:
+    Option[() => (Long, Long, Long, Long, Double, Double, Int)] = None
+
   /**
    * Start collecting and reporting shuffle load metrics.
    */
@@ -213,8 +217,17 @@ private[spark] class ExecutorShuffleLoadCollector(
     val avgWaitingTime = if (requests > 0) totalWaitingTime.get() / requests else 0L
     val avgNetworkTime = if (requests > 0) totalNetworkTime.get() / requests else 0L
 
+    // Get server-side metrics if available
+    val (serverRequestsReceived, serverRequestsCompleted, serverRequestsFailed,
+         serverBytesServed, serverAvgProcessingTime, serverAvgDiskReadTime,
+         serverQueueDepth) = serverMetricsProvider match {
+      case Some(provider) => provider()
+      case None => (0L, 0L, 0L, 0L, 0.0, 0.0, 0)
+    }
+
     ShuffleLoadMetrics(
       executorId = executorId,
+      // Client-side metrics
       bytesInFlight = bytesInFlight.get(),
       activeConnections = activeConnections.get(),
       networkCapacity = networkCapacityBytes,
@@ -222,6 +235,14 @@ private[spark] class ExecutorShuffleLoadCollector(
       avgWaitingTime = avgWaitingTime,
       avgNetworkTime = avgNetworkTime,
       queueDepth = queueDepth.get(),
+      // Server-side metrics (from ChunkFetchRequestHandler)
+      serverRequestsReceived = serverRequestsReceived,
+      serverRequestsCompleted = serverRequestsCompleted,
+      serverRequestsFailed = serverRequestsFailed,
+      serverBytesServed = serverBytesServed,
+      serverAvgProcessingTime = serverAvgProcessingTime,
+      serverAvgDiskReadTime = serverAvgDiskReadTime,
+      serverQueueDepth = serverQueueDepth,
       timestamp = System.currentTimeMillis()
     )
   }
@@ -291,6 +312,15 @@ private[spark] class ExecutorShuffleLoadCollector(
   }
 
   /**
+   * Register a server-side metrics provider (called by network layer integration).
+   */
+  def setServerMetricsProvider(
+      provider: () => (Long, Long, Long, Long, Double, Double, Int)): Unit = {
+    serverMetricsProvider = Some(provider)
+    logInfo(s"Registered server metrics provider for executor $executorId")
+  }
+
+  /**
    * Reset metrics (useful for testing).
    */
   private[storage] def reset(): Unit = {
@@ -303,5 +333,6 @@ private[spark] class ExecutorShuffleLoadCollector(
     totalWaitingTime.set(0L)
     totalNetworkTime.set(0L)
     activeFetches.clear()
+    serverMetricsProvider = None
   }
 }

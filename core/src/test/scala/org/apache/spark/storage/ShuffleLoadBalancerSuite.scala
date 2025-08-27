@@ -49,6 +49,13 @@ class ShuffleLoadBalancerSuite extends SparkFunSuite {
       avgWaitingTime = avgWaitingTime,
       avgNetworkTime = avgNetworkTime,
       queueDepth = queueDepth,
+      serverRequestsReceived = 100L,
+      serverRequestsCompleted = 95L,
+      serverRequestsFailed = 5L,
+      serverBytesServed = bytesInFlight * 2,
+      serverAvgProcessingTime = avgResponseTime.toDouble / 2.0,
+      serverAvgDiskReadTime = avgResponseTime.toDouble / 4.0,
+      serverQueueDepth = queueDepth / 2,
       timestamp = System.currentTimeMillis()
     )
   }
@@ -198,6 +205,13 @@ class ShuffleLoadBalancerSuite extends SparkFunSuite {
       avgWaitingTime = 40L,
       avgNetworkTime = 60L,
       queueDepth = 3,
+      serverRequestsReceived = 50L,
+      serverRequestsCompleted = 45L,
+      serverRequestsFailed = 5L,
+      serverBytesServed = 2048L,
+      serverAvgProcessingTime = 50.0,
+      serverAvgDiskReadTime = 25.0,
+      serverQueueDepth = 1,
       timestamp = System.currentTimeMillis() - 60000L // 1 minute ago
     )
 

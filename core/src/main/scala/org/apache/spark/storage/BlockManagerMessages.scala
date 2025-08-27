@@ -182,9 +182,11 @@ private[spark] object BlockManagerMessages {
 
   /**
    * Executor to Driver message containing shuffle load metrics for load balancing.
+   * Includes both client-side and server-side metrics for comprehensive load assessment.
    */
   case class ShuffleLoadMetrics(
       executorId: String,
+      // Client-side metrics (from ExecutorShuffleLoadCollector)
       bytesInFlight: Long,
       activeConnections: Int,
       networkCapacity: Long,
@@ -192,6 +194,14 @@ private[spark] object BlockManagerMessages {
       avgWaitingTime: Long,
       avgNetworkTime: Long,
       queueDepth: Int,
+      // Server-side metrics (from ChunkFetchRequestHandler)
+      serverRequestsReceived: Long,
+      serverRequestsCompleted: Long,
+      serverRequestsFailed: Long,
+      serverBytesServed: Long,
+      serverAvgProcessingTime: Double,
+      serverAvgDiskReadTime: Double,
+      serverQueueDepth: Int,
       timestamp: Long) extends ToBlockManagerMaster
 
   /**

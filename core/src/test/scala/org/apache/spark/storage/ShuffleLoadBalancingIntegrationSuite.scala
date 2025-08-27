@@ -65,6 +65,13 @@ class ShuffleLoadBalancingIntegrationSuite extends SparkFunSuite {
       avgWaitingTime = 200L,
       avgNetworkTime = 300L,
       queueDepth = 8,
+      serverRequestsReceived = 1000L,
+      serverRequestsCompleted = 900L,
+      serverRequestsFailed = 100L,
+      serverBytesServed = 16 * 1024 * 1024L,
+      serverAvgProcessingTime = 100.0,
+      serverAvgDiskReadTime = 50.0,
+      serverQueueDepth = 15,
       timestamp = System.currentTimeMillis()
     )
     // Add a lightly loaded executor
@@ -77,6 +84,13 @@ class ShuffleLoadBalancingIntegrationSuite extends SparkFunSuite {
       avgWaitingTime = 20L,
       avgNetworkTime = 30L,
       queueDepth = 1,
+      serverRequestsReceived = 100L,
+      serverRequestsCompleted = 95L,
+      serverRequestsFailed = 5L,
+      serverBytesServed = 2 * 1024 * 1024L,
+      serverAvgProcessingTime = 25.0,
+      serverAvgDiskReadTime = 10.0,
+      serverQueueDepth = 2,
       timestamp = System.currentTimeMillis()
     )
     loadBalancer.updateExecutorLoad(heavyLoadMetrics)
@@ -103,9 +117,11 @@ class ShuffleLoadBalancingIntegrationSuite extends SparkFunSuite {
     assert(emptyStats("activeExecutors") === 0.0)
     // Add executors with different loads
     loadBalancer.updateExecutorLoad(ShuffleLoadMetrics(
-      "executor-1", 1000000L, 5, 10000000L, 100L, 40L, 60L, 2, System.currentTimeMillis()))
+      "executor-1", 1000000L, 5, 10000000L, 100L, 40L, 60L, 2, 
+      50L, 45L, 5L, 2000000L, 35.0, 15.0, 1, System.currentTimeMillis()))
     loadBalancer.updateExecutorLoad(ShuffleLoadMetrics(
-      "executor-2", 5000000L, 8, 10000000L, 200L, 100L, 100L, 5, System.currentTimeMillis()))
+      "executor-2", 5000000L, 8, 10000000L, 200L, 100L, 100L, 5,
+      200L, 180L, 20L, 10000000L, 75.0, 35.0, 8, System.currentTimeMillis()))
     val stats = loadBalancer.getClusterLoadStats
     assert(stats("activeExecutors") === 2.0)
     assert(stats("avgLoadScore") > 0.0)
@@ -118,9 +134,9 @@ class ShuffleLoadBalancingIntegrationSuite extends SparkFunSuite {
     val loadBalancer = new ShuffleLoadBalancer(conf)
     // Add executors with varying loads
     val lightLoad = ShuffleLoadMetrics("light", 1000000L, 2, 10000000L, 50L, 20L, 30L, 1,
-      System.currentTimeMillis())
+      25L, 23L, 2L, 2000000L, 20.0, 8.0, 0, System.currentTimeMillis())
     val heavyLoad = ShuffleLoadMetrics("heavy", 8000000L, 8, 10000000L, 400L, 150L, 250L, 8,
-      System.currentTimeMillis())
+      500L, 450L, 50L, 16000000L, 120.0, 60.0, 12, System.currentTimeMillis())
     loadBalancer.updateExecutorLoad(lightLoad)
     loadBalancer.updateExecutorLoad(heavyLoad)
     val configUpdates = loadBalancer.generateConfigUpdates()
@@ -153,7 +169,7 @@ class ShuffleLoadBalancingIntegrationSuite extends SparkFunSuite {
     val loadBalancer = new ShuffleLoadBalancer(conf)
     // Add executor
     val metrics = ShuffleLoadMetrics("executor-1", 1000L, 1, 1000000L, 100L, 40L, 60L, 1,
-      System.currentTimeMillis())
+      10L, 9L, 1L, 2000L, 45.0, 20.0, 0, System.currentTimeMillis())
     loadBalancer.updateExecutorLoad(metrics)
     assert(loadBalancer.getExecutorLoadState("executor-1").isDefined)
     // Remove executor
