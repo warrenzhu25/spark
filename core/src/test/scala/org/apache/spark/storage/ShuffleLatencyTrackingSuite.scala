@@ -99,6 +99,13 @@ class ShuffleLatencyTrackingSuite extends SparkFunSuite {
       avgWaitingTime = 50L, // At baseline (50ms)
       avgNetworkTime = 50L, // At baseline (50ms)
       queueDepth = 1, // 20% of 5 baseline
+      serverRequestsReceived = 100L,
+      serverRequestsCompleted = 95L,
+      serverRequestsFailed = 5L,
+      serverBytesServed = 2000000L,
+      serverAvgProcessingTime = 50.0,
+      serverAvgDiskReadTime = 20.0,
+      serverQueueDepth = 1,
       lastUpdateTime = System.currentTimeMillis()
     )
 
@@ -111,6 +118,13 @@ class ShuffleLatencyTrackingSuite extends SparkFunSuite {
       avgWaitingTime = 300L, // High waiting time (250ms above baseline)
       avgNetworkTime = 400L, // High network time (350ms above baseline)
       queueDepth = 8, // Higher queue pressure (160%)
+      serverRequestsReceived = 200L,
+      serverRequestsCompleted = 170L,
+      serverRequestsFailed = 30L,
+      serverBytesServed = 12000000L,
+      serverAvgProcessingTime = 150.0,
+      serverAvgDiskReadTime = 80.0,
+      serverQueueDepth = 10,
       lastUpdateTime = System.currentTimeMillis()
     )
 

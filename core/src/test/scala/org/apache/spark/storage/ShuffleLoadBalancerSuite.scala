@@ -70,14 +70,24 @@ class ShuffleLoadBalancerSuite extends SparkFunSuite {
       avgWaitingTime = 75L,
       avgNetworkTime = 125L,
       queueDepth = 5, // 100% of baseline (5)
+      serverRequestsReceived = 100L,
+      serverRequestsCompleted = 95L,
+      serverRequestsFailed = 5L,
+      serverBytesServed = 1000000L,
+      serverAvgProcessingTime = 75.0,
+      serverAvgDiskReadTime = 30.0,
+      serverQueueDepth = 3,
       lastUpdateTime = System.currentTimeMillis()
     )
 
-    // Load score with 6-factor calculation:
-    // capacityUtilization: 0.5, connectionPressure: 0.5, queuePressure: 1.0,
+    // Load score with client (60%) + server (40%) weighted calculation:
+    // Client: capacityUtilization: 0.5, connectionPressure: 0.5, queuePressure: 1.0,
     // responsePressure: 0.5, waitingPressure: 0.125, networkPressure: 0.25
-    // Average: (0.5 + 0.5 + 1.0 + 0.5 + 0.125 + 0.25) / 6 = 0.479
-    assert(math.abs(loadState.loadScore - 0.479) < 0.01)
+    // Client average: (0.5 + 0.5 + 1.0 + 0.5 + 0.125 + 0.25) / 6 = 0.479
+    // Server: failureRate: 0.05, processingPressure: 0.125, diskPressure: 0.1, queuePressure: 0.3
+    // Server average: (0.05 + 0.125 + 0.1 + 0.3) / 4 = 0.144
+    // Combined: (0.479 * 0.6) + (0.144 * 0.4) = 0.345
+    assert(math.abs(loadState.loadScore - 0.345) < 0.05)
   }
 
   test("ExecutorLoadState overload detection") {
@@ -92,6 +102,13 @@ class ShuffleLoadBalancerSuite extends SparkFunSuite {
       avgWaitingTime = 150L,
       avgNetworkTime = 250L,
       queueDepth = 8,
+      serverRequestsReceived = 200L,
+      serverRequestsCompleted = 180L,
+      serverRequestsFailed = 20L,
+      serverBytesServed = 1600000L,
+      serverAvgProcessingTime = 150.0,
+      serverAvgDiskReadTime = 80.0,
+      serverQueueDepth = 10,
       lastUpdateTime = System.currentTimeMillis()
     )
 
@@ -104,6 +121,13 @@ class ShuffleLoadBalancerSuite extends SparkFunSuite {
       avgWaitingTime = 20L,
       avgNetworkTime = 30L,
       queueDepth = 1,
+      serverRequestsReceived = 50L,
+      serverRequestsCompleted = 48L,
+      serverRequestsFailed = 2L,
+      serverBytesServed = 400000L,
+      serverAvgProcessingTime = 25.0,
+      serverAvgDiskReadTime = 10.0,
+      serverQueueDepth = 1,
       lastUpdateTime = System.currentTimeMillis()
     )
 

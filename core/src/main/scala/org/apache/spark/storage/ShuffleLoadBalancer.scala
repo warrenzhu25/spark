@@ -26,10 +26,19 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.storage.BlockManagerMessages._
 
 /**
+ * Enum for load shedding actions to take when executors are overloaded.
+ */
+private[spark] object LoadSheddingAction extends Enumeration {
+  val THROTTLE_CONNECTIONS, REDUCE_REQUEST_RATE, REJECT_NEW_REQUESTS = Value
+}
+
+/**
  * Tracks the current load state of an executor for shuffle operations.
+ * Includes both client-side and server-side metrics for comprehensive load assessment.
  */
 private[spark] case class ExecutorLoadState(
     executorId: String,
+    // Client-side metrics
     bytesInFlight: Long,
     activeConnections: Int,
     networkCapacity: Long,
@@ -37,26 +46,42 @@ private[spark] case class ExecutorLoadState(
     avgWaitingTime: Long,
     avgNetworkTime: Long,
     queueDepth: Int,
+    // Server-side metrics
+    serverRequestsReceived: Long,
+    serverRequestsCompleted: Long,
+    serverRequestsFailed: Long,
+    serverBytesServed: Long,
+    serverAvgProcessingTime: Double,
+    serverAvgDiskReadTime: Double,
+    serverQueueDepth: Int,
     lastUpdateTime: Long) {
 
   /**
-   * Calculate a load score for this executor. Higher scores indicate higher load.
-   * Score ranges from 0.0 (no load) to 1.0+ (overloaded).
+   * Calculate a simple load score for this executor.
+   * Score ranges from 0.0 (idle) to 1.0+ (overloaded).
+   * Goal: Keep all executors busy but not overloaded.
    */
   def loadScore: Double = {
-    val capacityUtilization = if (networkCapacity > 0) {
+    // Simple capacity utilization (primary factor)
+    val capacityUsed = if (networkCapacity > 0) {
       bytesInFlight.toDouble / networkCapacity
     } else {
       0.0
     }
-    val connectionPressure = activeConnections.toDouble / 10.0 // Assume 10 as baseline
-    val queuePressure = queueDepth.toDouble / 5.0 // Assume 5 as baseline
-    val responsePressure = Math.max(0.0, (avgResponseTime - 100.0) / 500.0) // 100ms baseline
-    val waitingPressure = Math.max(0.0, (avgWaitingTime - 50.0) / 200.0) // 50ms baseline, 200ms max
-    val networkPressure = Math.max(0.0, (avgNetworkTime - 50.0) / 300.0) // 50ms baseline, 300ms max
 
-    (capacityUtilization + connectionPressure + queuePressure + responsePressure +
-      waitingPressure + networkPressure) / 6.0
+    // Simple server health check (secondary factor)
+    val serverHealth = if (serverRequestsReceived > 0) {
+      val failureRate = serverRequestsFailed.toDouble / serverRequestsReceived
+      val isSlowProcessing = serverAvgProcessingTime > 200.0 // 200ms threshold
+      val isSlowDisk = serverAvgDiskReadTime > 100.0 // 100ms threshold
+
+      if (failureRate >= 0.1 || isSlowProcessing || isSlowDisk) 0.5 else 0.0
+    } else {
+      0.0
+    }
+
+    // Simple formula: capacity + server penalty
+    capacityUsed + serverHealth
   }
 
   /**
@@ -65,6 +90,50 @@ private[spark] case class ExecutorLoadState(
   def isOverloaded(conf: SparkConf): Boolean = {
     val loadThreshold = conf.getDouble("spark.shuffle.loadbalancer.overloadThreshold", 0.8)
     loadScore > loadThreshold
+  }
+
+  /**
+   * Check if the server-side is experiencing high failure rates.
+   */
+  def hasServerFailures(conf: SparkConf): Boolean = {
+    val failureThreshold = conf.getDouble("spark.shuffle.loadbalancer.serverFailureThreshold", 0.1)
+    if (serverRequestsReceived > 0) {
+      (serverRequestsFailed.toDouble / serverRequestsReceived) > failureThreshold
+    } else {
+      false
+    }
+  }
+
+  /**
+   * Check if the server-side is experiencing disk bottlenecks.
+   */
+  def hasDiskBottleneck(conf: SparkConf): Boolean = {
+    val diskThreshold = conf.getDouble(
+      "spark.shuffle.loadbalancer.diskReadThreshold", 100.0) // 100ms
+    serverAvgDiskReadTime > diskThreshold
+  }
+
+  /**
+   * Check if the server-side is experiencing processing bottlenecks.
+   */
+  def hasProcessingBottleneck(conf: SparkConf): Boolean = {
+    val processingThreshold = conf.getDouble(
+      "spark.shuffle.loadbalancer.processingThreshold", 200.0) // 200ms
+    serverAvgProcessingTime > processingThreshold
+  }
+
+  /**
+   * Simple classification: Is this executor ready for more work?
+   */
+  def canAcceptMoreWork(): Boolean = {
+    loadScore < 0.8
+  }
+
+  /**
+   * Is this executor completely idle?
+   */
+  def isIdle: Boolean = {
+    loadScore < 0.1
   }
 
   /**
@@ -104,6 +173,7 @@ private[spark] class ShuffleLoadBalancer(conf: SparkConf) extends Logging {
   def updateExecutorLoad(metrics: ShuffleLoadMetrics): Unit = {
     val loadState = ExecutorLoadState(
       executorId = metrics.executorId,
+      // Client-side metrics
       bytesInFlight = metrics.bytesInFlight,
       activeConnections = metrics.activeConnections,
       networkCapacity = metrics.networkCapacity,
@@ -111,6 +181,14 @@ private[spark] class ShuffleLoadBalancer(conf: SparkConf) extends Logging {
       avgWaitingTime = metrics.avgWaitingTime,
       avgNetworkTime = metrics.avgNetworkTime,
       queueDepth = metrics.queueDepth,
+      // Server-side metrics
+      serverRequestsReceived = metrics.serverRequestsReceived,
+      serverRequestsCompleted = metrics.serverRequestsCompleted,
+      serverRequestsFailed = metrics.serverRequestsFailed,
+      serverBytesServed = metrics.serverBytesServed,
+      serverAvgProcessingTime = metrics.serverAvgProcessingTime,
+      serverAvgDiskReadTime = metrics.serverAvgDiskReadTime,
+      serverQueueDepth = metrics.serverQueueDepth,
       lastUpdateTime = metrics.timestamp
     )
 
@@ -147,30 +225,48 @@ private[spark] class ShuffleLoadBalancer(conf: SparkConf) extends Logging {
   }
 
   /**
-   * Calculate optimal fetch strategy for a target executor.
+   * Simple load balancing strategy: Keep all executors busy but not overloaded.
    */
   def calculateOptimalFetchStrategy(targetExecutor: String): Option[ShuffleFetchDirective] = {
     getExecutorLoadState(targetExecutor).map { targetState =>
-      val preferredSources = getPreferredSourceExecutors(targetExecutor)
-      val recommendedRequestSize = targetState.recommendedRequestSize(
-        conf.getLong("spark.reducer.maxSizeInFlight", 48) * 1024 * 1024 / 5, conf)
-      val throttleDelay = if (targetState.isOverloaded(conf)) 10 else 0
-      val priority = if (targetState.loadScore < 0.5) {
-        1
-      } else if (targetState.loadScore < 0.8) {
-        2
+      val preferredSources = getBestAvailableSources(targetExecutor)
+      val baseRequestSize = conf.getLong("spark.reducer.maxSizeInFlight", 48) * 1024 * 1024 / 5
+
+      // Simple throttling: slow down if overloaded
+      val throttleDelay = if (targetState.canAcceptMoreWork()) 0 else 50
+
+      // Simple priority: prefer idle executors, avoid overloaded ones
+      val priority = if (!targetState.canAcceptMoreWork()) {
+        3 // Lower priority for overloaded
+      } else if (targetState.isIdle) {
+        1 // Highest priority for idle
       } else {
-        3
+        2 // Normal priority for busy but not overloaded
       }
 
       ShuffleFetchDirective(
         targetExecutor = targetExecutor,
         preferredSources = preferredSources,
-        maxRequestSize = recommendedRequestSize,
+        maxRequestSize = baseRequestSize,
         throttleDelay = throttleDelay,
         priority = priority
       )
     }
+  }
+
+  /**
+   * Get best available sources: prefer idle executors, then busy but not overloaded.
+   */
+  def getBestAvailableSources(targetExecutor: String): Seq[String] = {
+    val availableExecutors = getAllExecutorLoadStates
+      .filter { case (executorId, _) => executorId != targetExecutor }
+      .filter { case (_, loadState) => loadState.canAcceptMoreWork() }
+      .toSeq
+
+    // Sort by load: idle first, then by increasing load
+    val sortedByLoad = availableExecutors.sortBy { case (_, loadState) => loadState.loadScore }
+
+    sortedByLoad.take(maxPreferredSources).map(_._1)
   }
 
   /**
@@ -270,6 +366,40 @@ private[spark] class ShuffleLoadBalancer(conf: SparkConf) extends Logging {
     executorHistory.asScala.flatMap { case (executorId, history) =>
       history.predictLoad(forecastWindowMs).filter(_ > 0.7).map(_ => executorId)
     }.toSeq
+  }
+
+  /**
+   * Simple load shedding: just identify overloaded executors.
+   */
+  def generateLoadSheddingRecommendations(): Map[String, LoadSheddingAction.Value] = {
+    getAllExecutorLoadStates.flatMap { case (executorId, loadState) =>
+      if (!loadState.canAcceptMoreWork()) {
+        Some(executorId -> LoadSheddingAction.THROTTLE_CONNECTIONS)
+      } else {
+        None
+      }
+    }
+  }
+
+  /**
+   * Simple check: avoid executor if it can't accept more work.
+   */
+  def shouldAvoidExecutor(executorId: String): Boolean = {
+    getExecutorLoadState(executorId) match {
+      case Some(loadState) => !loadState.canAcceptMoreWork()
+      case None => false
+    }
+  }
+
+  /**
+   * Simple throttling: reduce rate if executor is overloaded.
+   */
+  def getRequestThrottlingFactor(executorId: String): Double = {
+    getExecutorLoadState(executorId) match {
+      case Some(loadState) =>
+        if (loadState.canAcceptMoreWork()) 1.0 else 0.5
+      case None => 1.0
+    }
   }
 
   /**

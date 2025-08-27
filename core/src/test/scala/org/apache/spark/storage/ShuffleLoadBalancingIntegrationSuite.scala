@@ -117,7 +117,7 @@ class ShuffleLoadBalancingIntegrationSuite extends SparkFunSuite {
     assert(emptyStats("activeExecutors") === 0.0)
     // Add executors with different loads
     loadBalancer.updateExecutorLoad(ShuffleLoadMetrics(
-      "executor-1", 1000000L, 5, 10000000L, 100L, 40L, 60L, 2, 
+      "executor-1", 1000000L, 5, 10000000L, 100L, 40L, 60L, 2,
       50L, 45L, 5L, 2000000L, 35.0, 15.0, 1, System.currentTimeMillis()))
     loadBalancer.updateExecutorLoad(ShuffleLoadMetrics(
       "executor-2", 5000000L, 8, 10000000L, 200L, 100L, 100L, 5,

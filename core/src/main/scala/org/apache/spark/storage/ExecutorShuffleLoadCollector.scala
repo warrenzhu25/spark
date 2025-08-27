@@ -264,7 +264,7 @@ private[spark] class ExecutorShuffleLoadCollector(
   }
 
   /**
-   * Check if the executor is currently overloaded.
+   * Simple overload check: just compare capacity utilization to threshold.
    */
   def isOverloaded: Boolean = {
     val currentMetrics = getCurrentMetrics
@@ -276,11 +276,7 @@ private[spark] class ExecutorShuffleLoadCollector(
       0.0
     }
 
-    val connectionPressure = currentMetrics.activeConnections.toDouble / maxConcurrentFetches
-    val queuePressure = currentMetrics.queueDepth.toDouble / 10.0
-
-    val loadScore = (capacityUtilization + connectionPressure + queuePressure) / 3.0
-    loadScore > loadThreshold
+    capacityUtilization > loadThreshold
   }
 
   /**
