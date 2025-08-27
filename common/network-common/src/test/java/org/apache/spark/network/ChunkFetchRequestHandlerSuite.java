@@ -40,6 +40,117 @@ import org.apache.spark.network.server.RpcHandler;
 public class ChunkFetchRequestHandlerSuite {
 
   @Test
+  public void testServerMetricsCollection() throws Exception {
+    RpcHandler rpcHandler = new NoOpRpcHandler();
+    OneForOneStreamManager streamManager = (OneForOneStreamManager) (rpcHandler.getStreamManager());
+    Channel channel = mock(Channel.class);
+    ChannelHandlerContext context = mock(ChannelHandlerContext.class);
+    when(context.channel()).thenReturn(channel);
+
+    List<Pair<Object, ExtendedChannelPromise>> responseAndPromisePairs = new ArrayList<>();
+    when(channel.writeAndFlush(any())).thenAnswer(invocation -> {
+      Object response = invocation.getArguments()[0];
+      ExtendedChannelPromise channelFuture = new ExtendedChannelPromise(channel);
+      responseAndPromisePairs.add(ImmutablePair.of(response, channelFuture));
+      return channelFuture;
+    });
+
+    // Prepare stream with test buffers (TestManagedBuffer max size is 127)
+    List<ManagedBuffer> managedBuffers = new ArrayList<>();
+    managedBuffers.add(new TestManagedBuffer(50));
+    managedBuffers.add(new TestManagedBuffer(100));
+    long streamId = streamManager.registerStream("test-app", managedBuffers.iterator(), channel);
+
+    TransportClient reverseClient = mock(TransportClient.class);
+    ChunkFetchRequestHandler requestHandler = new ChunkFetchRequestHandler(
+        reverseClient, rpcHandler.getStreamManager(), Long.MAX_VALUE, false);
+
+    // Verify initial metrics are zero
+    ChunkFetchRequestHandler.ServerMetrics initialMetrics = requestHandler.getServerMetrics();
+    Assert.assertEquals(0, initialMetrics.totalRequestsReceived);
+    Assert.assertEquals(0, initialMetrics.totalRequestsCompleted);
+    Assert.assertEquals(0, initialMetrics.totalRequestsFailed);
+    Assert.assertEquals(0, initialMetrics.totalBytesServed);
+    Assert.assertEquals(0, initialMetrics.currentQueueDepth);
+
+    // Process successful request
+    RequestMessage request1 = new ChunkFetchRequest(new StreamChunkId(streamId, 0));
+    requestHandler.channelRead(context, request1);
+
+    // Complete the request
+    responseAndPromisePairs.get(0).getRight().finish(true);
+
+    // Verify metrics after successful request
+    ChunkFetchRequestHandler.ServerMetrics metrics1 = requestHandler.getServerMetrics();
+    Assert.assertEquals(1, metrics1.totalRequestsReceived);
+    Assert.assertEquals(1, metrics1.totalRequestsCompleted);
+    Assert.assertEquals(0, metrics1.totalRequestsFailed);
+    Assert.assertEquals(50, metrics1.totalBytesServed);
+    Assert.assertEquals(0, metrics1.currentQueueDepth);
+    Assert.assertTrue("Expected positive processing time, got: " + metrics1.getAvgProcessingTimeMs(), 
+      metrics1.getAvgProcessingTimeMs() >= 0);
+    Assert.assertEquals(1.0, metrics1.getSuccessRate(), 0.01);
+
+    // Process another successful request
+    RequestMessage request2 = new ChunkFetchRequest(new StreamChunkId(streamId, 1));
+    requestHandler.channelRead(context, request2);
+    responseAndPromisePairs.get(1).getRight().finish(true);
+
+    // Verify accumulated metrics
+    ChunkFetchRequestHandler.ServerMetrics metrics2 = requestHandler.getServerMetrics();
+    Assert.assertEquals(2, metrics2.totalRequestsReceived);
+    Assert.assertEquals(2, metrics2.totalRequestsCompleted);
+    Assert.assertEquals(0, metrics2.totalRequestsFailed);
+    Assert.assertEquals(150, metrics2.totalBytesServed); // 50 + 100
+    Assert.assertEquals(1.0, metrics2.getSuccessRate(), 0.01);
+
+    // Test metrics reset
+    requestHandler.resetMetrics();
+    ChunkFetchRequestHandler.ServerMetrics resetMetrics = requestHandler.getServerMetrics();
+    Assert.assertEquals(0, resetMetrics.totalRequestsReceived);
+    Assert.assertEquals(0, resetMetrics.totalRequestsCompleted);
+    Assert.assertEquals(0, resetMetrics.totalBytesServed);
+  }
+
+  @Test
+  public void testServerMetricsWithFailures() throws Exception {
+    RpcHandler rpcHandler = new NoOpRpcHandler();
+    OneForOneStreamManager streamManager = (OneForOneStreamManager) (rpcHandler.getStreamManager());
+    Channel channel = mock(Channel.class);
+    ChannelHandlerContext context = mock(ChannelHandlerContext.class);
+    when(context.channel()).thenReturn(channel);
+
+    List<Pair<Object, ExtendedChannelPromise>> responseAndPromisePairs = new ArrayList<>();
+    when(channel.writeAndFlush(any())).thenAnswer(invocation -> {
+      Object response = invocation.getArguments()[0];
+      ExtendedChannelPromise channelFuture = new ExtendedChannelPromise(channel);
+      responseAndPromisePairs.add(ImmutablePair.of(response, channelFuture));
+      return channelFuture;
+    });
+
+    // Prepare stream with null buffer to trigger failure
+    List<ManagedBuffer> managedBuffers = new ArrayList<>();
+    managedBuffers.add(null); // This will cause a failure
+    long streamId = streamManager.registerStream("test-app", managedBuffers.iterator(), channel);
+
+    TransportClient reverseClient = mock(TransportClient.class);
+    ChunkFetchRequestHandler requestHandler = new ChunkFetchRequestHandler(
+        reverseClient, rpcHandler.getStreamManager(), Long.MAX_VALUE, false);
+
+    // Process request that will fail
+    RequestMessage failingRequest = new ChunkFetchRequest(new StreamChunkId(streamId, 0));
+    requestHandler.channelRead(context, failingRequest);
+
+    // Verify failure metrics
+    ChunkFetchRequestHandler.ServerMetrics metrics = requestHandler.getServerMetrics();
+    Assert.assertEquals(1, metrics.totalRequestsReceived);
+    Assert.assertEquals(0, metrics.totalRequestsCompleted);
+    Assert.assertEquals(1, metrics.totalRequestsFailed);
+    Assert.assertEquals(0, metrics.totalBytesServed);
+    Assert.assertEquals(0.0, metrics.getSuccessRate(), 0.01);
+  }
+
+  @Test
   public void handleChunkFetchRequest() throws Exception {
     RpcHandler rpcHandler = new NoOpRpcHandler();
     OneForOneStreamManager streamManager = (OneForOneStreamManager) (rpcHandler.getStreamManager());

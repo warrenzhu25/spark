@@ -18,6 +18,8 @@
 package org.apache.spark.network.server;
 
 import java.net.SocketAddress;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import com.google.common.base.Throwables;
 import io.netty.channel.Channel;
@@ -57,6 +59,15 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
   private final long maxChunksBeingTransferred;
   private final boolean syncModeEnabled;
 
+  // Server-side metrics counters
+  private final AtomicLong totalRequestsReceived = new AtomicLong(0);
+  private final AtomicLong totalRequestsCompleted = new AtomicLong(0);
+  private final AtomicLong totalRequestsFailed = new AtomicLong(0);
+  private final AtomicLong totalBytesServed = new AtomicLong(0);
+  private final AtomicLong totalProcessingTime = new AtomicLong(0);
+  private final AtomicLong totalDiskReadTime = new AtomicLong(0);
+  private final AtomicInteger currentQueueDepth = new AtomicInteger(0);
+
   public ChunkFetchRequestHandler(
       TransportClient client,
       StreamManager streamManager,
@@ -84,37 +95,67 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
 
   public void processFetchRequest(
       final Channel channel, final ChunkFetchRequest msg) throws Exception {
+    final long startTime = System.currentTimeMillis();
+    totalRequestsReceived.incrementAndGet();
+    currentQueueDepth.incrementAndGet();
+
     if (logger.isTraceEnabled()) {
       logger.trace("Received req from {} to fetch block {}", getRemoteAddress(channel),
         msg.streamChunkId);
     }
-    if (maxChunksBeingTransferred < Long.MAX_VALUE) {
-      long chunksBeingTransferred = streamManager.chunksBeingTransferred();
-      if (chunksBeingTransferred >= maxChunksBeingTransferred) {
-        logger.warn("The number of chunks being transferred {} is above {}, close the connection.",
-          chunksBeingTransferred, maxChunksBeingTransferred);
-        channel.close();
+
+    try {
+      if (maxChunksBeingTransferred < Long.MAX_VALUE) {
+        long chunksBeingTransferred = streamManager.chunksBeingTransferred();
+        if (chunksBeingTransferred >= maxChunksBeingTransferred) {
+          logger.warn("The number of chunks being transferred {} is above {}, close the connection.",
+            chunksBeingTransferred, maxChunksBeingTransferred);
+          totalRequestsFailed.incrementAndGet();
+          channel.close();
+          return;
+        }
+      }
+
+      ManagedBuffer buf;
+      final long diskReadStart = System.currentTimeMillis();
+      try {
+        streamManager.checkAuthorization(client, msg.streamChunkId.streamId);
+        buf = streamManager.getChunk(msg.streamChunkId.streamId, msg.streamChunkId.chunkIndex);
+        if (buf == null) {
+          throw new IllegalStateException("Chunk was not found");
+        }
+      } catch (Exception e) {
+        final long processingTime = System.currentTimeMillis() - startTime;
+        totalProcessingTime.addAndGet(processingTime);
+        totalRequestsFailed.incrementAndGet();
+        logger.error(String.format("Error opening block %s for request from %s",
+          msg.streamChunkId, getRemoteAddress(channel)), e);
+        respond(channel, new ChunkFetchFailure(msg.streamChunkId,
+          Throwables.getStackTraceAsString(e)));
         return;
       }
-    }
-    ManagedBuffer buf;
-    try {
-      streamManager.checkAuthorization(client, msg.streamChunkId.streamId);
-      buf = streamManager.getChunk(msg.streamChunkId.streamId, msg.streamChunkId.chunkIndex);
-      if (buf == null) {
-        throw new IllegalStateException("Chunk was not found");
-      }
-    } catch (Exception e) {
-      logger.error(String.format("Error opening block %s for request from %s",
-        msg.streamChunkId, getRemoteAddress(channel)), e);
-      respond(channel, new ChunkFetchFailure(msg.streamChunkId,
-        Throwables.getStackTraceAsString(e)));
-      return;
-    }
 
-    streamManager.chunkBeingSent(msg.streamChunkId.streamId);
-    respond(channel, new ChunkFetchSuccess(msg.streamChunkId, buf)).addListener(
-      (ChannelFutureListener) future -> streamManager.chunkSent(msg.streamChunkId.streamId));
+      final long diskReadTime = System.currentTimeMillis() - diskReadStart;
+      totalDiskReadTime.addAndGet(diskReadTime);
+
+      final long bufferSize = buf.size();
+      totalBytesServed.addAndGet(bufferSize);
+
+      streamManager.chunkBeingSent(msg.streamChunkId.streamId);
+      respond(channel, new ChunkFetchSuccess(msg.streamChunkId, buf)).addListener(
+        (ChannelFutureListener) future -> {
+          streamManager.chunkSent(msg.streamChunkId.streamId);
+          final long totalTime = System.currentTimeMillis() - startTime;
+          totalProcessingTime.addAndGet(totalTime);
+          if (future.isSuccess()) {
+            totalRequestsCompleted.incrementAndGet();
+          } else {
+            totalRequestsFailed.incrementAndGet();
+          }
+        });
+    } finally {
+      currentQueueDepth.decrementAndGet();
+    }
   }
 
   /**
@@ -150,5 +191,89 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
         channel.close();
       }
     });
+  }
+
+  /**
+   * Get current server-side metrics for this handler.
+   */
+  public ServerMetrics getServerMetrics() {
+    return new ServerMetrics(
+      totalRequestsReceived.get(),
+      totalRequestsCompleted.get(),
+      totalRequestsFailed.get(),
+      totalBytesServed.get(),
+      totalProcessingTime.get(),
+      totalDiskReadTime.get(),
+      currentQueueDepth.get()
+    );
+  }
+
+  /**
+   * Reset metrics counters (primarily for testing).
+   */
+  public void resetMetrics() {
+    totalRequestsReceived.set(0);
+    totalRequestsCompleted.set(0);
+    totalRequestsFailed.set(0);
+    totalBytesServed.set(0);
+    totalProcessingTime.set(0);
+    totalDiskReadTime.set(0);
+    currentQueueDepth.set(0);
+  }
+
+  /**
+   * Container class for server-side metrics.
+   */
+  public static class ServerMetrics {
+    public final long totalRequestsReceived;
+    public final long totalRequestsCompleted;
+    public final long totalRequestsFailed;
+    public final long totalBytesServed;
+    public final long totalProcessingTimeMs;
+    public final long totalDiskReadTimeMs;
+    public final int currentQueueDepth;
+
+    public ServerMetrics(
+        long totalRequestsReceived,
+        long totalRequestsCompleted,
+        long totalRequestsFailed,
+        long totalBytesServed,
+        long totalProcessingTimeMs,
+        long totalDiskReadTimeMs,
+        int currentQueueDepth) {
+      this.totalRequestsReceived = totalRequestsReceived;
+      this.totalRequestsCompleted = totalRequestsCompleted;
+      this.totalRequestsFailed = totalRequestsFailed;
+      this.totalBytesServed = totalBytesServed;
+      this.totalProcessingTimeMs = totalProcessingTimeMs;
+      this.totalDiskReadTimeMs = totalDiskReadTimeMs;
+      this.currentQueueDepth = currentQueueDepth;
+    }
+
+    public double getSuccessRate() {
+      return totalRequestsReceived > 0 ?
+        (double) totalRequestsCompleted / totalRequestsReceived : 1.0;
+    }
+
+    public double getAvgProcessingTimeMs() {
+      return totalRequestsCompleted > 0 ?
+        (double) totalProcessingTimeMs / totalRequestsCompleted : 0.0;
+    }
+
+    public double getAvgDiskReadTimeMs() {
+      return totalRequestsCompleted > 0 ?
+        (double) totalDiskReadTimeMs / totalRequestsCompleted : 0.0;
+    }
+
+    @Override
+    public String toString() {
+      return String.format(
+        "ServerMetrics{received=%d, completed=%d, failed=%d, bytesServed=%d, " +
+        "avgProcessingMs=%.2f, avgDiskReadMs=%.2f, queueDepth=%d, successRate=%.2f}",
+        totalRequestsReceived, totalRequestsCompleted, totalRequestsFailed,
+        totalBytesServed, getAvgProcessingTimeMs(), getAvgDiskReadTimeMs(),
+        currentQueueDepth, getSuccessRate()
+      );
+    }
   }
 }
