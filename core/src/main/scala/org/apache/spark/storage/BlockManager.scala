@@ -1999,7 +1999,8 @@ private[spark] class BlockManager(
     decommissioner match {
       case None =>
         logInfo("Starting block manager decommissioning process...")
-        decommissioner = Some(new BlockManagerDecommissioner(conf, this))
+        decommissioner = Some(new BlockManagerDecommissioner(conf, this,
+          mapOutputTracker.asInstanceOf[MapOutputTrackerMaster]))
         decommissioner.foreach(_.start())
       case Some(_) =>
         logDebug("Block manager already in decommissioning state")

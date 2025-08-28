@@ -28,6 +28,7 @@ import scala.concurrent.duration.Duration
 import scala.util.control.NonFatal
 
 import org.apache.spark._
+import org.apache.spark.MapOutputTrackerMaster
 import org.apache.spark.errors.SparkCoreErrors
 import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.shuffle.ShuffleBlockInfo
@@ -40,7 +41,8 @@ import org.apache.spark.util.{ThreadUtils, Utils}
  */
 private[storage] class BlockManagerDecommissioner(
     conf: SparkConf,
-    bm: BlockManager) extends Logging {
+    bm: BlockManager,
+    mapOutputTracker: MapOutputTrackerMaster) extends Logging {
 
   private val fallbackStorage = FallbackStorage.getFallbackStorage(conf)
   private val maxReplicationFailuresForDecommission =
@@ -349,6 +351,93 @@ private[storage] class BlockManagerDecommissioner(
     } else None
 
   /**
+   * Calculate total shuffle data size per executor by querying MapOutputTracker.
+   * This helps identify executors with low data (likely future decommission candidates)
+   * vs high data (overloaded) to make better migration targeting decisions.
+   */
+  private def calculateExecutorShuffleLoads(): Map[String, Long] = {
+    val loads = mutable.Map[String, Long]()
+
+    mapOutputTracker.shuffleStatuses.values.foreach {
+      shuffleStatus =>
+      shuffleStatus.withMapStatuses { statuses =>
+        statuses.filter(_ != null).foreach { status =>
+          val executorId = status.location.executorId
+          // Sum all partition sizes for this map output
+          var totalSize = 0L
+          var partId = 0
+          try {
+            // Keep summing until we get an exception (reached the end)
+            while (true) {
+              val size = status.getSizeForBlock(partId)
+              if (size > 0) totalSize += size
+              partId += 1
+            }
+          } catch {
+            case _: Exception => // Expected when we've gone past the last partition
+          }
+          loads(executorId) = loads.getOrElse(executorId, 0L) + totalSize
+        }
+      }
+    }
+
+    val result = loads.toMap
+    if (result.nonEmpty) {
+      logDebug(s"Calculated shuffle loads for ${result.size} executors: " +
+        result.toSeq.sortBy(_._2).map { case (exec, load) =>
+          s"$exec=${Utils.bytesToString(load)}"
+        }.mkString(", "))
+    }
+    result
+  }
+
+  /**
+   * Select peers for shuffle migration based on their current shuffle load.
+   * Avoids executors with very low data (likely future decommission candidates)
+   * and very high data (already overloaded). Targets middle-range executors.
+   */
+  private def selectPeersByLoad(availablePeers: Set[BlockManagerId]): Seq[BlockManagerId] = {
+    if (availablePeers.isEmpty) return Seq.empty
+
+    val executorLoads = calculateExecutorShuffleLoads()
+
+    // If no load data available, fall back to random selection
+    if (executorLoads.isEmpty) {
+      logInfo("No executor load data available, falling back to random peer selection")
+      return Utils.randomize(availablePeers)
+    }
+
+    // Sort peers by their current shuffle load (low to high)
+    val sortedByLoad = availablePeers.toSeq.sortBy(peer =>
+      executorLoads.getOrElse(peer.executorId, 0L))
+
+    val numPeers = sortedByLoad.length
+    if (numPeers <= 2) {
+      // Too few peers, use all available
+      sortedByLoad
+    } else {
+      // Skip lowest 20% (future decom candidates) and highest 20% (overloaded)
+      val skipLow = (numPeers * 0.2).toInt
+      val skipHigh = (numPeers * 0.2).toInt
+      val middleRange = sortedByLoad.drop(skipLow).dropRight(skipHigh)
+
+      if (middleRange.nonEmpty) {
+        val totalLoad = executorLoads.values.sum
+        val avgLoad = if (executorLoads.nonEmpty) totalLoad / executorLoads.size else 0L
+        logInfo(s"Selected ${middleRange.length} peers from middle load range " +
+          s"(skipped ${skipLow} low-load and ${skipHigh} high-load executors). " +
+          s"Avg load: ${Utils.bytesToString(avgLoad)}")
+        logDebug(s"Selected peers: ${middleRange.map(_.executorId).mkString(", ")}")
+        middleRange
+      } else {
+        // Fallback if middle range is empty
+        logWarning("Middle load range empty, falling back to all available peers")
+        sortedByLoad
+      }
+    }
+  }
+
+  /**
    * Tries to migrate all shuffle blocks that are registered with the shuffle service locally.
    * Note: this does not delete the shuffle files in-case there is an in-progress fetch
    * but rather shadows them.
@@ -385,8 +474,10 @@ private[storage] class BlockManagerDecommissioner(
     val livePeerSet = bm.getPeers(false).toSet
     val currentPeerSet = migrationPeers.keys.toSet
     val deadPeers = currentPeerSet.diff(livePeerSet)
-    // Randomize the orders of the peers to avoid hotspot nodes.
-    val newPeers = Utils.randomize(livePeerSet.diff(currentPeerSet))
+    // Select peers based on load balance to avoid future decommission candidates
+    // and overloaded executors. Fall back to random selection if load data unavailable.
+    val availablePeers = livePeerSet.diff(currentPeerSet)
+    val newPeers = selectPeersByLoad(availablePeers)
     migrationPeers ++= newPeers.map { peer =>
       logDebug(s"Starting thread to migrate shuffle blocks to ${peer}")
       val runnable = new ShuffleMigrationRunnable(peer)
