@@ -86,6 +86,14 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with PrivateMethodTe
   val mapOutputTracker = new MapOutputTrackerMaster(new SparkConf(false), bcastManager, true)
   val shuffleManager = new SortShuffleManager(new SparkConf(false))
 
+  private def createMockMapOutputTracker(): MapOutputTrackerMaster = {
+    val mockTracker = mock(classOf[MapOutputTrackerMaster])
+    val emptyShuffleStatuses =
+      new scala.collection.concurrent.TrieMap[Int, org.apache.spark.ShuffleStatus]()
+    when(mockTracker.shuffleStatuses).thenReturn(emptyShuffleStatuses)
+    mockTracker
+  }
+
   // Reuse a serializer across tests to avoid creating a new thread-local buffer on each test
   val serializer = new KryoSerializer(
     new SparkConf(false).set(Kryo.KRYO_SERIALIZER_BUFFER_SIZE.key, "1m"))
@@ -2027,7 +2035,7 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with PrivateMethodTe
     assert(master.getLocations(blockId).size === 2)
     assert(master.getLocations(blockId).contains(store1.blockManagerId))
 
-    val decomManager = new BlockManagerDecommissioner(conf, store1)
+    val decomManager = new BlockManagerDecommissioner(conf, store1, createMockMapOutputTracker())
     decomManager.decommissionRddCacheBlocks()
     assert(master.getLocations(blockId).size === 2)
     assert(master.getLocations(blockId).toSet === Set(store2.blockManagerId,
@@ -2048,7 +2056,7 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with PrivateMethodTe
     assert(master.getLocations(blockIdLarge) === Seq(store1.blockManagerId))
     assert(master.getLocations(blockIdSmall) === Seq(store1.blockManagerId))
 
-    val decomManager = new BlockManagerDecommissioner(conf, store1)
+    val decomManager = new BlockManagerDecommissioner(conf, store1, createMockMapOutputTracker())
     decomManager.decommissionRddCacheBlocks()
     // Smaller block migrated to store2
     assert(master.getLocations(blockIdSmall) === Seq(store2.blockManagerId))
@@ -2087,7 +2095,9 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with PrivateMethodTe
 
     mapOutputTracker.registerShuffle(0, 2, MergeStatus.SHUFFLE_PUSH_DUMMY_NUM_REDUCES)
     val decomManager = new BlockManagerDecommissioner(
-      conf.set(config.STORAGE_DECOMMISSION_SHUFFLE_BLOCKS_ENABLED, true), bm1)
+      conf.set(config.STORAGE_DECOMMISSION_SHUFFLE_BLOCKS_ENABLED, true),
+      bm1,
+      createMockMapOutputTracker())
     try {
       mapOutputTracker.registerMapOutput(0, 0, MapStatus(bm1.blockManagerId, Array(blockSize), 0))
       mapOutputTracker.registerMapOutput(0, 1, MapStatus(bm1.blockManagerId, Array(blockSize), 1))
@@ -2210,7 +2220,7 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with PrivateMethodTe
     when(bm.migratableResolver).thenReturn(resolver)
     when(bm.getPeers(mc.any())).thenReturn(Seq.empty)
 
-    val decomManager = new BlockManagerDecommissioner(conf, bm)
+    val decomManager = new BlockManagerDecommissioner(conf, bm, createMockMapOutputTracker())
     decomManager.refreshMigratableShuffleBlocks()
 
     assert(sortedBlocks.sameElements(decomManager.shufflesToMigrate.asScala.map(_._1)))

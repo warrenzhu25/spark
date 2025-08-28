@@ -30,6 +30,7 @@ import org.scalatest.concurrent.Eventually.{eventually, interval, timeout}
 
 import org.apache.spark.{LocalSparkContext, SparkConf, SparkContext, SparkFunSuite, TestUtils}
 import org.apache.spark.LocalSparkContext.withSpark
+import org.apache.spark.MapOutputTrackerMaster
 import org.apache.spark.internal.config._
 import org.apache.spark.launcher.SparkLauncher.{EXECUTOR_MEMORY, SPARK_MASTER}
 import org.apache.spark.network.BlockTransferService
@@ -41,6 +42,14 @@ import org.apache.spark.shuffle.IndexShuffleBlockResolver.NOOP_REDUCE_ID
 import org.apache.spark.util.Utils.tryWithResource
 
 class FallbackStorageSuite extends SparkFunSuite with LocalSparkContext {
+
+  private def createMockMapOutputTracker(): MapOutputTrackerMaster = {
+    val mockTracker = mock(classOf[MapOutputTrackerMaster])
+    val emptyShuffleStatuses =
+      new scala.collection.concurrent.TrieMap[Int, org.apache.spark.ShuffleStatus]()
+    when(mockTracker.shuffleStatuses).thenReturn(emptyShuffleStatuses)
+    mockTracker
+  }
 
   def getSparkConf(initialExecutor: Int = 1, minExecutor: Int = 1): SparkConf = {
     new SparkConf(false)
@@ -210,7 +219,7 @@ class FallbackStorageSuite extends SparkFunSuite with LocalSparkContext {
     when(bm.migratableResolver).thenReturn(resolver)
     when(bm.getMigratableRDDBlocks()).thenReturn(Seq())
 
-    val decommissioner = new BlockManagerDecommissioner(conf, bm)
+    val decommissioner = new BlockManagerDecommissioner(conf, bm, createMockMapOutputTracker())
 
     try {
       decommissioner.start()
