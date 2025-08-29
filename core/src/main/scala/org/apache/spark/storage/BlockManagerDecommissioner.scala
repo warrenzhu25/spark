@@ -256,7 +256,7 @@ private[storage] class BlockManagerDecommissioner(
                 fallbackStorage.foreach(_.copy(shuffleBlockInfo, bm))
               } else {
                 blocks.foreach { case (blockId, buffer) =>
-                  logDebug(s"Migrating sub-block ${blockId}")
+                  logDebug(s"Migrating sub-block $blockId to $peer")
                   uploadBlockSyncWithTimeout(
                     peer.host,
                     peer.port,
@@ -265,7 +265,7 @@ private[storage] class BlockManagerDecommissioner(
                     buffer,
                     StorageLevel.DISK_ONLY,
                     buffer.size())
-                  logDebug(s"Migrated sub-block $blockId")
+                  logDebug(s"Migrated sub-block $blockId to $peer successfully")
                 }
               }
               val durationMs = System.currentTimeMillis() - startTime
@@ -530,15 +530,18 @@ private[storage] class BlockManagerDecommissioner(
    */
   private[storage] def refreshMigratableShuffleBlocks(): Boolean = {
     // Update the queue of shuffles to be migrated
-    logInfo("Start refreshing migratable shuffle blocks")
+    logDebug("Start refreshing migratable shuffle blocks")
+    val startTime = System.currentTimeMillis()
     val localShuffles = bm.migratableResolver.getStoredShuffles().toSet
     val newShufflesToMigrate = (localShuffles.diff(migratingShuffles)).toSeq
       .sortBy(b => (b.shuffleId, b.mapId))
     shufflesToMigrate.addAll(newShufflesToMigrate.map(x => (x, 0)).asJava)
     migratingShuffles ++= newShufflesToMigrate
     val remainedShuffles = migratingShuffles.size - numMigratedShuffles.get()
-    logInfo(s"${newShufflesToMigrate.size} of ${localShuffles.size} local shuffles " +
-      s"are added. In total, $remainedShuffles shuffles are remained.")
+    val refreshDurationMs = System.currentTimeMillis() - startTime
+    logInfo(s"Refreshed migratable shuffle blocks in ${refreshDurationMs}ms: " +
+      s"${newShufflesToMigrate.size} new/${localShuffles.size} local, " +
+      s"$remainedShuffles remaining to migrate")
 
     // Update the threads doing migrations
     val livePeerSet = bm.getPeers(false).toSet
@@ -554,7 +557,7 @@ private[storage] class BlockManagerDecommissioner(
       Utils.randomize(availablePeers)
     }
     migrationPeers ++= newPeers.map { peer =>
-      logDebug(s"Starting thread to migrate shuffle blocks to ${peer}")
+      logDebug(s"Starting thread to migrate shuffle blocks to $peer")
       val runnable = new ShuffleMigrationRunnable(peer)
       shuffleMigrationPool.foreach(_.submit(runnable))
       (peer, runnable)
@@ -620,9 +623,9 @@ private[storage] class BlockManagerDecommissioner(
       blockToReplicate.maxReplicas,
       maxReplicationFailures = Some(maxReplicationFailuresForDecommission))
     if (replicatedSuccessfully) {
-      logInfo(s"Block ${blockToReplicate.blockId} migrated successfully, Removing block now")
+      logDebug(s"Block ${blockToReplicate.blockId} migrated successfully, removing local copy")
       bm.removeBlock(blockToReplicate.blockId)
-      logInfo(s"Block ${blockToReplicate.blockId} removed")
+      logDebug(s"Block ${blockToReplicate.blockId} removed from local storage")
     } else {
       logWarning(s"Failed to migrate block ${blockToReplicate.blockId}")
     }
