@@ -299,11 +299,13 @@ private[storage] class BlockManagerDecommissioner(
                     && peer != FallbackStorage.FALLBACK_BLOCK_MANAGER_ID) {
                   fallbackStorage.foreach(_.copy(shuffleBlockInfo, bm))
                 } else {
-                  logError(s"Error occurred during migrating $shuffleBlockInfo", e)
+                  logError(s"Error occurred during migrating $shuffleBlockInfo to $peer " +
+                    s"(retry $retryCount/$maxReplicationFailuresForDecommission)", e)
                   keepRunning = false
                 }
               case e: Exception =>
-                logError(s"Error occurred during migrating $shuffleBlockInfo", e)
+                logError(s"Unexpected error during migrating $shuffleBlockInfo to $peer " +
+                  s"(retry $retryCount/$maxReplicationFailuresForDecommission)", e)
                 keepRunning = false
             }
           }
