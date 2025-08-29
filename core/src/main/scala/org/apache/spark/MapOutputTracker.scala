@@ -182,6 +182,27 @@ private class ShuffleStatus(
   }
 
   /**
+   * Add an additional location for an existing map output.
+   */
+  def addMapOutputLocation(mapId: Long, bmAddress: BlockManagerId): Unit = withWriteLock {
+    try {
+      val mapIndex = mapIdToMapIndex.get(mapId)
+      val mapStatusOpt = mapIndex.map(mapStatuses(_)).flatMap(Option(_))
+      mapStatusOpt match {
+        case Some(mapStatus) =>
+          logInfo(s"Adding map output location for ${mapId} at ${bmAddress}")
+          mapStatus.addLocation(bmAddress)
+          invalidateSerializedMapOutputStatusCache()
+        case None =>
+          logWarning(s"Asked to add location for untracked map output ${mapId}")
+      }
+    } catch {
+      case e: java.lang.NullPointerException =>
+        logWarning(s"Unable to add location for map output ${mapId}, status removed in-flight")
+    }
+  }
+
+  /**
    * Update the map output location (e.g. during migration).
    */
   def updateMapOutput(mapId: Long, bmAddress: BlockManagerId): Unit = withWriteLock {
@@ -210,6 +231,28 @@ private class ShuffleStatus(
     } catch {
       case e: java.lang.NullPointerException =>
         logWarning(s"Unable to update map output for ${mapId}, status removed in-flight")
+    }
+  }
+
+  /**
+   * Remove a specific location from a map output. If it's the only location,
+   * removes the entire map output.
+   */
+  def removeMapOutputLocation(mapIndex: Int, bmAddress: BlockManagerId): Unit = withWriteLock {
+    logDebug(s"Removing map output location ${mapIndex} ${bmAddress}")
+    val currentMapStatus = mapStatuses(mapIndex)
+    if (currentMapStatus != null) {
+      val locations = currentMapStatus.locations
+      if (locations.contains(bmAddress)) {
+        if (locations.size > 1) {
+          val newLocations = locations.filterNot(_ == bmAddress)
+          currentMapStatus.updateLocation(newLocations.head)
+          newLocations.tail.foreach(currentMapStatus.addLocation)
+          invalidateSerializedMapOutputStatusCache()
+        } else {
+          removeMapOutput(mapIndex, bmAddress)
+        }
+      }
     }
   }
 

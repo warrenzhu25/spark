@@ -280,6 +280,32 @@ class MapOutputTrackerSuite extends SparkFunSuite with LocalSparkContext {
     assert(status.locations.head.executorId === "exec1-new")
   }
 
+  test("ShuffleStatus multi-location management") {
+    val tracker = newTrackerMaster()
+    tracker.registerShuffle(0, 2, MergeStatus.SHUFFLE_PUSH_DUMMY_NUM_REDUCES)
+
+    val loc1 = BlockManagerId("exec1", "host1", 1000)
+    val loc2 = BlockManagerId("exec2", "host2", 1000)
+    val status1 = MapStatus(loc1, Array(1000L, 2000L), 5)
+    val status2 = MapStatus(loc2, Array(1500L, 2500L), 6)
+
+    tracker.registerMapOutput(0, 0, status1)
+    tracker.registerMapOutput(0, 1, status2)
+
+    val shuffleStatus = tracker.shuffleStatuses(0)
+    shuffleStatus.addMapOutputLocation(5, BlockManagerId("exec3", "host3", 1000))
+
+    val retrievedStatus = shuffleStatus.getMapStatus(5)
+    assert(retrievedStatus.isDefined)
+    assert(retrievedStatus.get.locations.size >= 1)
+
+    shuffleStatus.removeMapOutputLocation(0, loc1)
+    val statusAfterRemoval = shuffleStatus.getMapStatus(5)
+    assert(statusAfterRemoval.isDefined)
+
+    tracker.stop()
+  }
+
   test("getLocationsWithLargestOutputs with multiple outputs in same machine") {
     val rpcEnv = createRpcEnv("test")
     val tracker = newTrackerMaster()
