@@ -306,6 +306,31 @@ class MapOutputTrackerSuite extends SparkFunSuite with LocalSparkContext {
     tracker.stop()
   }
 
+  test("balanced location selection in convertMapStatuses") {
+    val tracker = newTrackerMaster()
+    tracker.registerShuffle(0, 2, MergeStatus.SHUFFLE_PUSH_DUMMY_NUM_REDUCES)
+
+    val loc1 = BlockManagerId("exec1", "host1", 1000)
+    val loc2 = BlockManagerId("exec2", "host2", 1000)
+    val status = new CompressedMapStatus(loc1, Array(1000L, 2000L), 5)
+    status.addLocation(loc2)
+
+    tracker.registerMapOutput(0, 0, status)
+    tracker.registerMapOutput(0, 1, status)
+
+    val statuses: Array[MapStatus] = Array(status, status)
+    val result = MapOutputTracker.convertMapStatuses(0, 0, 2, statuses, 0, 2)
+
+    val locationCounts = result.iter.map(_._1).toSeq.groupBy(identity).map {
+      case (loc, locs) => (loc, locs.size)
+    }
+
+    assert(locationCounts.size <= 2)
+    assert(locationCounts.values.sum > 0)
+
+    tracker.stop()
+  }
+
   test("getLocationsWithLargestOutputs with multiple outputs in same machine") {
     val rpcEnv = createRpcEnv("test")
     val tracker = newTrackerMaster()

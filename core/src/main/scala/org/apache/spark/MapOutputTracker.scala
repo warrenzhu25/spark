@@ -1688,7 +1688,17 @@ private[spark] object MapOutputTracker extends Logging {
       mergeStatusesOpt: Option[Array[MergeStatus]] = None): MapSizesByExecutorId = {
     assert (mapStatuses != null)
     val splitsByAddress = new HashMap[BlockManagerId, ListBuffer[(BlockId, Long, Int)]]
+    val executorLoadTracker = new HashMap[BlockManagerId, Long]()
     var enableBatchFetch = true
+
+    def selectBalancedLocation(status: MapStatus, blockSize: Long): BlockManagerId = {
+      val locations = status.locations
+      if (locations.size == 1) {
+        locations.head
+      } else {
+        locations.minBy(loc => executorLoadTracker.getOrElse(loc, 0L))
+      }
+    }
     // Only use MergeStatus for reduce tasks that fetch all map outputs. Since a merged shuffle
     // partition consists of blocks merged in random order, we are unable to serve map index
     // subrange requests. However, when a reduce task needs to fetch blocks from a subrange of
@@ -1725,7 +1735,10 @@ private[spark] object MapOutputTracker extends Logging {
             !mergeStatus.tracker.contains(mapIndex)) {
             val size = mapStatus.getSizeForBlock(partId)
             if (size != 0) {
-              splitsByAddress.getOrElseUpdate(mapStatus.location, ListBuffer()) +=
+              val selectedLoc = selectBalancedLocation(mapStatus, size)
+              executorLoadTracker(selectedLoc) =
+                executorLoadTracker.getOrElse(selectedLoc, 0L) + size
+              splitsByAddress.getOrElseUpdate(selectedLoc, ListBuffer()) +=
                 ((ShuffleBlockId(shuffleId, mapStatus.mapId, partId), size, mapIndex))
             }
           }
@@ -1738,7 +1751,10 @@ private[spark] object MapOutputTracker extends Logging {
         for (part <- startPartition until endPartition) {
           val size = status.getSizeForBlock(part)
           if (size != 0) {
-            splitsByAddress.getOrElseUpdate(status.location, ListBuffer()) +=
+            val selectedLoc = selectBalancedLocation(status, size)
+            executorLoadTracker(selectedLoc) =
+              executorLoadTracker.getOrElse(selectedLoc, 0L) + size
+            splitsByAddress.getOrElseUpdate(selectedLoc, ListBuffer()) +=
               ((ShuffleBlockId(shuffleId, status.mapId, part), size, mapIndex))
           }
         }
