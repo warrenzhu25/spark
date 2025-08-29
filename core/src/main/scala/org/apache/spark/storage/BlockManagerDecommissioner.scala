@@ -433,7 +433,7 @@ private[storage] class BlockManagerDecommissioner(
     }
 
     if (tracker.isEmpty) {
-      // Return empty map if no tracker is available (e.g., in test environments)
+      logDebug("No MapOutputTracker available, cannot calculate executor loads")
       return Map.empty[String, Long]
     }
 
@@ -462,7 +462,14 @@ private[storage] class BlockManagerDecommissioner(
       }
     }
 
-    loads.toMap
+    val result = loads.toMap
+    if (result.nonEmpty) {
+      logDebug(s"Calculated shuffle loads for ${result.size} executors: " +
+        result.toSeq.sortBy(_._2).map { case (exec, load) =>
+          s"$exec=${Utils.bytesToString(load)}"
+        }.mkString(", "))
+    }
+    result
   }
 
   /**
@@ -477,6 +484,7 @@ private[storage] class BlockManagerDecommissioner(
 
     // If no load data available, fall back to random selection
     if (executorLoads.isEmpty) {
+      logInfo("No executor load data available, falling back to random peer selection")
       return Utils.randomize(availablePeers)
     }
 
@@ -495,8 +503,12 @@ private[storage] class BlockManagerDecommissioner(
       val middleRange = sortedByLoad.drop(skipLow).dropRight(skipHigh)
 
       if (middleRange.nonEmpty) {
+        val totalLoad = executorLoads.values.sum
+        val avgLoad = if (executorLoads.nonEmpty) totalLoad / executorLoads.size else 0L
         logInfo(s"Selected ${middleRange.length} peers from middle load range " +
-          s"(skipped ${skipLow} low-load and ${skipHigh} high-load executors)")
+          s"(skipped ${skipLow} low-load and ${skipHigh} high-load executors). " +
+          s"Avg load: ${Utils.bytesToString(avgLoad)}")
+        logDebug(s"Selected peers: ${middleRange.map(_.executorId).mkString(", ")}")
         middleRange
       } else {
         // Fallback if middle range is empty
