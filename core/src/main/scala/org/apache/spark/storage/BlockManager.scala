@@ -55,7 +55,7 @@ import org.apache.spark.network.shuffle.checksum.{Cause, ShuffleChecksumHelper}
 import org.apache.spark.network.shuffle.protocol.ExecutorShuffleInfo
 import org.apache.spark.network.util.TransportConf
 import org.apache.spark.rpc.RpcEnv
-import org.apache.spark.scheduler.ExecutorCacheTaskLocation
+import org.apache.spark.scheduler.{DecommissionSummary, ExecutorCacheTaskLocation}
 import org.apache.spark.serializer.{SerializerInstance, SerializerManager}
 import org.apache.spark.shuffle.{IndexShuffleBlockResolver, MigratableResolver, ShuffleManager, ShuffleWriteMetricsReporter}
 import org.apache.spark.storage.BlockManagerMessages.{DecommissionBlockManager, ReplicateBlock}
@@ -2008,12 +2008,8 @@ private[spark] class BlockManager(
     }
   }
 
-  /**
-   *  Returns the last migration time and a boolean denoting if all the blocks have been migrated.
-   *  If there are any tasks running since that time the boolean may be incorrect.
-   */
-  private[spark] def lastMigrationInfo(): (Long, Boolean) = {
-    decommissioner.map(_.lastMigrationInfo()).getOrElse((0, false))
+  private[spark] def lastMigrationSummary(): Option[DecommissionSummary] = {
+    decommissioner.flatMap(_.getDecommissionSummary())
   }
 
   private[storage] def getMigratableRDDBlocks(): Seq[ReplicateBlock] =

@@ -18,6 +18,54 @@
 package org.apache.spark.scheduler
 
 import org.apache.spark.executor.ExecutorExitCode
+import org.apache.spark.util.Utils
+
+/**
+ * Migration information for decommissioning summary.
+ */
+private[spark]
+case class MigrationInfo(
+    blocksMigrated: Int,
+    blocksTotal: Int,
+    bytesToMigrate: Long,
+    bytesMigrated: Long,
+    blockType: String) {
+
+  override def toString: String = {
+    val blockProgress = if (blocksTotal > 0) {
+      s"$blocksMigrated/$blocksTotal"
+    } else "0/0"
+    val bytesProgress = s"${Utils.bytesToString(bytesMigrated)}/" +
+      s"${Utils.bytesToString(bytesToMigrate)}"
+    s"$blockType blocks: $blockProgress ($bytesProgress)"
+  }
+}
+
+/**
+ * Comprehensive decommissioning summary with timing and migration details.
+ * Includes all detailed statistics AND the 2 fields from lastMigrationInfo().
+ */
+private[spark]
+case class DecommissionSummary(
+    decommissionTime: Long,
+    migrationTime: Long,
+    taskWaitingTime: Long,
+    shuffleMigrationInfo: MigrationInfo,
+    rddMigrationInfo: MigrationInfo,
+    // Fields from lastMigrationInfo() for compatibility
+    lastMigrationTimestamp: Long,        // First field from lastMigrationInfo()
+    migrationComplete: Boolean           // Second field from lastMigrationInfo()
+) {
+
+  override def toString: String = {
+    val decommissionTimeStr = f"${decommissionTime / 1000.0}%.2f"
+    val migrationTimeStr = f"${migrationTime / 1000.0}%.2f"
+    val taskWaitingTimeStr = f"${taskWaitingTime / 1000.0}%.2f"
+    s"Decommission completed in ${decommissionTimeStr}s " +
+      s"(task waiting: ${taskWaitingTimeStr}s, migration: ${migrationTimeStr}s). " +
+      s"Migration: ${shuffleMigrationInfo}, ${rddMigrationInfo}"
+  }
+}
 
 /**
  * Represents an explanation for an executor or whole process failing or exiting.
