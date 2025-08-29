@@ -185,13 +185,18 @@ private[storage] class BlockManagerDecommissioner(
 
     private def allowRetry(shuffleBlock: ShuffleBlockInfo, failureNum: Int): Boolean = {
       if (failureNum < maxReplicationFailuresForDecommission) {
-        logInfo(s"Add $shuffleBlock back to migration queue for " +
-          s"retry ($failureNum / $maxReplicationFailuresForDecommission)")
+        // Calculate block size for retry logging
+        val blockSize = bm.migratableResolver.getMigrationBlocks(shuffleBlock)
+          .map(_._2.size()).sum
+        logInfo(s"Add $shuffleBlock (${Utils.bytesToString(blockSize)}) back to " +
+          s"migration queue for retry ($failureNum / $maxReplicationFailuresForDecommission)")
         // The block needs to retry so we should not mark it as finished
         shufflesToMigrate.add((shuffleBlock, failureNum))
       } else {
-        logWarning(s"Give up migrating $shuffleBlock since it's been " +
-          s"failed for $maxReplicationFailuresForDecommission times")
+        val blockSize = bm.migratableResolver.getMigrationBlocks(shuffleBlock)
+          .map(_._2.size()).sum
+        logWarning(s"Give up migrating $shuffleBlock (${Utils.bytesToString(blockSize)}) " +
+          s"since it's failed for $maxReplicationFailuresForDecommission times")
         false
       }
     }
@@ -238,11 +243,12 @@ private[storage] class BlockManagerDecommissioner(
               numMigratedShuffles.incrementAndGet()
             }
           } else {
-            logInfo(s"Got migration sub-blocks $blocks. Trying to migrate $shuffleBlockInfo " +
-              s"to $peer ($retryCount / $maxReplicationFailuresForDecommission)")
+            val totalBytes = blocks.map(b => b._2.size()).sum
+            logInfo(s"Got ${blocks.size} migration sub-blocks for $shuffleBlockInfo " +
+              s"(${Utils.bytesToString(totalBytes)}). Migrating to $peer " +
+              s"($retryCount / $maxReplicationFailuresForDecommission)")
             // Migrate the components of the blocks.
             try {
-              val totalBytes = blocks.map(b => b._2.size()).sum
               val startTime = System.currentTimeMillis()
               if (fallbackStorage.isDefined && peer == FallbackStorage.FALLBACK_BLOCK_MANAGER_ID) {
                 fallbackStorage.foreach(_.copy(shuffleBlockInfo, bm))
@@ -263,19 +269,16 @@ private[storage] class BlockManagerDecommissioner(
               val durationMs = System.currentTimeMillis() - startTime
               recordUpload(totalBytes, durationMs)
               val stats = uploadStats(peer)
-              logInfo(s"Migrated $shuffleBlockInfo (" +
-                s"size: ${Utils.bytesToString(totalBytes)}) to $peer " +
-                s"in ${durationMs} ms. " +
-                s"Throughput: " +
-                s"${Utils.bytesToString(stats.currentThroughputBytesPerSec.toLong)}/sec")
+              logInfo(s"Migrated $shuffleBlockInfo (${blocks.size} sub-blocks, " +
+                s"${Utils.bytesToString(totalBytes)}) to $peer in ${durationMs}ms. " +
+                s"Throughput: ${Utils.bytesToString(stats.currentThroughputBytesPerSec.toLong)}/s")
             } catch {
               case e: TimeoutException =>
                 recordTimeout()
-                val totalBytes = blocks.map(b => b._2.size()).sum
                 val timeout = calculateUploadTimeout(totalBytes)
                 logWarning(s"Upload timeout for $shuffleBlockInfo to $peer " +
-                  s"(${Utils.bytesToString(totalBytes)} in ${timeout.toMillis}ms), " +
-                  s"total timeouts: ${uploadStats(peer).timeoutCount}")
+                  s"(${blocks.size} sub-blocks, ${Utils.bytesToString(totalBytes)} in " +
+                  s"${timeout.toMillis}ms), total timeouts: ${uploadStats(peer).timeoutCount}")
                 keepRunning = false
               case e @ ( _ : IOException | _ : SparkException) =>
                 // If a block got deleted before netty opened the file handle, then trying to
@@ -432,6 +435,7 @@ private[storage] class BlockManagerDecommissioner(
     }
 
     val loads = mutable.Map[String, Long]()
+    val shuffleCounts = mutable.Map[String, Int]()
 
     tracker.get.shuffleStatuses.values.foreach {
       shuffleStatus =>
@@ -452,6 +456,7 @@ private[storage] class BlockManagerDecommissioner(
             case _: Exception => // Expected when we've gone past the last partition
           }
           loads(executorId) = loads.getOrElse(executorId, 0L) + totalSize
+          shuffleCounts(executorId) = shuffleCounts.getOrElse(executorId, 0) + 1
         }
       }
     }
@@ -460,7 +465,8 @@ private[storage] class BlockManagerDecommissioner(
     if (result.nonEmpty) {
       logDebug(s"Calculated shuffle loads for ${result.size} executors: " +
         result.toSeq.sortBy(_._2).map { case (exec, load) =>
-          s"$exec=${Utils.bytesToString(load)}"
+          val count = shuffleCounts.getOrElse(exec, 0)
+          s"$exec=${Utils.bytesToString(load)}($count blocks)"
         }.mkString(", "))
     }
     result
@@ -531,8 +537,21 @@ private[storage] class BlockManagerDecommissioner(
     migratingShuffles ++= newShufflesToMigrate
     val remainedShuffles = migratingShuffles.size - numMigratedShuffles.get()
     val refreshDurationMs = System.currentTimeMillis() - startTime
+
+    // Calculate estimated size for new shuffle blocks (sample first few for efficiency)
+    val sampleSize = Math.min(5, newShufflesToMigrate.size)
+    val sampledBlocks = newShufflesToMigrate.take(sampleSize)
+    val estimatedTotalSize = if (sampledBlocks.nonEmpty) {
+      val sampleTotalSize = sampledBlocks.map { shuffleInfo =>
+        bm.migratableResolver.getMigrationBlocks(shuffleInfo).map(_._2.size()).sum
+      }.sum
+      val avgBlockSize = sampleTotalSize.toDouble / sampleSize
+      (avgBlockSize * newShufflesToMigrate.size).toLong
+    } else 0L
+
     logInfo(s"Refreshed migratable shuffle blocks in ${refreshDurationMs}ms: " +
-      s"${newShufflesToMigrate.size} new/${localShuffles.size} local, " +
+      s"${newShufflesToMigrate.size} new/${localShuffles.size} local " +
+      s"(~${Utils.bytesToString(estimatedTotalSize)} estimated), " +
       s"$remainedShuffles remaining to migrate")
 
     // Update the threads doing migrations
@@ -650,6 +669,24 @@ private[storage] class BlockManagerDecommissioner(
     } else {
       stopped = true
     }
+
+    // Log final migration statistics
+    val totalMigrated = numMigratedShuffles.get()
+    val totalQueued = migratingShuffles.size
+    val (lastMigrationTime, allBlocksMigrated) = lastMigrationInfo()
+    logInfo(s"Stopping block migration. Shuffle blocks: $totalMigrated/$totalQueued migrated, " +
+      s"all blocks migrated: $allBlocksMigrated")
+    if (uploadStats.nonEmpty) {
+      val totalBytes = uploadStats.values.map(_.totalBytes).sum
+      val totalTimeMs = uploadStats.values.map(_.totalTimeMs).sum
+      val overallThroughput = if (totalTimeMs > 0) (totalBytes * 1000.0) / totalTimeMs else 0.0
+      val totalTimeouts = uploadStats.values.map(_.timeoutCount).sum
+      logInfo(s"Migration summary: ${uploadStats.size} peers, " +
+        s"${Utils.bytesToString(totalBytes)} total, " +
+        s"overall throughput: ${Utils.bytesToString(overallThroughput.toLong)}/sec, " +
+        s"$totalTimeouts timeouts")
+    }
+
     try {
       rddBlockMigrationExecutor.foreach(_.shutdownNow())
     } catch {
