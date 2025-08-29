@@ -617,6 +617,20 @@ private[storage] class BlockManagerDecommissioner(
 
   def start(): Unit = {
     logInfo("Starting block migration")
+    logInfo(s"Configuration: RDD migration=" +
+      s"${conf.get(config.STORAGE_DECOMMISSION_RDD_BLOCKS_ENABLED)}, " +
+      s"shuffle migration=${conf.get(config.STORAGE_DECOMMISSION_SHUFFLE_BLOCKS_ENABLED)}, " +
+      s"size-based timeouts=$enableSizeBasedTimeouts")
+    logInfo(s"Migration settings: max failures per block=$maxReplicationFailuresForDecommission, " +
+      s"min throughput=${Utils.bytesToString(minUploadThroughputBytesPerSec)}/sec, " +
+      s"timeout rate=${timeoutMbPerSec}MB/sec")
+    if (fallbackStorage.isDefined) {
+      logInfo("Fallback storage is enabled for failed migrations")
+    }
+    if (mapOutputTracker != null) {
+      logInfo("Load-balanced peer selection enabled for shuffle migration")
+    }
+
     rddBlockMigrationExecutor.foreach(_.submit(rddBlockMigrationRunnable))
     shuffleBlockMigrationRefreshExecutor.foreach(_.submit(shuffleBlockMigrationRefreshRunnable))
   }
