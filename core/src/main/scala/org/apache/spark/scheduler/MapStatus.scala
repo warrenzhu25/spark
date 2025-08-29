@@ -46,6 +46,18 @@ private[spark] sealed trait MapStatus extends ShuffleOutputStatus {
   def updateLocation(newLoc: BlockManagerId): Unit
 
   /**
+   * All locations where this task output is available.
+   * For backward compatibility, returns Seq(location) by default.
+   */
+  def locations: Seq[BlockManagerId] = Seq(location)
+
+  /**
+   * Add an additional location where this task output is available.
+   * Default implementation does nothing for backward compatibility.
+   */
+  def addLocation(newLoc: BlockManagerId): Unit = {}
+
+  /**
    * Estimated size for the reduce block, in bytes.
    *
    * If a block is non-empty, then this method MUST return a non-zero size.  This invariant is
