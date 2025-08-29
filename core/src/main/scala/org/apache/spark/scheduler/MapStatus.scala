@@ -135,7 +135,8 @@ private[spark] object MapStatus {
 private[spark] class CompressedMapStatus(
     private[this] var loc: BlockManagerId,
     private[this] var compressedSizes: Array[Byte],
-    private[this] var _mapTaskId: Long)
+    private[this] var _mapTaskId: Long,
+    private[this] var _locations: Seq[BlockManagerId] = Seq.empty)
   extends MapStatus with Externalizable {
 
   // For deserialization only
@@ -149,6 +150,21 @@ private[spark] class CompressedMapStatus(
 
   override def updateLocation(newLoc: BlockManagerId): Unit = {
     loc = newLoc
+    if (_locations.nonEmpty) {
+      _locations = _locations.updated(0, newLoc)
+    }
+  }
+
+  override def locations: Seq[BlockManagerId] = {
+    if (_locations.nonEmpty) _locations else Seq(loc)
+  }
+
+  override def addLocation(newLoc: BlockManagerId): Unit = {
+    if (_locations.isEmpty) {
+      _locations = Seq(loc, newLoc)
+    } else if (!_locations.contains(newLoc)) {
+      _locations = _locations :+ newLoc
+    }
   }
 
   override def getSizeForBlock(reduceId: Int): Long = {
@@ -162,6 +178,8 @@ private[spark] class CompressedMapStatus(
     out.writeInt(compressedSizes.length)
     out.write(compressedSizes)
     out.writeLong(_mapTaskId)
+    out.writeInt(_locations.size)
+    _locations.foreach(_.writeExternal(out))
   }
 
   override def readExternal(in: ObjectInput): Unit = Utils.tryOrIOException {
@@ -170,6 +188,12 @@ private[spark] class CompressedMapStatus(
     compressedSizes = new Array[Byte](len)
     in.readFully(compressedSizes)
     _mapTaskId = in.readLong()
+    val locationsCount = in.readInt()
+    if (locationsCount > 0) {
+      _locations = (0 until locationsCount).map(_ => BlockManagerId(in))
+    } else {
+      _locations = Seq.empty
+    }
   }
 }
 

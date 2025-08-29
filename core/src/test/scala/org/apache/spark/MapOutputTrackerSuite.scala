@@ -236,6 +236,29 @@ class MapOutputTrackerSuite extends SparkFunSuite with LocalSparkContext {
     assert(status.locations === Seq(loc))
   }
 
+  test("CompressedMapStatus multi-location functionality") {
+    val loc1 = BlockManagerId("exec1", "host1", 1000)
+    val loc2 = BlockManagerId("exec2", "host2", 1000)
+    val loc3 = BlockManagerId("exec3", "host3", 1000)
+    val status = new CompressedMapStatus(loc1, Array(1000L, 2000L), 5)
+
+    assert(status.location === loc1)
+    assert(status.locations === Seq(loc1))
+
+    status.addLocation(loc2)
+    assert(status.locations === Seq(loc1, loc2))
+
+    status.addLocation(loc3)
+    assert(status.locations === Seq(loc1, loc2, loc3))
+
+    status.addLocation(loc2)
+    assert(status.locations === Seq(loc1, loc2, loc3))
+
+    status.updateLocation(BlockManagerId("exec1-new", "host1", 2000))
+    assert(status.location.executorId === "exec1-new")
+    assert(status.locations.head.executorId === "exec1-new")
+  }
+
   test("getLocationsWithLargestOutputs with multiple outputs in same machine") {
     val rpcEnv = createRpcEnv("test")
     val tracker = newTrackerMaster()
