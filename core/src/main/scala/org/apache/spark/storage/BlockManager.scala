@@ -55,7 +55,7 @@ import org.apache.spark.network.shuffle.checksum.{Cause, ShuffleChecksumHelper}
 import org.apache.spark.network.shuffle.protocol.ExecutorShuffleInfo
 import org.apache.spark.network.util.TransportConf
 import org.apache.spark.rpc.RpcEnv
-import org.apache.spark.scheduler.ExecutorCacheTaskLocation
+import org.apache.spark.scheduler.{DecommissionSummary, ExecutorCacheTaskLocation, MigrationInfo}
 import org.apache.spark.serializer.{SerializerInstance, SerializerManager}
 import org.apache.spark.shuffle.{IndexShuffleBlockResolver, MigratableResolver, ShuffleManager, ShuffleWriteMetricsReporter}
 import org.apache.spark.storage.BlockManagerMessages.{DecommissionBlockManager, ReplicateBlock}
@@ -2014,6 +2014,12 @@ private[spark] class BlockManager(
    */
   private[spark] def lastMigrationInfo(): (Long, Boolean) = {
     decommissioner.map(_.lastMigrationInfo()).getOrElse((0, false))
+  }
+
+  private[spark] def lastMigrationSummary(): DecommissionSummary = {
+    decommissioner.map(_.getDecommissionSummary()).getOrElse(
+      DecommissionSummary(0, 0, 0, MigrationInfo(0, 0, 0, 0, 0))
+    )
   }
 
   private[storage] def getMigratableRDDBlocks(): Seq[ReplicateBlock] =

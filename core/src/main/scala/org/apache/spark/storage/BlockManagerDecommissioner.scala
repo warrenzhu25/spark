@@ -20,7 +20,7 @@ package org.apache.spark.storage
 import java.io.IOException
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable
@@ -32,6 +32,7 @@ import org.apache.spark.MapOutputTrackerMaster
 import org.apache.spark.errors.SparkCoreErrors
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config
+import org.apache.spark.scheduler.{DecommissionSummary, MigrationInfo}
 import org.apache.spark.shuffle.ShuffleBlockInfo
 import org.apache.spark.storage.BlockManagerMessages.ReplicateBlock
 import org.apache.spark.util.{ThreadUtils, Utils}
@@ -277,6 +278,7 @@ private[storage] class BlockManagerDecommissioner(
               }
               val durationMs = System.currentTimeMillis() - startTime
               recordUpload(totalBytes, durationMs)
+              totalBytesTransferred.addAndGet(totalBytes)
               val stats = uploadStats(peer)
               logInfo(s"Migrated shuffle block $shuffleBlockInfo (${blocks.size} sub-blocks, " +
                 s"${Utils.bytesToString(totalBytes)}) to $peer in ${durationMs}ms. " +
@@ -340,6 +342,15 @@ private[storage] class BlockManagerDecommissioner(
   // Shuffles which have migrated. This used to know when we are "done", being done can change
   // if a new shuffle file is created by a running task.
   private[storage] val numMigratedShuffles = new AtomicInteger(0)
+  // RDD block migration tracking
+  private[storage] val numMigratedRDDBlocks = new AtomicInteger(0)
+  private[storage] val totalRDDBlocks = new AtomicInteger(0)
+  // Total bytes transferred during migration
+  private[storage] val totalBytesTransferred = new AtomicLong(0)
+  // Decommission timing tracking
+  @volatile private[storage] var decommissionStartTime: Long = 0
+  @volatile private[storage] var migrationStartTime: Long = 0
+  @volatile private[storage] var taskWaitingStartTime: Long = 0
 
   // Shuffles which are queued for migration & number of retries so far.
   // Visible in storage for testing.
@@ -366,6 +377,13 @@ private[storage] class BlockManagerDecommissioner(
 
     override def run(): Unit = {
       logInfo("Attempting to migrate all RDD blocks")
+      if (migrationStartTime == 0) {
+        synchronized {
+          if (migrationStartTime == 0) {
+            migrationStartTime = System.currentTimeMillis()
+          }
+        }
+      }
       while (!stopped && !stoppedRDD) {
         // Validate if we have peers to migrate to. Otherwise, give up migration.
         if (!bm.getPeers(false).exists(_ != FallbackStorage.FALLBACK_BLOCK_MANAGER_ID)) {
@@ -403,6 +421,13 @@ private[storage] class BlockManagerDecommissioner(
 
     override def run(): Unit = {
       logInfo("Attempting to migrate all shuffle blocks")
+      if (migrationStartTime == 0) {
+        synchronized {
+          if (migrationStartTime == 0) {
+            migrationStartTime = System.currentTimeMillis()
+          }
+        }
+      }
       while (!stopped && !stoppedShuffle) {
         try {
           val startTime = System.nanoTime()
@@ -655,14 +680,15 @@ private[storage] class BlockManagerDecommissioner(
       blockToReplicate.replicas.toSet,
       blockToReplicate.maxReplicas,
       maxReplicationFailures = Some(maxReplicationFailuresForDecommission))
+    val blockSize = bm.blockInfoManager.get(blockToReplicate.blockId).map(_.size).getOrElse(0L)
     if (replicatedSuccessfully) {
-      val blockSize = bm.blockInfoManager.get(blockToReplicate.blockId).map(_.size).getOrElse(0L)
+      numMigratedRDDBlocks.incrementAndGet()
+      totalBytesTransferred.addAndGet(blockSize)
       logInfo(s"Migrated RDD block ${blockToReplicate.blockId} " +
         s"(${Utils.bytesToString(blockSize)}) successfully")
       bm.removeBlock(blockToReplicate.blockId)
       logDebug(s"RDD block ${blockToReplicate.blockId} removed from local storage")
     } else {
-      val blockSize = bm.blockInfoManager.get(blockToReplicate.blockId).map(_.size).getOrElse(0L)
       logWarning(s"Failed to migrate RDD block ${blockToReplicate.blockId} " +
         s"(${Utils.bytesToString(blockSize)})")
     }
@@ -670,6 +696,8 @@ private[storage] class BlockManagerDecommissioner(
   }
 
   def start(): Unit = {
+    decommissionStartTime = System.currentTimeMillis()
+    taskWaitingStartTime = decommissionStartTime
     logInfo(s"Starting ${getEnabledBlockTypes()} block migration")
     logInfo(s"Configuration: RDD migration=" +
       s"${conf.get(config.STORAGE_DECOMMISSION_RDD_BLOCKS_ENABLED)}, " +
@@ -683,6 +711,12 @@ private[storage] class BlockManagerDecommissioner(
     }
     if (mapOutputTracker != null) {
       logInfo("Load-balanced peer selection enabled for shuffle migration")
+    }
+
+    // Initialize RDD block counts
+    if (conf.get(config.STORAGE_DECOMMISSION_RDD_BLOCKS_ENABLED)) {
+      val rddBlocks = bm.getMigratableRDDBlocks()
+      totalRDDBlocks.set(rddBlocks.size)
     }
 
     rddBlockMigrationExecutor.foreach(_.submit(rddBlockMigrationRunnable))
@@ -699,7 +733,10 @@ private[storage] class BlockManagerDecommissioner(
     // Log final migration statistics
     val totalMigrated = numMigratedShuffles.get()
     val totalQueued = migratingShuffles.size
-    val (lastMigrationTime, allBlocksMigrated) = lastMigrationInfo()
+    val summary = getDecommissionSummary()
+    val allBlocksMigrated = summary.migrationInfo.shuffleBlocksMigrated ==
+        summary.migrationInfo.shuffleBlocksTotal &&
+        summary.migrationInfo.rddBlocksMigrated == summary.migrationInfo.rddBlocksTotal
     logInfo(s"Stopping block migration. Shuffle blocks: $totalMigrated/$totalQueued migrated, " +
       s"all blocks migrated: $allBlocksMigrated")
     if (uploadStats.nonEmpty) {
@@ -761,5 +798,38 @@ private[storage] class BlockManagerDecommissioner(
       val blocksMigrated = (!shuffleBlocksLeft || stoppedShuffle) && (!rddBlocksLeft || stoppedRDD)
       (lastMigrationTime, blocksMigrated)
     }
+  }
+
+  /**
+   * Returns comprehensive decommissioning summary including timing and migration details.
+   * This provides detailed statistics about the decommission process including:
+   * - Total decommission time from start to current
+   * - Time breakdown between task waiting and actual migration phases
+   * - Migration statistics for shuffle and RDD blocks
+   * - Total bytes transferred during the migration process
+   */
+  private[storage] def getDecommissionSummary(): DecommissionSummary = {
+    val currentTime = System.currentTimeMillis()
+    val decommissionTime = if (decommissionStartTime > 0) {
+      currentTime - decommissionStartTime
+    } else 0L
+
+    val actualMigrationStartTime = if (migrationStartTime > 0) migrationStartTime else currentTime
+    val migrationTime = currentTime - actualMigrationStartTime
+    val taskWaitingTime = if (migrationStartTime > 0) {
+      migrationStartTime - taskWaitingStartTime
+    } else {
+      currentTime - taskWaitingStartTime
+    }
+
+    val migrationInfo = MigrationInfo(
+      shuffleBlocksMigrated = numMigratedShuffles.get(),
+      shuffleBlocksTotal = migratingShuffles.size,
+      rddBlocksMigrated = numMigratedRDDBlocks.get(),
+      rddBlocksTotal = totalRDDBlocks.get(),
+      totalBytesTransferred = totalBytesTransferred.get()
+    )
+
+    DecommissionSummary(decommissionTime, migrationTime, taskWaitingTime, migrationInfo)
   }
 }

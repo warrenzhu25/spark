@@ -42,7 +42,7 @@ import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.resource.ResourceProfile._
 import org.apache.spark.resource.ResourceUtils._
 import org.apache.spark.rpc._
-import org.apache.spark.scheduler.{ExecutorLossMessage, ExecutorLossReason, TaskDescription}
+import org.apache.spark.scheduler.{ExecutorDecommission, ExecutorLossMessage, ExecutorLossReason, TaskDescription}
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages._
 import org.apache.spark.util.{ChildFirstURLClassLoader, MutableURLClassLoader, SignalUtils, ThreadUtils, Utils}
 
@@ -359,12 +359,14 @@ private[spark] class CoarseGrainedExecutorBackend(
             if (executor == null || executor.numRunningTasks == 0) {
               if (migrationEnabled) {
                 logInfo("No running tasks, checking migrations")
+                val summary = env.blockManager.lastMigrationSummary()
                 val (migrationTime, allBlocksMigrated) = env.blockManager.lastMigrationInfo()
                 // We can only trust allBlocksMigrated boolean value if there were no tasks running
                 // since the start of computing it.
                 if (allBlocksMigrated && (migrationTime > lastTaskFinishTime.get())) {
-                  logInfo("No running tasks, all blocks migrated, stopping.")
-                  exitExecutor(0, ExecutorLossMessage.decommissionFinished, notifyDriver = true)
+                  logInfo(s"No running tasks, all blocks migrated, stopping. $summary")
+                  val lossReason = ExecutorDecommission(None, summary.toString)
+                  exitExecutor(0, lossReason.toString, notifyDriver = true)
                 } else {
                   logInfo("All blocks not yet migrated.")
                 }

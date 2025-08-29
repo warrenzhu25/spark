@@ -21,6 +21,7 @@ import java.io.FileNotFoundException
 
 import scala.concurrent.Future
 import scala.concurrent.duration._
+import scala.reflect.ClassTag
 
 import org.mockito.{ArgumentMatchers => mc}
 import org.mockito.Mockito.{atLeast => least, mock, never, times, verify, when}
@@ -729,6 +730,86 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
       // Verify that the decommissioner has started without errors
       // The load-based peer selection is working internally
       // (Full integration testing would require more complex setup)
+
+    } finally {
+      bmDecomManager.stop()
+    }
+  }
+
+  test("test DecommissionSummary tracks migration statistics accurately") {
+    val bmPort = 12345
+
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+    val blockTransferService = mock(classOf[BlockTransferService])
+    val blockInfoManager = mock(classOf[BlockInfoManager])
+
+    when(bm.blockInfoManager).thenReturn(blockInfoManager)
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.blockTransferService).thenReturn(blockTransferService)
+    // Mock RDD blocks with different sizes
+    val rddBlocks = Seq(
+      ReplicateBlock(RDDBlockId(0, 0), Seq(BlockManagerId("exec1", "host1", 12345)), 2),
+      ReplicateBlock(RDDBlockId(0, 1), Seq(BlockManagerId("exec2", "host2", 12345)), 2)
+    )
+    when(bm.getMigratableRDDBlocks()).thenReturn(rddBlocks)
+
+    // Mock different block sizes
+    val blockInfo1 = new BlockInfo(StorageLevel.MEMORY_ONLY, ClassTag.Nothing, tellMaster = true)
+    blockInfo1.size = 1024L
+    val blockInfo2 = new BlockInfo(StorageLevel.MEMORY_ONLY, ClassTag.Nothing, tellMaster = true)
+    blockInfo2.size = 2048L
+    when(blockInfoManager.get(mc.eq(RDDBlockId(0, 0)))).thenReturn(Some(blockInfo1))
+    when(blockInfoManager.get(mc.eq(RDDBlockId(0, 1)))).thenReturn(Some(blockInfo2))
+
+    // Mock successful replication
+    when(bm.replicateBlock(mc.any(), mc.any(), mc.any(), mc.any())).thenReturn(true)
+
+    // Setup shuffle blocks with known sizes
+    val shuffleBlocks = Set(ShuffleBlockInfo(0, 1L), ShuffleBlockInfo(0, 2L))
+    registerShuffleBlocks(migratableShuffleBlockResolver,
+      shuffleBlocks.map(s => (s.shuffleId, s.mapId, 1500)))
+
+    when(bm.getPeers(mc.any())).thenReturn(Seq(BlockManagerId("exec1", "host1", bmPort)))
+
+    val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm)
+
+    try {
+      val startTime = System.currentTimeMillis()
+      bmDecomManager.start()
+
+      // Wait for migration to make progress
+      eventually(timeout(30.seconds), interval(100.milliseconds)) {
+        val summary = bmDecomManager.getDecommissionSummary()
+        assert(summary.decommissionTime > 0, "Decommission time should be tracked")
+        assert(summary.migrationInfo.shuffleBlocksTotal == 2, "Should track 2 shuffle blocks")
+        assert(summary.migrationInfo.rddBlocksTotal == 2, "Should track 2 RDD blocks")
+      }
+
+      val summary = bmDecomManager.getDecommissionSummary()
+      val endTime = System.currentTimeMillis()
+
+      // Verify timing relationships
+      assert(summary.decommissionTime <= endTime - startTime + 100,
+        "Decommission time should be reasonable")
+      assert(summary.migrationTime >= 0, "Migration time should be non-negative")
+      assert(summary.taskWaitingTime >= 0, "Task waiting time should be non-negative")
+      assert(summary.decommissionTime >= summary.migrationTime,
+        "Total time should be >= migration time")
+
+      // Verify migration statistics
+      assert(summary.migrationInfo.shuffleBlocksTotal == 2, "Should track 2 shuffle blocks")
+      assert(summary.migrationInfo.rddBlocksTotal == 2, "Should track 2 RDD blocks")
+      assert(summary.migrationInfo.totalBytesTransferred >= 0, "Should track bytes transferred")
+
+      // Verify summary format includes all components
+      val summaryStr = summary.toString
+      assert(summaryStr.contains("Decommission completed in"),
+        "Should include decommission completion message")
+      assert(summaryStr.contains("task waiting:"), "Should include task waiting time")
+      assert(summaryStr.contains("migration:"), "Should include migration time")
+      assert(summaryStr.contains("shuffle blocks:"), "Should include shuffle block stats")
+      assert(summaryStr.contains("RDD blocks:"), "Should include RDD block stats")
 
     } finally {
       bmDecomManager.stop()
