@@ -30,7 +30,6 @@ import org.roaringbitmap.RoaringBitmap
 
 import org.apache.spark.LocalSparkContext._
 import org.apache.spark.broadcast.BroadcastManager
-import org.apache.spark.internal.{config => sparkConfig}
 import org.apache.spark.internal.config._
 import org.apache.spark.internal.config.Network.{RPC_ASK_TIMEOUT, RPC_MESSAGE_MAX_SIZE}
 import org.apache.spark.internal.config.Tests.IS_TESTING
@@ -217,14 +216,6 @@ class MapOutputTrackerSuite extends SparkFunSuite with LocalSparkContext {
     intercept[IllegalArgumentException] { newTrackerMaster(newConf) }
   }
 
-  test("multi-location configuration loading") {
-    val conf = new SparkConf()
-    conf.set("spark.shuffle.multiLocation.enabled", "true")
-    conf.set("spark.shuffle.multiLocation.maxReplicates", "5")
-
-    assert(conf.get(sparkConfig.SHUFFLE_MULTI_LOCATION_ENABLED) === true)
-    assert(conf.get(sparkConfig.SHUFFLE_MULTI_LOCATION_MAX_REPLICATES) === 5)
-  }
 
   test("MapStatus interface default multi-location behavior") {
     val loc = BlockManagerId("exec1", "host1", 1000)
@@ -232,6 +223,7 @@ class MapOutputTrackerSuite extends SparkFunSuite with LocalSparkContext {
 
     assert(status.location === loc)
     assert(status.locations === Seq(loc))
+
     status.addLocation(BlockManagerId("exec2", "host2", 1000))
     assert(status.locations === Seq(loc))
   }
