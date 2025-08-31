@@ -356,8 +356,10 @@ private[spark] class ExecutorMonitor(
     if (removed != null) {
       decrementExecResourceProfileCount(removed.resourceProfileId)
       if (event.reason == ExecutorLossMessage.decommissionFinished ||
-        (event.reason != null && event.reason.startsWith(ExecutorDecommission.msgPrefix))) {
+        (event.reason != null && event.reason.contains("decommission: completed"))) {
         metrics.gracefullyDecommissioned.inc()
+      } else if (event.reason != null && event.reason.contains("decommission: incomplete")) {
+        metrics.decommissionUnfinished.inc()
       } else if (removed.decommissioning) {
           metrics.decommissionUnfinished.inc()
       } else if (removed.pendingRemoval) {

@@ -42,7 +42,7 @@ import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.resource.ResourceProfile._
 import org.apache.spark.resource.ResourceUtils._
 import org.apache.spark.rpc._
-import org.apache.spark.scheduler.{ExecutorDecommission, ExecutorLossMessage, ExecutorLossReason, TaskDescription}
+import org.apache.spark.scheduler.{ExecutorDecommission, ExecutorLossReason, TaskDescription}
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages._
 import org.apache.spark.util.{ChildFirstURLClassLoader, MutableURLClassLoader, SignalUtils, ThreadUtils, Utils}
 
@@ -359,20 +359,29 @@ private[spark] class CoarseGrainedExecutorBackend(
             if (executor == null || executor.numRunningTasks == 0) {
               if (migrationEnabled) {
                 logInfo("No running tasks, checking migrations")
-                val summary = env.blockManager.lastMigrationSummary()
-                val (migrationTime, allBlocksMigrated) = env.blockManager.lastMigrationInfo()
+                val summary = env.blockManager.lastMigrationSummary().get
                 // We can only trust allBlocksMigrated boolean value if there were no tasks running
                 // since the start of computing it.
-                if (allBlocksMigrated && (migrationTime > lastTaskFinishTime.get())) {
+                if (summary.migrationComplete &&
+                  (summary.lastMigrationTimestamp > lastTaskFinishTime.get())) {
                   logInfo(s"No running tasks, all blocks migrated, stopping. $summary")
-                  val lossReason = ExecutorDecommission(None, summary.toString)
+                  val lossReason = ExecutorDecommission(
+                    None,
+                    "All shuffle and RDD blocks migrated successfully",
+                    migrationCompleted = true,
+                    summary = Some(summary))
                   exitExecutor(0, lossReason.toString, notifyDriver = true)
                 } else {
                   logInfo("All blocks not yet migrated.")
                 }
               } else {
                 logInfo("No running tasks, no block migration configured, stopping.")
-                exitExecutor(0, ExecutorLossMessage.decommissionFinished, notifyDriver = true)
+                val lossReason = ExecutorDecommission(
+                  None,
+                  "No block migration required",
+                  migrationCompleted = true,
+                  summary = None)
+                exitExecutor(0, lossReason.toString, notifyDriver = true)
               }
             } else {
               logInfo(s"Blocked from shutdown by ${executor.numRunningTasks} running tasks")

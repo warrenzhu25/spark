@@ -126,12 +126,26 @@ case class ExecutorProcessLost(
  *
  * @param workerHost it is defined when the worker is decommissioned too
  * @param reason detailed decommission message
+ * @param migrationCompleted indicates if all shuffle and RDD blocks were successfully migrated
+ * @param summary optional detailed migration summary for completed decommissions
  */
 private [spark] case class ExecutorDecommission(
     workerHost: Option[String] = None,
-    reason: String = "")
-  extends ExecutorLossReason(ExecutorDecommission.msgPrefix + reason)
+    reason: String = "",
+    migrationCompleted: Boolean = false,
+    summary: Option[DecommissionSummary] = None)
+  extends ExecutorLossReason(
+    ExecutorDecommission.formatMessage(reason, migrationCompleted, summary))
 
 private[spark] object ExecutorDecommission {
   val msgPrefix = "Executor decommission: "
+
+  private def formatMessage(
+      reason: String,
+      migrationCompleted: Boolean,
+      summary: Option[DecommissionSummary]): String = {
+    val status = if (migrationCompleted) "completed" else "incomplete"
+    val baseMsg = s"$msgPrefix$status: $reason"
+    summary.map(s => s"$baseMsg. $s").getOrElse(baseMsg)
+  }
 }
