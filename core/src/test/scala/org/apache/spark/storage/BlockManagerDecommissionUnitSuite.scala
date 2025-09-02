@@ -37,6 +37,7 @@ import org.apache.spark.storage.BlockManagerMessages.ReplicateBlock
 class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
 
   private val bmPort = 12345
+  private val decomTimeout = 10.second
 
   private val sparkConf = new SparkConf(false)
     .set(config.STORAGE_DECOMMISSION_SHUFFLE_BLOCKS_ENABLED, true)
@@ -77,7 +78,7 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
     var previousTime: Option[Long] = None
     try {
       bmDecomManager.start()
-      eventually(timeout(100.second), interval(10.milliseconds)) {
+      eventually(timeout(decomTimeout), interval(10.milliseconds)) {
         val (currentTime, done) = bmDecomManager.lastMigrationInfo()
         assert(!assertDone || done)
         // Make sure the time stamp starts moving forward.
@@ -322,7 +323,7 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
       var previousShuffleTime: Option[Long] = None
 
       // We don't check that all blocks are migrated because out mock is always returning an RDD.
-      eventually(timeout(100.second), interval(10.milliseconds)) {
+      eventually(timeout(decomTimeout), interval(10.milliseconds)) {
         assert(bmDecomManager.shufflesToMigrate.isEmpty === true)
         assert(bmDecomManager.numMigratedShuffles.get() === 1)
         verify(bm, least(1)).replicateBlock(
@@ -377,7 +378,7 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
 
     try {
       bmDecomManager.start()
-      eventually(timeout(100.second), interval(10.milliseconds)) {
+      eventually(timeout(decomTimeout), interval(10.milliseconds)) {
         verify(bm, never()).replicateBlock(
           mc.eq(storedBlockId1), mc.any(), mc.any(), mc.eq(Some(3)))
         assert(bmDecomManager.rddBlocksLeft)
@@ -498,7 +499,7 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
     try {
       bmDecomManager.start()
 
-      eventually(timeout(100.second), interval(10.milliseconds)) {
+      eventually(timeout(decomTimeout), interval(10.milliseconds)) {
         // Should stop migration due to timeouts
         val exec2Id = BlockManagerId("exec2", "host2", 12345)
         assert(bmDecomManager.uploadStats.contains(exec2Id))
