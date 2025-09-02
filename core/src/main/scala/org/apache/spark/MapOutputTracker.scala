@@ -1239,6 +1239,48 @@ private[spark] class MapOutputTrackerMaster(
     shuffleStatuses.get(shuffleId).map(_.getShufflePushMergerLocations).getOrElse(Seq.empty)
   }
 
+  /**
+   * Calculate total shuffle data size per executor by examining all registered shuffles.
+   * This helps identify executors with different shuffle data loads for making informed
+   * decisions about data migration and load balancing.
+   *
+   * @return Map from executor ID to total shuffle data size in bytes
+   */
+  def getShuffleSizesByExecutor(): collection.Map[String, Long] = {
+    val loads = new HashMap[String, Long]()
+
+    shuffleStatuses.values.foreach { shuffleStatus =>
+      shuffleStatus.withMapStatuses { statuses =>
+        statuses.filter(_ != null).foreach { status =>
+          val executorId = status.location.executorId
+          // Sum all partition sizes for this map output
+          var totalSize = 0L
+          var partId = 0
+          try {
+            // Keep summing until we get an exception (reached the end)
+            while (true) {
+              val size = status.getSizeForBlock(partId)
+              if (size > 0) totalSize += size
+              partId += 1
+            }
+          } catch {
+            case _: Exception => // Expected when we've gone past the last partition
+          }
+          loads(executorId) = loads.getOrElse(executorId, 0L) + totalSize
+        }
+      }
+    }
+
+    val result = loads.toMap
+    if (result.nonEmpty) {
+      logDebug(s"Calculated shuffle sizes for ${result.size} executors: " +
+        result.toSeq.sortBy(_._2).map { case (exec, load) =>
+          s"$exec=${Utils.bytesToString(load)}"
+        }.mkString(", "))
+    }
+    result
+  }
+
   override def stop(): Unit = {
     mapOutputTrackerMasterMessages.offer(PoisonPill)
     threadpool.shutdown()
