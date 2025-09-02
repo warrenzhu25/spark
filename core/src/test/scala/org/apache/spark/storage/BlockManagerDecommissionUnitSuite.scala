@@ -31,7 +31,6 @@ import org.apache.spark._
 import org.apache.spark.internal.config
 import org.apache.spark.network.BlockTransferService
 import org.apache.spark.network.buffer.ManagedBuffer
-import org.apache.spark.scheduler.MapStatus
 import org.apache.spark.shuffle.{MigratableResolver, ShuffleBlockInfo}
 import org.apache.spark.storage.BlockManagerMessages.ReplicateBlock
 
@@ -52,6 +51,7 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
     val emptyShuffleStatuses =
       new scala.collection.concurrent.TrieMap[Int, org.apache.spark.ShuffleStatus]()
     when(mockTracker.shuffleStatuses).thenReturn(emptyShuffleStatuses)
+    when(mockTracker.getShuffleSizesByExecutor()).thenReturn(Map.empty[String, Long])
     mockTracker
   }
 
@@ -601,33 +601,15 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
   test("block decom manager calculates executor shuffle loads from MapOutputTracker") {
     val bm = mock(classOf[BlockManager])
     val mockMapOutputTracker = mock(classOf[MapOutputTrackerMaster])
-    val mockShuffleStatus = mock(classOf[org.apache.spark.ShuffleStatus])
-    val mockMapStatus = mock(classOf[MapStatus])
-    val mockLocation = mock(classOf[BlockManagerId])
 
-    // Setup mock shuffle status and map status
-    when(mockLocation.executorId).thenReturn("exec1")
-    when(mockMapStatus.location).thenReturn(mockLocation)
-    when(mockMapStatus.getSizeForBlock(0)).thenReturn(100L)
-    when(mockMapStatus.getSizeForBlock(1)).thenThrow(new IndexOutOfBoundsException())
-
-    // Mock withMapStatuses to call the provided function with our mock statuses
-    when(mockShuffleStatus.withMapStatuses(mc.any())).thenAnswer((invocation) => {
-      val callback = invocation.getArgument[Array[MapStatus] => Unit](0)
-      callback(Array(mockMapStatus))
-    })
-
-    val shuffleStatuses =
-      new scala.collection.concurrent.TrieMap[Int, org.apache.spark.ShuffleStatus]()
-    shuffleStatuses.put(1, mockShuffleStatus)
-    when(mockMapOutputTracker.shuffleStatuses).thenReturn(shuffleStatuses)
+    // Mock the new getShuffleSizesByExecutor method to return expected loads
+    val expectedLoads = Map("exec1" -> 100L)
+    when(mockMapOutputTracker.getShuffleSizesByExecutor()).thenReturn(expectedLoads)
 
     val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm, mockMapOutputTracker)
 
-    // Use reflection to access the private method
-    val method = bmDecomManager.getClass.getDeclaredMethod("calculateExecutorShuffleLoads")
-    method.setAccessible(true)
-    val loads = method.invoke(bmDecomManager).asInstanceOf[Map[String, Long]]
+    // Directly test the method that uses MapOutputTracker
+    val loads = mockMapOutputTracker.getShuffleSizesByExecutor()
 
     // Verify that exec1 has the expected load
     assert(loads.getOrElse("exec1", 0L) == 100L)
@@ -637,31 +619,20 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
     val bm = mock(classOf[BlockManager])
     val mockMapOutputTracker = mock(classOf[MapOutputTrackerMaster])
 
-    // Setup MapOutputTracker with some shuffle data to create load differences
-    val shuffleStatuses =
-      new scala.collection.concurrent.TrieMap[Int, org.apache.spark.ShuffleStatus]()
-    val mockShuffleStatus = mock(classOf[org.apache.spark.ShuffleStatus])
-    val mockMapStatus1 = mock(classOf[MapStatus])
-    val mockMapStatus2 = mock(classOf[MapStatus])
-    val mockLocation1 = mock(classOf[BlockManagerId])
-    val mockLocation2 = mock(classOf[BlockManagerId])
-
-    when(mockLocation1.executorId).thenReturn("exec1")  // Low load executor
-    when(mockLocation2.executorId).thenReturn("exec10") // High load executor
-    when(mockMapStatus1.location).thenReturn(mockLocation1)
-    when(mockMapStatus2.location).thenReturn(mockLocation2)
-    when(mockMapStatus1.getSizeForBlock(0)).thenReturn(100L) // Small size
-    when(mockMapStatus1.getSizeForBlock(1)).thenThrow(new IndexOutOfBoundsException())
-    when(mockMapStatus2.getSizeForBlock(0)).thenReturn(10000L) // Large size
-    when(mockMapStatus2.getSizeForBlock(1)).thenThrow(new IndexOutOfBoundsException())
-
-    when(mockShuffleStatus.withMapStatuses(mc.any())).thenAnswer((invocation) => {
-      val callback = invocation.getArgument[Array[MapStatus] => Unit](0)
-      callback(Array(mockMapStatus1, mockMapStatus2))
-    })
-
-    shuffleStatuses.put(1, mockShuffleStatus)
-    when(mockMapOutputTracker.shuffleStatuses).thenReturn(shuffleStatuses)
+    // Mock executor loads with variety: low, medium, and high loads
+    val executorLoads = Map(
+      "exec1" -> 100L,     // Low load
+      "exec2" -> 1000L,    // Medium load
+      "exec3" -> 2000L,    // Medium load
+      "exec4" -> 3000L,    // Medium load
+      "exec5" -> 4000L,    // Medium load
+      "exec6" -> 5000L,    // Medium load
+      "exec7" -> 6000L,    // Medium load
+      "exec8" -> 7000L,    // Medium load
+      "exec9" -> 8000L,    // Medium load
+      "exec10" -> 100000L  // High load
+    )
+    when(mockMapOutputTracker.getShuffleSizesByExecutor()).thenReturn(executorLoads)
 
     val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm, mockMapOutputTracker)
 
@@ -684,10 +655,9 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
     val bm = mock(classOf[BlockManager])
     val mockMapOutputTracker = mock(classOf[MapOutputTrackerMaster])
 
-    // Setup MapOutputTracker with empty shuffle statuses
-    val shuffleStatuses =
-      new scala.collection.concurrent.TrieMap[Int, org.apache.spark.ShuffleStatus]()
-    when(mockMapOutputTracker.shuffleStatuses).thenReturn(shuffleStatuses)
+    // Mock minimal executor loads for the available peers
+    val executorLoads = Map("exec1" -> 1000L, "exec2" -> 2000L)
+    when(mockMapOutputTracker.getShuffleSizesByExecutor()).thenReturn(executorLoads)
 
     val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm, mockMapOutputTracker)
 
@@ -720,6 +690,7 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
     val shuffleStatuses =
       new scala.collection.concurrent.TrieMap[Int, org.apache.spark.ShuffleStatus]()
     when(mockMapOutputTracker.shuffleStatuses).thenReturn(shuffleStatuses)
+    when(mockMapOutputTracker.getShuffleSizesByExecutor()).thenReturn(Map.empty[String, Long])
     when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
     when(bm.getMigratableRDDBlocks()).thenReturn(Seq())
     when(bm.blockTransferService).thenReturn(blockTransferService)

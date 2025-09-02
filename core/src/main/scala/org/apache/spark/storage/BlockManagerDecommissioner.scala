@@ -414,46 +414,6 @@ private[storage] class BlockManagerDecommissioner(
         conf.get(config.STORAGE_DECOMMISSION_SHUFFLE_MAX_THREADS)))
     } else None
 
-  /**
-   * Calculate total shuffle data size per executor by querying MapOutputTracker.
-   * This helps identify executors with low data (likely future decommission candidates)
-   * vs high data (overloaded) to make better migration targeting decisions.
-   */
-  private def calculateExecutorShuffleLoads(): Map[String, Long] = {
-    val loads = mutable.Map[String, Long]()
-
-    mapOutputTracker.shuffleStatuses.values.foreach {
-      shuffleStatus =>
-      shuffleStatus.withMapStatuses { statuses =>
-        statuses.filter(_ != null).foreach { status =>
-          val executorId = status.location.executorId
-          // Sum all partition sizes for this map output
-          var totalSize = 0L
-          var partId = 0
-          try {
-            // Keep summing until we get an exception (reached the end)
-            while (true) {
-              val size = status.getSizeForBlock(partId)
-              if (size > 0) totalSize += size
-              partId += 1
-            }
-          } catch {
-            case _: Exception => // Expected when we've gone past the last partition
-          }
-          loads(executorId) = loads.getOrElse(executorId, 0L) + totalSize
-        }
-      }
-    }
-
-    val result = loads.toMap
-    if (result.nonEmpty) {
-      logDebug(s"Calculated shuffle loads for ${result.size} executors: " +
-        result.toSeq.sortBy(_._2).map { case (exec, load) =>
-          s"$exec=${Utils.bytesToString(load)}"
-        }.mkString(", "))
-    }
-    result
-  }
 
   /**
    * Select peers for shuffle migration based on their current shuffle load.
@@ -463,7 +423,7 @@ private[storage] class BlockManagerDecommissioner(
   private def selectPeersByLoad(availablePeers: Set[BlockManagerId]): Seq[BlockManagerId] = {
     if (availablePeers.isEmpty) return Seq.empty
 
-    val executorLoads = calculateExecutorShuffleLoads()
+    val executorLoads = mapOutputTracker.getShuffleSizesByExecutor()
 
     // If no load data available, fall back to random selection
     if (executorLoads.isEmpty) {
