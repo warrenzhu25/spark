@@ -135,6 +135,14 @@ private[storage] class BlockManagerDecommissioner(
   }
 
   /**
+   * Result of attempting to migrate a shuffle block.
+   */
+  private sealed trait MigrationResult
+  private case object MigrationSuccess extends MigrationResult
+  private case class MigrationFailure(shouldRetry: Boolean, shouldStopThread: Boolean,
+      reason: String) extends MigrationResult
+
+  /**
    * This runnable consumes any shuffle blocks in the queue for migration. This part of a
    * producer/consumer where the main migration loop updates the queue of blocks to be migrated
    * periodically. On migration failure, the current thread will reinsert the block for another
@@ -183,12 +191,169 @@ private[storage] class BlockManagerDecommissioner(
       }
     }
 
+    private def handleMigrationException(e: Throwable, shuffleBlockInfo: ShuffleBlockInfo,
+        blocks: List[(BlockId, org.apache.spark.network.buffer.ManagedBuffer)]): MigrationResult = {
+      e match {
+        case _: TimeoutException =>
+          recordTimeout()
+          val totalBytes = blocks.map(b => b._2.size()).sum
+          val timeout = calculateUploadTimeout(totalBytes)
+          logWarning(s"Upload timeout for $shuffleBlockInfo to $peer " +
+            s"(${Utils.bytesToString(totalBytes)} in ${timeout.toMillis}ms), " +
+            s"total timeouts: ${uploadStats(peer).timeoutCount}")
+          MigrationFailure(shouldRetry = true, shouldStopThread = true, "Upload timeout")
+
+        case _ @ (_ : IOException | _ : SparkException) =>
+          // If a block got deleted before netty opened the file handle, then trying to
+          // load the blocks now will fail. This is most likely to occur if we start
+          // migrating blocks and then the shuffle TTL cleaner kicks in. However this
+          // could also happen with manually managed shuffles or a GC event on the
+          // driver a no longer referenced RDD with shuffle files.
+          if (bm.migratableResolver.getMigrationBlocks(shuffleBlockInfo).size < blocks.size) {
+            logWarning(s"Skipping block $shuffleBlockInfo, block deleted.")
+            MigrationFailure(shouldRetry = false, shouldStopThread = false, "Block deleted")
+          } else if (fallbackStorage.isDefined
+              // Confirm peer is not the fallback BM ID because fallbackStorage would already
+              // have been used in the try-block above so there's no point trying again
+              && peer != FallbackStorage.FALLBACK_BLOCK_MANAGER_ID) {
+            fallbackStorage.foreach(_.copy(shuffleBlockInfo, bm))
+            MigrationSuccess
+          } else {
+            logError(s"Error occurred during migrating $shuffleBlockInfo", e)
+            MigrationFailure(shouldRetry = true, shouldStopThread = true,
+              s"IO/Spark error: ${e.getMessage}")
+          }
+
+        case _: Exception =>
+          logError(s"Error occurred during migrating $shuffleBlockInfo", e)
+          MigrationFailure(shouldRetry = true, shouldStopThread = true,
+            s"Unexpected error: ${e.getMessage}")
+      }
+    }
+
+    private def scheduleRetryOrComplete(shuffleBlockInfo: ShuffleBlockInfo, retryCount: Int,
+        shouldRetry: Boolean): Unit = {
+      if (shouldRetry) {
+        // If allowRetry returns true, the block is added back to queue and we don't increment
+        // If allowRetry returns false, we reached max retries and should increment
+        if (!allowRetry(shuffleBlockInfo, retryCount + 1)) {
+          numMigratedShuffles.incrementAndGet()
+        }
+      } else {
+        // If we shouldn't retry, consider the block as migrated (failed permanently)
+        numMigratedShuffles.incrementAndGet()
+      }
+    }
+
+    private def shouldSkipMigration(shuffleBlockInfo: ShuffleBlockInfo,
+        blocks: List[(BlockId, org.apache.spark.network.buffer.ManagedBuffer)],
+        retryCount: Int): Option[String] = {
+      if (blocks.isEmpty) {
+        Some(s"Ignore deleted shuffle block $shuffleBlockInfo")
+      } else if (isThroughputTooSlow()) {
+        val stats = uploadStats(peer)
+        Some(s"Upload throughput too slow for $peer " +
+          s"(${Utils.bytesToString(stats.currentThroughputBytesPerSec.toLong)}/sec < " +
+          s"${Utils.bytesToString(minUploadThroughputBytesPerSec)}/sec), stopping migration")
+      } else if (hasTooManyTimeouts()) {
+        val stats = uploadStats(peer)
+        Some(s"Too many upload timeouts for $peer " +
+          s"(${stats.timeoutCount} timeouts), stopping migration")
+      } else {
+        None
+      }
+    }
+
+    private def performBlockMigration(shuffleBlockInfo: ShuffleBlockInfo,
+        blocks: List[(BlockId, org.apache.spark.network.buffer.ManagedBuffer)]): MigrationResult = {
+      try {
+        val totalBytes = blocks.map(b => b._2.size()).sum
+        val startTime = System.currentTimeMillis()
+
+        if (fallbackStorage.isDefined && peer == FallbackStorage.FALLBACK_BLOCK_MANAGER_ID) {
+          fallbackStorage.foreach(_.copy(shuffleBlockInfo, bm))
+        } else {
+          blocks.foreach { case (blockId, buffer) =>
+            logDebug(s"Migrating sub-block ${blockId}")
+            uploadBlockSyncWithTimeout(
+              peer.host,
+              peer.port,
+              peer.executorId,
+              blockId,
+              buffer,
+              StorageLevel.DISK_ONLY,
+              buffer.size())
+            logDebug(s"Migrated sub-block $blockId")
+          }
+        }
+
+        val durationMs = System.currentTimeMillis() - startTime
+        recordUpload(totalBytes, durationMs)
+        val stats = uploadStats(peer)
+        logInfo(s"Migrated $shuffleBlockInfo (" +
+          s"size: ${Utils.bytesToString(totalBytes)}) to $peer " +
+          s"in ${durationMs} ms. " +
+          s"Throughput: " +
+          s"${Utils.bytesToString(stats.currentThroughputBytesPerSec.toLong)}/sec")
+        MigrationSuccess
+      } catch {
+        case e: Throwable => handleMigrationException(e, shuffleBlockInfo, blocks)
+      }
+    }
+
+    private def processNextBlock(): Boolean = {
+      try {
+        val (shuffleBlockInfo, retryCount) = nextShuffleBlockToMigrate()
+        val blocks = bm.migratableResolver.getMigrationBlocks(shuffleBlockInfo)
+
+        shouldSkipMigration(shuffleBlockInfo, blocks, retryCount) match {
+          case Some(reason) =>
+            logInfo(reason)
+            if (reason.contains("throughput too slow") || reason.contains("too many timeouts")) {
+              scheduleRetryOrComplete(shuffleBlockInfo, retryCount, shouldRetry = true)
+              return false // Stop this thread
+            }
+            // For deleted blocks, just continue to next block
+            true
+
+          case None =>
+            logInfo(s"Got migration sub-blocks $blocks. Trying to migrate $shuffleBlockInfo " +
+              s"to $peer ($retryCount / $maxReplicationFailuresForDecommission)")
+
+            val result = performBlockMigration(shuffleBlockInfo, blocks)
+            result match {
+              case MigrationSuccess =>
+                numMigratedShuffles.incrementAndGet()
+                true
+
+              case MigrationFailure(shouldRetry, shouldStopThread, reason) =>
+                if (shouldStopThread) {
+                  logWarning(s"Stop migrating shuffle blocks to $peer: $reason")
+                  scheduleRetryOrComplete(shuffleBlockInfo, retryCount, shouldRetry)
+                  false
+                } else {
+                  scheduleRetryOrComplete(shuffleBlockInfo, retryCount, shouldRetry)
+                  true
+                }
+            }
+        }
+      } catch {
+        case _: InterruptedException =>
+          logInfo(s"Stop shuffle block migration${if (keepRunning) " unexpectedly"}.")
+          false
+        case NonFatal(e) =>
+          logError("Error occurred during shuffle blocks migration.", e)
+          false
+      }
+    }
+
     private def allowRetry(shuffleBlock: ShuffleBlockInfo, failureNum: Int): Boolean = {
       if (failureNum < maxReplicationFailuresForDecommission) {
         logInfo(s"Add $shuffleBlock back to migration queue for " +
           s"retry ($failureNum / $maxReplicationFailuresForDecommission)")
         // The block needs to retry so we should not mark it as finished
         shufflesToMigrate.add((shuffleBlock, failureNum))
+        true
       } else {
         logWarning(s"Give up migrating $shuffleBlock since it's been " +
           s"failed for $maxReplicationFailuresForDecommission times")
@@ -210,112 +375,8 @@ private[storage] class BlockManagerDecommissioner(
 
     override def run(): Unit = {
       logInfo(s"Starting shuffle block migration thread for $peer")
-      // Once a block fails to transfer to an executor stop trying to transfer more blocks
       while (keepRunning) {
-        try {
-          val (shuffleBlockInfo, retryCount) = nextShuffleBlockToMigrate()
-          val blocks = bm.migratableResolver.getMigrationBlocks(shuffleBlockInfo)
-          // We only migrate a shuffle block when both index file and data file exist.
-          if (blocks.isEmpty) {
-            logInfo(s"Ignore deleted shuffle block $shuffleBlockInfo")
-          } else if (isThroughputTooSlow()) {
-            val stats = uploadStats(peer)
-            logInfo(s"Upload throughput too slow for $peer " +
-              s"(${Utils.bytesToString(stats.currentThroughputBytesPerSec.toLong)}/sec < " +
-              s"${Utils.bytesToString(minUploadThroughputBytesPerSec)}/sec), stopping migration")
-            keepRunning = false
-            // Re-add the block to queue for other threads to pick up
-            if (!allowRetry(shuffleBlockInfo, retryCount)) {
-              numMigratedShuffles.incrementAndGet()
-            }
-          } else if (hasTooManyTimeouts()) {
-            val stats = uploadStats(peer)
-            logInfo(s"Too many upload timeouts for $peer " +
-              s"(${stats.timeoutCount} timeouts), stopping migration")
-            keepRunning = false
-            // Re-add the block to queue for other threads to pick up
-            if (!allowRetry(shuffleBlockInfo, retryCount)) {
-              numMigratedShuffles.incrementAndGet()
-            }
-          } else {
-            logInfo(s"Got migration sub-blocks $blocks. Trying to migrate $shuffleBlockInfo " +
-              s"to $peer ($retryCount / $maxReplicationFailuresForDecommission)")
-            // Migrate the components of the blocks.
-            try {
-              val totalBytes = blocks.map(b => b._2.size()).sum
-              val startTime = System.currentTimeMillis()
-              if (fallbackStorage.isDefined && peer == FallbackStorage.FALLBACK_BLOCK_MANAGER_ID) {
-                fallbackStorage.foreach(_.copy(shuffleBlockInfo, bm))
-              } else {
-                blocks.foreach { case (blockId, buffer) =>
-                  logDebug(s"Migrating sub-block ${blockId}")
-                  uploadBlockSyncWithTimeout(
-                    peer.host,
-                    peer.port,
-                    peer.executorId,
-                    blockId,
-                    buffer,
-                    StorageLevel.DISK_ONLY,
-                    buffer.size())
-                  logDebug(s"Migrated sub-block $blockId")
-                }
-              }
-              val durationMs = System.currentTimeMillis() - startTime
-              recordUpload(totalBytes, durationMs)
-              val stats = uploadStats(peer)
-              logInfo(s"Migrated $shuffleBlockInfo (" +
-                s"size: ${Utils.bytesToString(totalBytes)}) to $peer " +
-                s"in ${durationMs} ms. " +
-                s"Throughput: " +
-                s"${Utils.bytesToString(stats.currentThroughputBytesPerSec.toLong)}/sec")
-            } catch {
-              case e: TimeoutException =>
-                recordTimeout()
-                val totalBytes = blocks.map(b => b._2.size()).sum
-                val timeout = calculateUploadTimeout(totalBytes)
-                logWarning(s"Upload timeout for $shuffleBlockInfo to $peer " +
-                  s"(${Utils.bytesToString(totalBytes)} in ${timeout.toMillis}ms), " +
-                  s"total timeouts: ${uploadStats(peer).timeoutCount}")
-                keepRunning = false
-              case e @ ( _ : IOException | _ : SparkException) =>
-                // If a block got deleted before netty opened the file handle, then trying to
-                // load the blocks now will fail. This is most likely to occur if we start
-                // migrating blocks and then the shuffle TTL cleaner kicks in. However this
-                // could also happen with manually managed shuffles or a GC event on the
-                // driver a no longer referenced RDD with shuffle files.
-                if (bm.migratableResolver.getMigrationBlocks(shuffleBlockInfo).size < blocks.size) {
-                  logWarning(s"Skipping block $shuffleBlockInfo, block deleted.")
-                } else if (fallbackStorage.isDefined
-                    // Confirm peer is not the fallback BM ID because fallbackStorage would already
-                    // have been used in the try-block above so there's no point trying again
-                    && peer != FallbackStorage.FALLBACK_BLOCK_MANAGER_ID) {
-                  fallbackStorage.foreach(_.copy(shuffleBlockInfo, bm))
-                } else {
-                  logError(s"Error occurred during migrating $shuffleBlockInfo", e)
-                  keepRunning = false
-                }
-              case e: Exception =>
-                logError(s"Error occurred during migrating $shuffleBlockInfo", e)
-                keepRunning = false
-            }
-          }
-          if (keepRunning) {
-            numMigratedShuffles.incrementAndGet()
-          } else {
-            logWarning(s"Stop migrating shuffle blocks to $peer")
-            // Do not mark the block as migrated if it still needs retry
-            if (!allowRetry(shuffleBlockInfo, retryCount + 1)) {
-              numMigratedShuffles.incrementAndGet()
-            }
-          }
-        } catch {
-          case _: InterruptedException =>
-            logInfo(s"Stop shuffle block migration${if (keepRunning) " unexpectedly"}.")
-            keepRunning = false
-          case NonFatal(e) =>
-            keepRunning = false
-            logError("Error occurred during shuffle blocks migration.", e)
-        }
+        keepRunning = processNextBlock()
       }
     }
   }

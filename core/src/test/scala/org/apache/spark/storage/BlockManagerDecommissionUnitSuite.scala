@@ -874,4 +874,547 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
       bmDecomManager.stop()
     }
   }
+
+  test("handleMigrationException categorizes TimeoutException correctly") {
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks()).thenReturn(Seq())
+
+    val confWithTimeouts = sparkConf.clone()
+      .set(config.STORAGE_DECOMMISSION_SHUFFLE_UPLOAD_TIMEOUT_ENABLED, true)
+    val bmDecomManager = new BlockManagerDecommissioner(confWithTimeouts, bm, mockMapOutputTracker)
+    val peer = BlockManagerId("exec1", "host1", 12345)
+
+    // Initialize upload stats to avoid NPE
+    val stats = bmDecomManager.UploadStats()
+    bmDecomManager.uploadStats.put(peer, stats)
+
+    // Use reflection to access private ShuffleMigrationRunnable class and test its methods
+    val runnableClass = bmDecomManager.getClass.getDeclaredClasses
+      .find(_.getSimpleName == "ShuffleMigrationRunnable").get
+    val constructor = runnableClass.getDeclaredConstructors()(0)
+    constructor.setAccessible(true)
+    val runnable = constructor.newInstance(bmDecomManager, peer)
+
+    val handleExceptionMethod = runnableClass.getDeclaredMethod("handleMigrationException",
+      classOf[Throwable], classOf[ShuffleBlockInfo], classOf[List[_]])
+    handleExceptionMethod.setAccessible(true)
+
+    val shuffleBlockInfo = ShuffleBlockInfo(1, 1L)
+    val mockBuffer = mock(classOf[ManagedBuffer])
+    when(mockBuffer.size()).thenReturn(1024L)
+    val blocks = List(
+      (ShuffleIndexBlockId(1, 1L, 1), mockBuffer),
+      (ShuffleDataBlockId(1, 1L, 1), mockBuffer)
+    )
+
+    // Test TimeoutException handling
+    val timeoutException = new java.util.concurrent.TimeoutException("Test timeout")
+    val result = handleExceptionMethod.invoke(runnable, timeoutException, shuffleBlockInfo, blocks)
+
+    // Verify it returns MigrationFailure with correct properties
+    assert(result.getClass.getSimpleName === "MigrationFailure",
+      "TimeoutException should result in MigrationFailure")
+
+    // Use reflection to access the case class fields
+    val shouldRetryField = result.getClass.getDeclaredField("shouldRetry")
+    shouldRetryField.setAccessible(true)
+    val shouldStopThreadField = result.getClass.getDeclaredField("shouldStopThread")
+    shouldStopThreadField.setAccessible(true)
+    val reasonField = result.getClass.getDeclaredField("reason")
+    reasonField.setAccessible(true)
+
+    assert(shouldRetryField.get(result) === true,
+      "TimeoutException should allow retry")
+    assert(shouldStopThreadField.get(result) === true,
+      "TimeoutException should stop current thread")
+    assert(reasonField.get(result) === "Upload timeout",
+      "TimeoutException should have correct reason")
+
+    bmDecomManager.stop()
+  }
+
+  test("handleMigrationException handles IOException with block deletion") {
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks()).thenReturn(Seq())
+
+    val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm, mockMapOutputTracker)
+    val peer = BlockManagerId("exec1", "host1", 12345)
+
+    // Create runnable instance using reflection
+    val runnableClass = bmDecomManager.getClass.getDeclaredClasses
+      .find(_.getSimpleName == "ShuffleMigrationRunnable").get
+    val constructor = runnableClass.getDeclaredConstructors()(0)
+    constructor.setAccessible(true)
+    val runnable = constructor.newInstance(bmDecomManager, peer)
+
+    val handleExceptionMethod = runnableClass.getDeclaredMethod("handleMigrationException",
+      classOf[Throwable], classOf[ShuffleBlockInfo], classOf[List[_]])
+    handleExceptionMethod.setAccessible(true)
+
+    val shuffleBlockInfo = ShuffleBlockInfo(1, 1L)
+    val mockBuffer = mock(classOf[ManagedBuffer])
+    when(mockBuffer.size()).thenReturn(1024L)
+    val blocks = List(
+      (ShuffleIndexBlockId(1, 1L, 1), mockBuffer),
+      (ShuffleDataBlockId(1, 1L, 1), mockBuffer)
+    )
+
+    // Mock block deletion scenario - getMigrationBlocks returns fewer blocks
+    when(migratableShuffleBlockResolver.getMigrationBlocks(shuffleBlockInfo))
+      .thenReturn(List()) // Empty list indicates blocks were deleted
+
+    // Test IOException with block deletion
+    val ioException = new java.io.IOException("Block not found")
+    val result = handleExceptionMethod.invoke(runnable, ioException, shuffleBlockInfo, blocks)
+
+    // Verify it returns MigrationFailure with no retry and no thread stop
+    assert(result.getClass.getSimpleName === "MigrationFailure",
+      "IOException with deleted blocks should result in MigrationFailure")
+
+    val shouldRetryField = result.getClass.getDeclaredField("shouldRetry")
+    shouldRetryField.setAccessible(true)
+    val shouldStopThreadField = result.getClass.getDeclaredField("shouldStopThread")
+    shouldStopThreadField.setAccessible(true)
+    val reasonField = result.getClass.getDeclaredField("reason")
+    reasonField.setAccessible(true)
+
+    assert(shouldRetryField.get(result) === false,
+      "IOException with deleted blocks should not retry")
+    assert(shouldStopThreadField.get(result) === false,
+      "IOException with deleted blocks should not stop thread")
+    assert(reasonField.get(result) === "Block deleted",
+      "IOException with deleted blocks should have correct reason")
+
+    bmDecomManager.stop()
+  }
+
+  test("handleMigrationException handles IOException with standard error path") {
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks()).thenReturn(Seq())
+
+    val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm, mockMapOutputTracker)
+    val peer = BlockManagerId("exec1", "host1", 12345)
+
+    // Create runnable instance using reflection
+    val runnableClass = bmDecomManager.getClass.getDeclaredClasses
+      .find(_.getSimpleName == "ShuffleMigrationRunnable").get
+    val constructor = runnableClass.getDeclaredConstructors()(0)
+    constructor.setAccessible(true)
+    val runnable = constructor.newInstance(bmDecomManager, peer)
+
+    val handleExceptionMethod = runnableClass.getDeclaredMethod("handleMigrationException",
+      classOf[Throwable], classOf[ShuffleBlockInfo], classOf[List[_]])
+    handleExceptionMethod.setAccessible(true)
+
+    val shuffleBlockInfo = ShuffleBlockInfo(1, 1L)
+    val mockBuffer = mock(classOf[ManagedBuffer])
+    when(mockBuffer.size()).thenReturn(1024L)
+    val blocks = List(
+      (ShuffleIndexBlockId(1, 1L, 1), mockBuffer),
+      (ShuffleDataBlockId(1, 1L, 1), mockBuffer)
+    )
+
+    // Mock that blocks are still present (no deletion)
+    when(migratableShuffleBlockResolver.getMigrationBlocks(shuffleBlockInfo))
+      .thenReturn(blocks)
+
+    // Test IOException without fallback storage
+    val ioException = new java.io.IOException("Network error")
+    val result = handleExceptionMethod.invoke(runnable, ioException, shuffleBlockInfo, blocks)
+
+    // Verify it returns MigrationFailure with retry enabled
+    assert(result.getClass.getSimpleName === "MigrationFailure",
+      "IOException should result in MigrationFailure")
+
+    val shouldRetryField = result.getClass.getDeclaredField("shouldRetry")
+    shouldRetryField.setAccessible(true)
+    val shouldStopThreadField = result.getClass.getDeclaredField("shouldStopThread")
+    shouldStopThreadField.setAccessible(true)
+
+    assert(shouldRetryField.get(result) === true,
+      "IOException should allow retry")
+    assert(shouldStopThreadField.get(result) === true,
+      "IOException should stop thread")
+
+    bmDecomManager.stop()
+  }
+
+  test("handleMigrationException handles generic exceptions") {
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks()).thenReturn(Seq())
+
+    val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm, mockMapOutputTracker)
+    val peer = BlockManagerId("exec1", "host1", 12345)
+
+    // Create runnable instance using reflection
+    val runnableClass = bmDecomManager.getClass.getDeclaredClasses
+      .find(_.getSimpleName == "ShuffleMigrationRunnable").get
+    val constructor = runnableClass.getDeclaredConstructors()(0)
+    constructor.setAccessible(true)
+    val runnable = constructor.newInstance(bmDecomManager, peer)
+
+    val handleExceptionMethod = runnableClass.getDeclaredMethod("handleMigrationException",
+      classOf[Throwable], classOf[ShuffleBlockInfo], classOf[List[_]])
+    handleExceptionMethod.setAccessible(true)
+
+    val shuffleBlockInfo = ShuffleBlockInfo(1, 1L)
+    val mockBuffer = mock(classOf[ManagedBuffer])
+    when(mockBuffer.size()).thenReturn(1024L)
+    val blocks = List(
+      (ShuffleIndexBlockId(1, 1L, 1), mockBuffer)
+    )
+
+    // Test generic RuntimeException
+    val genericException = new RuntimeException("Unexpected error")
+    val result = handleExceptionMethod.invoke(runnable, genericException, shuffleBlockInfo, blocks)
+
+    // Verify it returns MigrationFailure with retry and thread stop
+    assert(result.getClass.getSimpleName === "MigrationFailure",
+      "Generic exception should result in MigrationFailure")
+
+    val shouldRetryField = result.getClass.getDeclaredField("shouldRetry")
+    shouldRetryField.setAccessible(true)
+    val shouldStopThreadField = result.getClass.getDeclaredField("shouldStopThread")
+    shouldStopThreadField.setAccessible(true)
+    val reasonField = result.getClass.getDeclaredField("reason")
+    reasonField.setAccessible(true)
+
+    assert(shouldRetryField.get(result) === true,
+      "Generic exception should allow retry")
+    assert(shouldStopThreadField.get(result) === true,
+      "Generic exception should stop thread")
+    assert(reasonField.get(result).toString.contains("Unexpected error"),
+      "Generic exception should include original error message")
+
+    bmDecomManager.stop()
+  }
+
+  test("scheduleRetryOrComplete handles retry logic correctly") {
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks()).thenReturn(Seq())
+
+    val testConf = sparkConf.clone()
+      .set(config.STORAGE_DECOMMISSION_MAX_REPLICATION_FAILURE_PER_BLOCK, 3)
+
+    val bmDecomManager = new BlockManagerDecommissioner(testConf, bm, mockMapOutputTracker)
+    val peer = BlockManagerId("exec1", "host1", 12345)
+
+    // Create runnable instance using reflection
+    val runnableClass = bmDecomManager.getClass.getDeclaredClasses
+      .find(_.getSimpleName == "ShuffleMigrationRunnable").get
+    val constructor = runnableClass.getDeclaredConstructors()(0)
+    constructor.setAccessible(true)
+    val runnable = constructor.newInstance(bmDecomManager, peer)
+
+    val scheduleRetryMethod = runnableClass.getDeclaredMethod("scheduleRetryOrComplete",
+      classOf[ShuffleBlockInfo], classOf[Int], classOf[Boolean])
+    scheduleRetryMethod.setAccessible(true)
+
+    val shuffleBlockInfo = ShuffleBlockInfo(1, 1L)
+
+    // Test Case 1: shouldRetry=true, retryCount < max (should retry, no increment)
+    val initialCount = bmDecomManager.numMigratedShuffles.get()
+    scheduleRetryMethod.invoke(runnable, shuffleBlockInfo, Int.box(1), Boolean.box(true))
+
+    // Should add block back to queue and not increment counter
+    assert(bmDecomManager.numMigratedShuffles.get() === initialCount,
+      "Should not increment counter when retry is allowed")
+    eventually {
+      assert(bmDecomManager.shufflesToMigrate.size() > 0,
+        "Should add block back to retry queue")
+    }
+
+    // Test Case 2: shouldRetry=true, retryCount >= max (should not retry, increment)
+    val beforeMaxRetry = bmDecomManager.numMigratedShuffles.get()
+    scheduleRetryMethod.invoke(runnable, shuffleBlockInfo, Int.box(3),
+      Boolean.box(true)) // retryCount+1 = 4 >= max(3)
+
+    assert(bmDecomManager.numMigratedShuffles.get() === beforeMaxRetry + 1,
+      "Should increment counter when max retries exceeded")
+
+    // Test Case 3: shouldRetry=false (should increment)
+    val beforeNoRetry = bmDecomManager.numMigratedShuffles.get()
+    scheduleRetryMethod.invoke(runnable, shuffleBlockInfo, Int.box(1), Boolean.box(false))
+
+    assert(bmDecomManager.numMigratedShuffles.get() === beforeNoRetry + 1,
+      "Should increment counter when shouldRetry=false")
+
+    bmDecomManager.stop()
+  }
+
+  test("shouldSkipMigration detects various skip conditions") {
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks()).thenReturn(Seq())
+
+    val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm, mockMapOutputTracker)
+    val peer = BlockManagerId("exec1", "host1", 12345)
+
+    // Create runnable instance using reflection
+    val runnableClass = bmDecomManager.getClass.getDeclaredClasses
+      .find(_.getSimpleName == "ShuffleMigrationRunnable").get
+    val constructor = runnableClass.getDeclaredConstructors()(0)
+    constructor.setAccessible(true)
+    val runnable = constructor.newInstance(bmDecomManager, peer)
+
+    val shouldSkipMethod = runnableClass.getDeclaredMethod("shouldSkipMigration",
+      classOf[ShuffleBlockInfo], classOf[List[_]], classOf[Int])
+    shouldSkipMethod.setAccessible(true)
+
+    val shuffleBlockInfo = ShuffleBlockInfo(1, 1L)
+
+    // Test Case 1: Empty blocks (should skip with "Ignore deleted" message)
+    val emptyBlocks = List()
+    val emptyResult = shouldSkipMethod.invoke(runnable, shuffleBlockInfo, emptyBlocks, Int.box(1))
+    assert(emptyResult.isInstanceOf[Some[_]], "Empty blocks should trigger skip")
+    val emptyMessage = emptyResult.asInstanceOf[Option[String]].get
+    assert(emptyMessage.contains("Ignore deleted shuffle block"),
+      "Empty blocks should have correct skip message")
+
+    // Test Case 2: Normal blocks (should not skip)
+    val mockBuffer = mock(classOf[ManagedBuffer])
+    when(mockBuffer.size()).thenReturn(1024L)
+    val normalBlocks = List(
+      (ShuffleIndexBlockId(1, 1L, 1), mockBuffer),
+      (ShuffleDataBlockId(1, 1L, 1), mockBuffer)
+    )
+    val normalResult = shouldSkipMethod.invoke(runnable, shuffleBlockInfo, normalBlocks, Int.box(1))
+    assert(normalResult === None, "Normal blocks should not trigger skip")
+
+    // Test Case 3: Throughput too slow (need to set up upload stats)
+    // First, simulate some slow uploads to trigger the condition
+    val stats = bmDecomManager.UploadStats()
+    stats.addUpload(50L * 1024 * 1024, 2000L) // 50MB in 2 seconds = 25MB/sec < 100MB/sec threshold
+    bmDecomManager.uploadStats.put(peer, stats)
+
+    val slowResult = shouldSkipMethod.invoke(runnable, shuffleBlockInfo, normalBlocks, Int.box(1))
+    assert(slowResult.isInstanceOf[Some[_]], "Slow throughput should trigger skip")
+    val slowMessage = slowResult.asInstanceOf[Option[String]].get
+    assert(slowMessage.contains("Upload throughput too slow"),
+      "Slow throughput should have correct skip message")
+
+    bmDecomManager.stop()
+  }
+
+  test("shouldSkipMigration detects timeout conditions") {
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks()).thenReturn(Seq())
+
+    // Configure with timeouts enabled
+    val confWithTimeouts = sparkConf.clone()
+      .set(config.STORAGE_DECOMMISSION_SHUFFLE_UPLOAD_TIMEOUT_ENABLED, true)
+
+    val bmDecomManager = new BlockManagerDecommissioner(confWithTimeouts, bm, mockMapOutputTracker)
+    val peer = BlockManagerId("exec1", "host1", 12345)
+
+    // Create runnable instance using reflection
+    val runnableClass = bmDecomManager.getClass.getDeclaredClasses
+      .find(_.getSimpleName == "ShuffleMigrationRunnable").get
+    val constructor = runnableClass.getDeclaredConstructors()(0)
+    constructor.setAccessible(true)
+    val runnable = constructor.newInstance(bmDecomManager, peer)
+
+    val shouldSkipMethod = runnableClass.getDeclaredMethod("shouldSkipMigration",
+      classOf[ShuffleBlockInfo], classOf[List[_]], classOf[Int])
+    shouldSkipMethod.setAccessible(true)
+
+    val shuffleBlockInfo = ShuffleBlockInfo(1, 1L)
+    val mockBuffer = mock(classOf[ManagedBuffer])
+    when(mockBuffer.size()).thenReturn(1024L)
+    val blocks = List((ShuffleIndexBlockId(1, 1L, 1), mockBuffer))
+
+    // Set up stats with too many timeouts
+    val stats = bmDecomManager.UploadStats()
+    stats.timeoutCount = 3 // Default threshold is 3
+    bmDecomManager.uploadStats.put(peer, stats)
+
+    val timeoutResult = shouldSkipMethod.invoke(runnable, shuffleBlockInfo, blocks, Int.box(1))
+    assert(timeoutResult.isInstanceOf[Some[_]], "Too many timeouts should trigger skip")
+    val timeoutMessage = timeoutResult.asInstanceOf[Option[String]].get
+    assert(timeoutMessage.contains("Too many upload timeouts"),
+      "Too many timeouts should have correct skip message")
+    assert(timeoutMessage.contains("3 timeouts"),
+      "Skip message should include timeout count")
+
+    bmDecomManager.stop()
+  }
+
+  test("processNextBlock handles complete success workflow") {
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+    val blockTransferService = mock(classOf[BlockTransferService])
+
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks()).thenReturn(Seq())
+    when(bm.blockTransferService).thenReturn(blockTransferService)
+
+    // Setup successful upload
+    import scala.concurrent.Future
+    when(blockTransferService.uploadBlock(mc.any(), mc.any(), mc.any(),
+      mc.any(), mc.any(), mc.any(), mc.any())).thenReturn(Future.successful(()))
+
+    val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm, mockMapOutputTracker)
+    val peer = BlockManagerId("exec1", "host1", 12345)
+
+    // Initialize upload stats
+    val stats = bmDecomManager.UploadStats()
+    bmDecomManager.uploadStats.put(peer, stats)
+
+    // Setup single shuffle block
+    val shuffleBlockInfo = ShuffleBlockInfo(1, 1L)
+    bmDecomManager.shufflesToMigrate.add((shuffleBlockInfo, 0))
+
+    val mockBuffer = mock(classOf[ManagedBuffer])
+    when(mockBuffer.size()).thenReturn(1024L * 1024L) // 1MB
+    val blocks = List(
+      (ShuffleIndexBlockId(1, 1L, 1), mockBuffer),
+      (ShuffleDataBlockId(1, 1L, 1), mockBuffer)
+    )
+    when(migratableShuffleBlockResolver.getMigrationBlocks(shuffleBlockInfo))
+      .thenReturn(blocks)
+
+    // Create runnable instance using reflection
+    val runnableClass = bmDecomManager.getClass.getDeclaredClasses
+      .find(_.getSimpleName == "ShuffleMigrationRunnable").get
+    val constructor = runnableClass.getDeclaredConstructors()(0)
+    constructor.setAccessible(true)
+    val runnable = constructor.newInstance(bmDecomManager, peer)
+
+    val processNextBlockMethod = runnableClass.getDeclaredMethod("processNextBlock")
+    processNextBlockMethod.setAccessible(true)
+
+    val initialCount = bmDecomManager.numMigratedShuffles.get()
+
+    // Execute processNextBlock
+    val result = processNextBlockMethod.invoke(runnable)
+
+    // Verify success: should return true and increment counter
+    assert(result === true, "Successful migration should return true")
+    assert(bmDecomManager.numMigratedShuffles.get() === initialCount + 1,
+      "Successful migration should increment counter")
+
+    // Verify upload was called
+    verify(blockTransferService, times(2)) // Once for index, once for data
+      .uploadBlock(mc.eq("host1"), mc.eq(12345), mc.eq("exec1"),
+        mc.any(), mc.any(), mc.eq(StorageLevel.DISK_ONLY), mc.any())
+
+    bmDecomManager.stop()
+  }
+
+  test("processNextBlock handles failure with retry") {
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+    val blockTransferService = mock(classOf[BlockTransferService])
+
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks()).thenReturn(Seq())
+    when(bm.blockTransferService).thenReturn(blockTransferService)
+
+    // Setup failing upload with TimeoutException
+    import scala.concurrent.{Future, TimeoutException}
+    when(blockTransferService.uploadBlock(mc.any(), mc.any(), mc.any(),
+      mc.any(), mc.any(), mc.any(), mc.any())).thenReturn(
+      Future.failed(new TimeoutException("Upload timeout")))
+
+    val testConf = sparkConf.clone()
+      .set(config.STORAGE_DECOMMISSION_MAX_REPLICATION_FAILURE_PER_BLOCK, 3)
+      .set(config.STORAGE_DECOMMISSION_SHUFFLE_UPLOAD_TIMEOUT_ENABLED, true)
+    val bmDecomManager = new BlockManagerDecommissioner(testConf, bm, mockMapOutputTracker)
+    val peer = BlockManagerId("exec1", "host1", 12345)
+
+    // Initialize upload stats
+    val stats = bmDecomManager.UploadStats()
+    bmDecomManager.uploadStats.put(peer, stats)
+
+    // Setup single shuffle block
+    val shuffleBlockInfo = ShuffleBlockInfo(1, 1L)
+    bmDecomManager.shufflesToMigrate.add((shuffleBlockInfo, 1)) // Retry count = 1
+
+    val mockBuffer = mock(classOf[ManagedBuffer])
+    when(mockBuffer.size()).thenReturn(1024L * 1024L) // 1MB
+    val blocks = List(
+      (ShuffleIndexBlockId(1, 1L, 1), mockBuffer)
+    )
+    when(migratableShuffleBlockResolver.getMigrationBlocks(shuffleBlockInfo))
+      .thenReturn(blocks)
+
+    // Create runnable instance using reflection
+    val runnableClass = bmDecomManager.getClass.getDeclaredClasses
+      .find(_.getSimpleName == "ShuffleMigrationRunnable").get
+    val constructor = runnableClass.getDeclaredConstructors()(0)
+    constructor.setAccessible(true)
+    val runnable = constructor.newInstance(bmDecomManager, peer)
+
+    val processNextBlockMethod = runnableClass.getDeclaredMethod("processNextBlock")
+    processNextBlockMethod.setAccessible(true)
+
+    val initialCount = bmDecomManager.numMigratedShuffles.get()
+
+    // Execute processNextBlock
+    val result = processNextBlockMethod.invoke(runnable)
+
+    // Verify failure: should return false (stop thread)
+    assert(result === false, "Failed migration with timeout should return false (stop thread)")
+
+    // Verify timeout was recorded
+    val finalStats = bmDecomManager.uploadStats(peer)
+    assert(finalStats.timeoutCount > 0,
+      "Should record timeout event")
+
+    bmDecomManager.stop()
+  }
+
+  test("processNextBlock handles empty blocks correctly") {
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks()).thenReturn(Seq())
+
+    val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm, mockMapOutputTracker)
+    val peer = BlockManagerId("exec1", "host1", 12345)
+
+    // Setup shuffle block that returns empty blocks (deleted)
+    val shuffleBlockInfo = ShuffleBlockInfo(1, 1L)
+    bmDecomManager.shufflesToMigrate.add((shuffleBlockInfo, 0))
+
+    when(migratableShuffleBlockResolver.getMigrationBlocks(shuffleBlockInfo))
+      .thenReturn(List()) // Empty blocks = deleted
+
+    // Create runnable instance using reflection
+    val runnableClass = bmDecomManager.getClass.getDeclaredClasses
+      .find(_.getSimpleName == "ShuffleMigrationRunnable").get
+    val constructor = runnableClass.getDeclaredConstructors()(0)
+    constructor.setAccessible(true)
+    val runnable = constructor.newInstance(bmDecomManager, peer)
+
+    val processNextBlockMethod = runnableClass.getDeclaredMethod("processNextBlock")
+    processNextBlockMethod.setAccessible(true)
+
+    // Execute processNextBlock
+    val result = processNextBlockMethod.invoke(runnable)
+
+    // Verify: should return true (continue to next block) and skip deleted block
+    assert(result === true, "Deleted blocks should be skipped and continue processing")
+
+    // Should have processed the deleted block (queue should be empty)
+    assert(bmDecomManager.shufflesToMigrate.isEmpty,
+      "Deleted block should be consumed from queue")
+
+    bmDecomManager.stop()
+  }
+
 }
