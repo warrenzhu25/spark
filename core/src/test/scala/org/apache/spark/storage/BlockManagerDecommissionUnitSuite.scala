@@ -89,29 +89,34 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
       bmDecomManager.start()
       eventually(timeout(decomTimeout), interval(10.milliseconds)) {
         val (currentTime, done) = bmDecomManager.lastMigrationInfo()
-        assert(!assertDone || done)
+        assert(!assertDone || done,
+          "Decommission should be marked done when assertDone is requested")
         // Make sure the time stamp starts moving forward.
         if (!fail) {
           previousTime match {
             case None =>
               previousTime = Some(currentTime)
-              assert(false)
+              assert(false, "First timestamp check should fail to trigger progression validation")
             case Some(t) =>
-              assert(t < currentTime)
+              assert(t < currentTime,
+                "Migration timestamps should progress forward indicating active migration")
           }
         } else {
           // If we expect migration to fail we should get the max value quickly.
-          assert(currentTime === Long.MaxValue)
+          assert(currentTime === Long.MaxValue,
+            "Failed migration should be marked with Long.MaxValue timestamp")
         }
         numShuffles.foreach { s =>
-          assert(bmDecomManager.numMigratedShuffles.get() === s)
+          assert(bmDecomManager.numMigratedShuffles.get() === s,
+            s"Expected $s migrated shuffles but got ${bmDecomManager.numMigratedShuffles.get()}")
         }
       }
       if (!fail) {
         // Wait 5 seconds and assert times keep moving forward.
         Thread.sleep(5000)
         val (currentTime, done) = bmDecomManager.lastMigrationInfo()
-        assert((!assertDone || done) && currentTime > previousTime.get)
+        assert((!assertDone || done) && currentTime > previousTime.get,
+          "Final validation: migration should be done and timestamp should advance")
       }
     } finally {
       bmDecomManager.stop()
@@ -333,31 +338,37 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
 
       // We don't check that all blocks are migrated because out mock is always returning an RDD.
       eventually(timeout(decomTimeout), interval(10.milliseconds)) {
-        assert(bmDecomManager.shufflesToMigrate.isEmpty === true)
-        assert(bmDecomManager.numMigratedShuffles.get() === 1)
+        assert(bmDecomManager.shufflesToMigrate.isEmpty === true,
+          "All shuffle blocks should be migrated and queue should be empty")
+        assert(bmDecomManager.numMigratedShuffles.get() === 1,
+          "Should have successfully migrated exactly 1 shuffle")
         verify(bm, least(1)).replicateBlock(
           mc.eq(storedBlockId1), mc.any(), mc.any(), mc.eq(Some(3)))
         verify(blockTransferService, times(2))
           .uploadBlock(mc.eq("host2"), mc.eq(bmPort), mc.eq("exec2"), mc.any(), mc.any(),
             mc.eq(StorageLevel.DISK_ONLY), mc.isNull())
         // Since we never "finish" the RDD blocks, make sure the time is always moving forward.
-        assert(bmDecomManager.rddBlocksLeft)
+        assert(bmDecomManager.rddBlocksLeft,
+          "RDD blocks should still be pending since our mock always returns RDD blocks")
         previousRDDTime match {
           case None =>
             previousRDDTime = Some(bmDecomManager.lastRDDMigrationTime)
-            assert(false)
+            assert(false, "First RDD time check should fail to trigger progression validation")
           case Some(t) =>
-            assert(bmDecomManager.lastRDDMigrationTime > t)
+            assert(bmDecomManager.lastRDDMigrationTime > t,
+              "RDD migration timestamp should advance showing active migration")
         }
         // Since we do eventually finish the shuffle blocks make sure the shuffle blocks complete
         // and that the time keeps moving forward.
-        assert(!bmDecomManager.shuffleBlocksLeft)
+        assert(!bmDecomManager.shuffleBlocksLeft,
+          "Shuffle blocks should be completed as they can actually be migrated")
         previousShuffleTime match {
           case None =>
             previousShuffleTime = Some(bmDecomManager.lastShuffleMigrationTime)
-            assert(false)
+            assert(false, "First shuffle time check should fail to trigger progression validation")
           case Some(t) =>
-            assert(bmDecomManager.lastShuffleMigrationTime > t)
+            assert(bmDecomManager.lastShuffleMigrationTime > t,
+              "Shuffle migration timestamp should advance until completion")
         }
       }
     } finally {
@@ -390,8 +401,10 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
       eventually(timeout(decomTimeout), interval(10.milliseconds)) {
         verify(bm, never()).replicateBlock(
           mc.eq(storedBlockId1), mc.any(), mc.any(), mc.eq(Some(3)))
-        assert(bmDecomManager.rddBlocksLeft)
-        assert(bmDecomManager.stoppedRDD)
+        assert(bmDecomManager.rddBlocksLeft,
+          "RDD blocks should remain unmigrated due to no available hosts")
+        assert(bmDecomManager.stoppedRDD,
+          "RDD migration should be stopped when no valid hosts are available")
       }
     } finally {
       bmDecomManager.stop()
@@ -445,16 +458,21 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
       eventually(timeout(decomTimeout), interval(100.milliseconds)) {
         // Verify that upload stats tracking is working and throughput is detected as slow
         val exec2Id = BlockManagerId("exec2", "host2", 12345)
-        assert(bmDecomManager.uploadStats.contains(exec2Id))
+        assert(bmDecomManager.uploadStats.contains(exec2Id),
+          "Upload statistics should be tracked for the target executor")
         val stats = bmDecomManager.uploadStats(exec2Id)
-        assert(stats.totalBytes > 0)
-        assert(stats.totalTimeMs > 0)
+        assert(stats.totalBytes > 0,
+          "Should have recorded bytes uploaded during migration attempts")
+        assert(stats.totalTimeMs > 0,
+          "Should have recorded time spent on upload attempts")
 
         // Should detect slow throughput (2 seconds for 100MB = 50 MB/sec < 100 MB/sec threshold)
-        assert(stats.currentThroughputBytesPerSec < 100L * 1024 * 1024)
+        assert(stats.currentThroughputBytesPerSec < 100L * 1024 * 1024,
+          "Slow upload throughput should be below 100 MB/sec threshold")
 
         // Should have stopped migration due to slow throughput
-        assert(bmDecomManager.shufflesToMigrate.size() > 0)
+        assert(bmDecomManager.shufflesToMigrate.size() > 0,
+          "Migration should be stopped with blocks remaining due to slow throughput")
       }
     } finally {
       bmDecomManager.stop()
@@ -513,12 +531,15 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
       eventually(timeout(decomTimeout), interval(10.milliseconds)) {
         // Should stop migration due to timeouts
         val exec2Id = BlockManagerId("exec2", "host2", 12345)
-        assert(bmDecomManager.uploadStats.contains(exec2Id))
+        assert(bmDecomManager.uploadStats.contains(exec2Id),
+          "Upload statistics should be tracked for the target executor")
         val stats = bmDecomManager.uploadStats(exec2Id)
-        assert(stats.timeoutCount > 0)
+        assert(stats.timeoutCount > 0,
+          "Should have recorded timeout events from failed uploads")
 
         // Should have blocks remaining in queue due to timeout stopping migration
-        assert(bmDecomManager.shufflesToMigrate.size() > 0)
+        assert(bmDecomManager.shufflesToMigrate.size() > 0,
+          "Migration should be stopped with blocks remaining due to timeouts")
       }
     } finally {
       bmDecomManager.stop()
@@ -535,7 +556,8 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
 
     // Test large blocks get scaled timeouts (10GB at 1MB/sec = ~15360 seconds with 50% buffer)
     val largeBlockTimeout = bmDecomManager.calculateUploadTimeout(10L * 1024 * 1024 * 1024) // 10GB
-    assert(largeBlockTimeout.toSeconds > smallBlockTimeout.toSeconds)
+    assert(largeBlockTimeout.toSeconds > smallBlockTimeout.toSeconds,
+      "Large block timeout should be greater than small block timeout due to size-based scaling")
     assert(largeBlockTimeout.toSeconds > 10000) // Should be much larger for huge blocks
 
     bmDecomManager.stop()
@@ -584,7 +606,8 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
       eventually(timeout(100.second), interval(10.milliseconds)) {
         // Should successfully migrate all blocks without timeout concerns
         val migratedCount = bmDecomManager.numMigratedShuffles.get()
-        assert(migratedCount === shuffleBlocks.size)
+        assert(migratedCount === shuffleBlocks.size,
+          s"Should have migrated all ${shuffleBlocks.size} shuffle blocks when timeouts disabled")
 
         // Should have no timeout tracking when feature is disabled
         val exec2Id = BlockManagerId("exec2", "host2", 12345)
@@ -734,7 +757,8 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
     val loads = mockMapOutputTracker.getShuffleSizesByExecutor()
 
     // Verify that exec1 has the expected load
-    assert(loads.getOrElse("exec1", 0L) == 100L)
+    assert(loads.getOrElse("exec1", 0L) == 100L,
+      "Executor load should match the expected value from MapOutputTracker")
   }
 
   test("block decom manager selects peers avoiding low and high load extremes") {
@@ -768,9 +792,11 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
     val selected = method.invoke(bmDecomManager, peers).asInstanceOf[Seq[BlockManagerId]]
 
     // With 10 peers, should skip extremes and select middle range (6-8 peers typical)
-    assert(selected.length >= 6 && selected.length <= 8)
+    assert(selected.length >= 6 && selected.length <= 8,
+      s"Should select 6-8 peers from middle range, got ${selected.length}")
     // All selected peers should be from the original set
-    assert(selected.forall(peers.contains))
+    assert(selected.forall(peers.contains),
+      "All selected peers should be from the original peer set")
   }
 
   test("block decom manager uses all peers when few are available") {
@@ -793,13 +819,16 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
     val selected = method.invoke(bmDecomManager, twoPeers).asInstanceOf[Seq[BlockManagerId]]
 
     // Should use all peers when there are only 2
-    assert(selected.length === 2)
-    assert(selected.toSet === twoPeers)
+    assert(selected.length === 2,
+      "Should use all available peers when peer count is small")
+    assert(selected.toSet === twoPeers,
+      "Selected peers should exactly match the available peer set")
 
     // Test with empty peers
     val emptySelected = method.invoke(bmDecomManager, Set.empty[BlockManagerId])
       .asInstanceOf[Seq[BlockManagerId]]
-    assert(emptySelected.isEmpty)
+    assert(emptySelected.isEmpty,
+      "Should return empty selection when no peers are available")
   }
 
   test("block decom manager load-based peer selection works with timeout system") {
