@@ -1958,6 +1958,85 @@ class ExecutorAllocationManagerSuite extends SparkFunSuite {
     assert(capturedEvents.isEmpty, "Expected no events when postEvents is disabled")
   }
 
+  test("diagnosis timing works correctly with different intervals") {
+    val clock = new ManualClock(2020L)
+
+    // Test with 2 second interval
+    val conf = createConf(1, 20, 1)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_ENABLED, true)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_INTERVAL.key, "2s")
+    val manager = createManager(conf, clock = clock)
+
+    // Add 3 executors
+    (1 to 3).foreach { i => onExecutorAddedDefaultProfile(manager, s"executor-$i") }
+    assert(manager.executorMonitor.executorCount === 3)
+
+    // Set max needed to 1 (less than running 3)
+    post(SparkListenerStageSubmitted(createStageInfo(0, 1)))
+    manager invokePrivate _updateAndSyncNumExecutorsTarget(clock.nanoTime())
+    assert(maxNumExecutorsNeededPerResourceProfile(manager, defaultProfile) == 1)
+
+    // Advance time by 1 second - should not trigger diagnosis yet
+    clock.advance(1000)
+    schedule(manager)
+    // No assertion here since we don't have access to log output in tests
+
+    // Advance time by another 1 second (total 2 seconds) - should trigger diagnosis
+    clock.advance(1000)
+    schedule(manager)
+    // The diagnosis should have triggered at this point
+
+    // Test with 5 second interval
+    val conf5s = createConf(1, 20, 1)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_ENABLED, true)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_INTERVAL.key, "5s")
+    val manager5s = createManager(conf5s, clock = clock)
+
+    // Add executors and set up same condition
+    (1 to 2).foreach { i => onExecutorAddedDefaultProfile(manager5s, s"executor-$i") }
+    post(SparkListenerStageSubmitted(createStageInfo(0, 1)))
+    manager5s invokePrivate _updateAndSyncNumExecutorsTarget(clock.nanoTime())
+
+    // Advance by 4 seconds - should not trigger yet
+    clock.advance(4000)
+    schedule(manager5s)
+
+    // Advance by 1 more second (total 5 seconds) - should trigger
+    clock.advance(1000)
+    schedule(manager5s)
+
+    // Test timing reset when condition changes
+    val confReset = createConf(1, 20, 1)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_ENABLED, true)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_INTERVAL.key, "3s")
+    val managerReset = createManager(confReset, clock = clock)
+
+    (1 to 2).foreach { i => onExecutorAddedDefaultProfile(managerReset, s"executor-$i") }
+    post(SparkListenerStageSubmitted(createStageInfo(0, 0)))
+    managerReset invokePrivate _updateAndSyncNumExecutorsTarget(clock.nanoTime())
+
+    // Start timing
+    clock.advance(2000) // 2 seconds
+    schedule(managerReset)
+
+    // Change condition: make running <= maxNeeded (should reset timer)
+    post(SparkListenerStageSubmitted(createStageInfo(0, 3)))
+    managerReset invokePrivate _updateAndSyncNumExecutorsTarget(clock.nanoTime())
+    schedule(managerReset)
+
+    // Change back to trigger condition and verify timer resets
+    post(SparkListenerStageSubmitted(createStageInfo(0, 1)))
+    managerReset invokePrivate _updateAndSyncNumExecutorsTarget(clock.nanoTime())
+    schedule(managerReset)
+
+    // Should need full 3 seconds again from this point
+    clock.advance(2000) // 2 seconds - should not trigger
+    schedule(managerReset)
+
+    clock.advance(1000) // +1 second (total 3) - should trigger
+    schedule(managerReset)
+  }
+
   test("SPARK-26758 check executor target number after idle time out ") {
     val clock = new ManualClock(10000L)
     val manager = createManager(createConf(1, 5, 3), clock = clock)

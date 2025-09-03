@@ -360,7 +360,7 @@ private[spark] class ExecutorAllocationManager(
         .map(maxNumExecutorsNeededPerResourceProfile).sum
       if (running > maxNeeded) {
         if (diagnosisTime == NOT_SET) {
-          diagnosisTime = now + TimeUnit.SECONDS.toMillis(diagnosisInterval)
+          diagnosisTime = now + diagnosisInterval * 1000L
         }
         if (now >= diagnosisTime) {
           val message = s"Running executors ($running) > max needed executors ($maxNeeded) for " +
