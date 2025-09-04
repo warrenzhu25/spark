@@ -586,15 +586,26 @@ private[spark] class ExecutorMonitor(
     if (values.isEmpty) {
       None
     } else {
-      val distribution = new Distribution(values.map(_.toDouble))
-      val quantiles = distribution.getQuantiles() // Returns [min, 25%, 50%, 75%, max]
-      Some(Percentiles(
-        quantiles(0).toLong,  // min
-        quantiles(1).toLong,  // 25%
-        quantiles(2).toLong,  // 50% (median)
-        quantiles(3).toLong,  // 75%
-        quantiles(4).toLong   // max
-      ))
+      val doubleValues = values.map(_.toDouble)
+      // Additional safety check for valid double values
+      if (doubleValues.exists(v => v.isNaN || v.isInfinite)) {
+        None
+      } else {
+        val distribution = new Distribution(doubleValues)
+        val quantiles = distribution.getQuantiles() // Returns [min, 25%, 50%, 75%, max]
+        // Ensure we have exactly 5 quantiles before accessing them
+        if (quantiles.length < 5) {
+          None
+        } else {
+          Some(Percentiles(
+            quantiles(0).toLong,  // min
+            quantiles(1).toLong,  // 25%
+            quantiles(2).toLong,  // 50% (median)
+            quantiles(3).toLong,  // 75%
+            quantiles(4).toLong   // max
+          ))
+        }
+      }
     }
   }
 

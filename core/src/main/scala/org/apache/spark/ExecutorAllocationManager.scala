@@ -155,7 +155,7 @@ private[spark] class ExecutorAllocationManager(
   private var addTime: Long = NOT_SET
 
   // A timestamp of when a diagnosis should be triggered, or NOT_SET if it is not set
-  private var diagnosisTime: Long = NOT_SET
+  @volatile private var diagnosisTime: Long = NOT_SET
 
   // Polling loop interval (ms)
   private val intervalMillis: Long = 100
@@ -367,7 +367,19 @@ private[spark] class ExecutorAllocationManager(
         .map(maxNumExecutorsNeededPerResourceProfile).sum
       if (running > maxNeeded) {
         if (diagnosisTime == NOT_SET) {
-          diagnosisTime = now + diagnosisInterval * 1000L
+          // Prevent overflow by checking bounds before multiplication
+          val intervalMillis = if (diagnosisInterval > Long.MaxValue / 1000L) {
+            logWarning(
+              s"Diagnosis interval $diagnosisInterval is too large, using maximum safe value")
+            Long.MaxValue / 1000L
+          } else {
+            diagnosisInterval * 1000L
+          }
+          diagnosisTime = if (now > Long.MaxValue - intervalMillis) {
+            Long.MaxValue
+          } else {
+            now + intervalMillis
+          }
         }
         if (now >= diagnosisTime) {
           val message = s"Running executors ($running) > max needed executors ($maxNeeded) for " +
