@@ -17,7 +17,7 @@
 
 package org.apache.spark
 
-import org.apache.spark.scheduler.ExecutorDecommissionInfo
+import org.apache.spark.scheduler.{DecommissionSummary, ExecutorDecommissionInfo}
 
 /**
  * A client that communicates with the cluster manager to request or kill executors.
@@ -127,6 +127,28 @@ private[spark] trait ExecutorAllocationClient {
       adjustTargetNumExecutors = adjustTargetNumExecutors,
       triggeredByExecutor = triggeredByExecutor)
     decommissionedExecutors.nonEmpty && decommissionedExecutors(0).equals(executorId)
+  }
+
+  /**
+   * Request that the cluster manager decommission the specified executor with detailed summary.
+   * Converts DecommissionSummary to ExecutorDecommissionInfo for compatibility.
+   *
+   * @param executorId identifiers of executor to decommission
+   * @param summary comprehensive decommission summary with timing and migration details
+   * @param adjustTargetNumExecutors if we should adjust the target number of executors.
+   * @param triggeredByExecutor whether the decommission is triggered at executor.
+   * @return whether the request is acknowledged by the cluster manager.
+   */
+  final def decommissionExecutor(
+      executorId: String,
+      summary: DecommissionSummary,
+      adjustTargetNumExecutors: Boolean,
+      triggeredByExecutor: Boolean): Boolean = {
+    decommissionExecutor(
+      executorId,
+      summary.toExecutorDecommissionInfo,
+      adjustTargetNumExecutors,
+      triggeredByExecutor)
   }
 
   /**
