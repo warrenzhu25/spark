@@ -1048,12 +1048,14 @@ private[spark] class TaskSetManager(
     // data from this dead executor so we would need to rerun these tasks on other executors.
     val maybeShuffleMapOutputLoss = isShuffleMapTasks &&
       !sched.sc.shuffleDriverComponents.supportsReliableStorage() &&
-      (reason.isInstanceOf[ExecutorDecommission] || !env.blockManager.externalShuffleServiceEnabled)
+      (reason.isInstanceOf[ExecutorDecommission] ||
+       reason.isInstanceOf[ExecutorDecommissionFinished] ||
+       !env.blockManager.externalShuffleServiceEnabled)
     if (maybeShuffleMapOutputLoss && !isZombie) {
       for ((tid, info) <- taskInfos if info.executorId == execId) {
         val index = info.index
         lazy val isShuffleMapOutputAvailable = reason match {
-          case ExecutorDecommission(_, _) =>
+          case ExecutorDecommission(_, _) | ExecutorDecommissionFinished(_, _, _) =>
             val mapId = if (conf.get(config.SHUFFLE_USE_OLD_FETCH_PROTOCOL)) {
               info.partitionId
             } else {
@@ -1095,7 +1097,8 @@ private[spark] class TaskSetManager(
     for ((tid, info) <- taskInfos if info.running && info.executorId == execId) {
       val exitCausedByApp: Boolean = reason match {
         case ExecutorExited(_, false, _) => false
-        case ExecutorKilled | ExecutorDecommission(_, _) => false
+        case ExecutorKilled | ExecutorDecommission(_, _) |
+             ExecutorDecommissionFinished(_, _, _) => false
         case ExecutorProcessLost(_, _, false) => false
         // If the task is launching, this indicates that Driver has sent LaunchTask to Executor,
         // but Executor has not sent StatusUpdate(TaskState.RUNNING) to Driver. Hence, we assume

@@ -31,6 +31,7 @@ import org.json4s.JsonAST.{JArray, JObject}
 import org.json4s.JsonDSL._
 import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito._
+import org.mockito.invocation.InvocationOnMock
 import org.scalatest.concurrent.Eventually.{eventually, timeout}
 import org.scalatestplus.mockito.MockitoSugar
 
@@ -41,10 +42,14 @@ import org.apache.spark.internal.config.PLUGINS
 import org.apache.spark.resource._
 import org.apache.spark.resource.ResourceUtils._
 import org.apache.spark.resource.TestResourceIDs._
-import org.apache.spark.rpc.RpcEnv
-import org.apache.spark.scheduler.{SparkListener, SparkListenerExecutorAdded, SparkListenerExecutorRemoved, TaskDescription}
-import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.{KillTask, LaunchTask}
+import org.apache.spark.rpc.{RpcEndpointRef, RpcEnv}
+import org.apache.spark.scheduler.{DecommissionSummary, ExecutorDecommissionFinished,
+  SparkListener, SparkListenerExecutorAdded, SparkListenerExecutorRemoved}
+import org.apache.spark.scheduler.TaskDescription
+import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.{KillTask,
+  LaunchTask, RemoveExecutor}
 import org.apache.spark.serializer.JavaSerializer
+import org.apache.spark.storage.{MigrationInfo, MigrationStat}
 import org.apache.spark.util.{SerializableBuffer, ThreadUtils, Utils}
 
 class CoarseGrainedExecutorBackendSuite extends SparkFunSuite
@@ -593,6 +598,184 @@ class CoarseGrainedExecutorBackendSuite extends SparkFunSuite
       }
     } finally {
       sc.removeSparkListener(listener)
+    }
+  }
+
+  test("exitExecutorWithReason sends ExecutorDecommissionFinished to driver") {
+    val conf = new SparkConf().setMaster("local").setAppName(getClass.getSimpleName)
+    val securityMgr = new SecurityManager(conf)
+    val serializer = new JavaSerializer(conf)
+
+    var backend: CoarseGrainedExecutorBackend = null
+    var mockDriver: RpcEndpointRef = null
+
+    try {
+      val rpcEnv = RpcEnv.create("executor", "localhost", 0, conf, securityMgr)
+      val env = createMockEnv(conf, serializer, Some(rpcEnv))
+
+      mockDriver = mock[RpcEndpointRef]
+      var sentRemove: RemoveExecutor = null
+      doAnswer((invocation: InvocationOnMock) => {
+        val arg = invocation.getArgument[AnyRef](0)
+        arg match {
+          case rem: RemoveExecutor => sentRemove = rem
+          case _ =>
+        }
+        ()
+      }).when(mockDriver).send(any())
+
+      backend = new CoarseGrainedExecutorBackend(env.rpcEnv, "driverurl", "1",
+        "host1", "host1", 4, env, None,
+        resourceProfile = ResourceProfile.getOrCreateDefaultProfile(conf))
+
+      // Do not setup endpoint to avoid onStart driver connection side-effects
+
+      backend.driver = Some(mockDriver)
+
+      val summary = DecommissionSummary.create("Test decommission", Some("host1")).markCompleted()
+      val lossReason = ExecutorDecommissionFinished(Some("host1"), "completed", Some(summary))
+
+      backend.exitExecutorWithReason(0, lossReason)
+
+      eventually(timeout(5.seconds)) {
+        assert(sentRemove != null)
+      }
+      assert(sentRemove.executorId === "1")
+      assert(sentRemove.reason === lossReason)
+    } finally {
+      if (backend != null) {
+        backend.rpcEnv.shutdown()
+      }
+    }
+  }
+
+  test("decommission completion with migration creates ExecutorDecommissionFinished with summary") {
+    val conf = new SparkConf().setMaster("local").setAppName(getClass.getSimpleName)
+    val securityMgr = new SecurityManager(conf)
+    val serializer = new JavaSerializer(conf)
+    var backend: CoarseGrainedExecutorBackend = null
+
+    try {
+      val rpcEnv = RpcEnv.create("executor", "localhost", 0, conf, securityMgr)
+      val env = createMockEnv(conf, serializer, Some(rpcEnv))
+
+      backend = new CoarseGrainedExecutorBackend(env.rpcEnv, "driverurl", "1",
+        "host1", "host1", 4, env, None,
+        resourceProfile = ResourceProfile.getOrCreateDefaultProfile(conf))
+
+      val migrationStat = MigrationStat(0, 1024L, 10, 10, 1024L, 0)
+      val migrationInfo = MigrationInfo(
+        System.nanoTime(),
+        allBlocksMigrated = true,
+        migrationStat)
+
+      backend.decommissionSummary = Some(
+        DecommissionSummary.create("Migration test", Some("host1")))
+      val completedSummary = backend.decommissionSummary.get
+        .markCompleted(Some(migrationInfo))
+
+      val lossReason = ExecutorDecommissionFinished(
+        completedSummary.workerHost,
+        completedSummary.toDetailedMessage,
+        Some(completedSummary))
+
+      assert(lossReason.workerHost === Some("host1"))
+      assert(lossReason.summary.isDefined)
+      assert(lossReason.summary.get.migrationInfo.isDefined)
+      assert(lossReason.message.contains("Migration test"))
+      assert(lossReason.message.contains("Migration:"))
+      assert(lossReason.message.contains("10/10 blocks"))
+    } finally {
+      if (backend != null) backend.rpcEnv.shutdown()
+    }
+  }
+
+  test("decommission completion without migration creates basic ExecutorDecommissionFinished") {
+    val conf = new SparkConf().setMaster("local").setAppName(getClass.getSimpleName)
+    val securityMgr = new SecurityManager(conf)
+    val serializer = new JavaSerializer(conf)
+    var backend: CoarseGrainedExecutorBackend = null
+
+    try {
+      val rpcEnv = RpcEnv.create("executor", "localhost", 0, conf, securityMgr)
+      val env = createMockEnv(conf, serializer, Some(rpcEnv))
+
+      backend = new CoarseGrainedExecutorBackend(env.rpcEnv, "driverurl", "1",
+        "host1", "host1", 4, env, None,
+        resourceProfile = ResourceProfile.getOrCreateDefaultProfile(conf))
+
+      backend.decommissionSummary = Some(
+        DecommissionSummary.create("No migration test", Some("host1")))
+      val completedSummary = backend.decommissionSummary.get.markCompleted()
+
+      val lossReason = ExecutorDecommissionFinished(
+        completedSummary.workerHost,
+        completedSummary.toDetailedMessage,
+        Some(completedSummary))
+
+      assert(lossReason.workerHost === Some("host1"))
+      assert(lossReason.summary.isDefined)
+      assert(lossReason.summary.get.migrationInfo.isEmpty)
+      assert(lossReason.message.contains("No migration test"))
+      assert(!lossReason.message.contains("Migration:"))
+    } finally {
+      if (backend != null) backend.rpcEnv.shutdown()
+    }
+  }
+
+  test("driver receives RemoveExecutor message with correct ExecutorDecommissionFinished") {
+    val conf = new SparkConf().setMaster("local").setAppName(getClass.getSimpleName)
+    val securityMgr = new SecurityManager(conf)
+    val serializer = new JavaSerializer(conf)
+
+    var backend: CoarseGrainedExecutorBackend = null
+    var capturedMessage: RemoveExecutor = null
+
+    try {
+      val rpcEnv = RpcEnv.create("executor", "localhost", 0, conf, securityMgr)
+      val env = createMockEnv(conf, serializer, Some(rpcEnv))
+
+      val mockDriver = mock[RpcEndpointRef]
+      doAnswer((invocation: InvocationOnMock) => {
+        val arg = invocation.getArgument[AnyRef](0)
+        arg match {
+          case rem: RemoveExecutor => capturedMessage = rem
+          case _ =>
+        }
+        ()
+      }).when(mockDriver).send(any())
+
+      backend = new CoarseGrainedExecutorBackend(env.rpcEnv, "driverurl", "1",
+        "host1", "host1", 4, env, None,
+        resourceProfile = ResourceProfile.getOrCreateDefaultProfile(conf))
+
+      // Do not setup endpoint to avoid onStart driver connection side-effects
+
+      backend.driver = Some(mockDriver)
+
+      val migrationStat = MigrationStat(2, 512L, 8, 10, 1024L, 1)
+      val migrationInfo = MigrationInfo(System.nanoTime(), allBlocksMigrated = true, migrationStat)
+      val summary = DecommissionSummary
+        .create("Integration test", Some("host1"))
+        .markCompleted(Some(migrationInfo))
+      val lossReason = ExecutorDecommissionFinished(
+        Some("host1"),
+        summary.toDetailedMessage,
+        Some(summary))
+
+      backend.exitExecutorWithReason(0, lossReason)
+
+      assert(capturedMessage != null)
+      assert(capturedMessage.executorId === "1")
+      assert(capturedMessage.reason.isInstanceOf[ExecutorDecommissionFinished])
+
+      val receivedLossReason = capturedMessage.reason.asInstanceOf[ExecutorDecommissionFinished]
+      assert(receivedLossReason.workerHost === Some("host1"))
+      assert(receivedLossReason.summary.isDefined)
+      assert(receivedLossReason.message.contains("Integration test"))
+      assert(receivedLossReason.message.contains("8/10 blocks"))
+    } finally {
+      if (backend != null) backend.rpcEnv.shutdown()
     }
   }
 
