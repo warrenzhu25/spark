@@ -42,7 +42,7 @@ import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.resource.ResourceProfile._
 import org.apache.spark.resource.ResourceUtils._
 import org.apache.spark.rpc._
-import org.apache.spark.scheduler.{ExecutorLossMessage, ExecutorLossReason, TaskDescription}
+import org.apache.spark.scheduler.{DecommissionSummary, ExecutorDecommissionFinished, ExecutorLossMessage, ExecutorLossReason, TaskDescription}
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages._
 import org.apache.spark.storage.MigrationInfo
 import org.apache.spark.util.{ChildFirstURLClassLoader, MutableURLClassLoader, SignalUtils, ThreadUtils, Utils}
@@ -80,6 +80,9 @@ private[spark] class CoarseGrainedExecutorBackend(
   ]
 
   private var decommissioned = false
+
+  // Decommission timing tracking
+  private[executor] var decommissionSummary: Option[DecommissionSummary] = None
 
   // Track the last time in ns that at least one task is running. If no task is running and all
   // shuffle/RDD data migration are done, the decommissioned executor should exit.
@@ -312,6 +315,35 @@ private[spark] class CoarseGrainedExecutorBackend(
     }
   }
 
+  protected[executor] def exitExecutorWithReason(code: Int,
+                                      lossReason: ExecutorLossReason,
+                                      throwable: Throwable = null,
+                                      notifyDriver: Boolean = true) = {
+    if (stopping.compareAndSet(false, true)) {
+      val message = "Executor self-exiting due to : " + lossReason.message
+      if (throwable != null) {
+        logError(message, throwable)
+      } else {
+        if (code == 0) {
+          logInfo(message)
+        } else {
+          logError(message)
+        }
+      }
+      if (notifyDriver && driver.nonEmpty) {
+        driver.get.send(RemoveExecutor(executorId, lossReason))
+      }
+      val maybeSelf = scala.util.Try(self).toOption.flatMap(ref => Option(ref))
+      maybeSelf match {
+        case Some(ref) => ref.send(Shutdown)
+        case None =>
+          logWarning("RpcEndpoint self not initialized; skipping Shutdown signal during exit.")
+      }
+    } else {
+      logInfo("Skip exiting executor since it's been already asked to exit before.")
+    }
+  }
+
   private def decommissionSelf(): Unit = {
     if (!env.conf.get(DECOMMISSION_ENABLED)) {
       logWarning(s"Receive decommission request, but decommission feature is disabled.")
@@ -324,6 +356,7 @@ private[spark] class CoarseGrainedExecutorBackend(
     logInfo(msg)
     try {
       decommissioned = true
+      decommissionSummary = Some(DecommissionSummary.create(msg))
       val migrationEnabled = env.conf.get(STORAGE_DECOMMISSION_ENABLED) &&
         (env.conf.get(STORAGE_DECOMMISSION_RDD_BLOCKS_ENABLED) ||
           env.conf.get(STORAGE_DECOMMISSION_SHUFFLE_BLOCKS_ENABLED))
@@ -360,19 +393,49 @@ private[spark] class CoarseGrainedExecutorBackend(
             if (executor == null || executor.numRunningTasks == 0) {
               if (migrationEnabled) {
                 logInfo("No running tasks, checking migrations")
-                val MigrationInfo(migrationTime, done, _) =
-                  env.blockManager.lastMigrationInfo().get
-                // We can only trust the `done` boolean value if there were no tasks running
-                // since the start of computing it.
-                if (done && (migrationTime > lastTaskFinishTime.get())) {
-                  logInfo("No running tasks, all blocks migrated, stopping.")
-                  exitExecutor(0, ExecutorLossMessage.decommissionFinished, notifyDriver = true)
-                } else {
-                  logInfo("All blocks not yet migrated.")
+                env.blockManager.lastMigrationInfo() match {
+                  case Some(migrationInfo) =>
+                    val MigrationInfo(migrationTime, done, _) = migrationInfo
+                    // We can only trust the `done` boolean value if there were no tasks running
+                    // since the start of computing it.
+                    if (done && (migrationTime > lastTaskFinishTime.get())) {
+                      logInfo("No running tasks, all blocks migrated, stopping.")
+                      // Complete decommission summary with migration info
+                      decommissionSummary = decommissionSummary.map(
+                        _.markCompleted(Some(migrationInfo)))
+                      val lossReason = ExecutorDecommissionFinished(
+                        decommissionSummary.flatMap(_.workerHost),
+                        decommissionSummary.map(_.toDetailedMessage)
+                          .getOrElse(ExecutorLossMessage.decommissionFinished),
+                        decommissionSummary
+                      )
+                      exitExecutorWithReason(0, lossReason, notifyDriver = true)
+                    } else {
+                      logInfo("All blocks not yet migrated.")
+                    }
+                  case None =>
+                    logInfo("No migration info available, stopping.")
+                    // Complete decommission summary without migration info
+                    decommissionSummary = decommissionSummary.map(_.markCompleted())
+                    val lossReason = ExecutorDecommissionFinished(
+                      decommissionSummary.flatMap(_.workerHost),
+                      decommissionSummary.map(_.toDetailedMessage)
+                        .getOrElse(ExecutorLossMessage.decommissionFinished),
+                      decommissionSummary
+                    )
+                    exitExecutorWithReason(0, lossReason, notifyDriver = true)
                 }
               } else {
                 logInfo("No running tasks, no block migration configured, stopping.")
-                exitExecutor(0, ExecutorLossMessage.decommissionFinished, notifyDriver = true)
+                // Complete decommission summary without migration info
+                decommissionSummary = decommissionSummary.map(_.markCompleted())
+                val lossReason = ExecutorDecommissionFinished(
+                  decommissionSummary.flatMap(_.workerHost),
+                  decommissionSummary.map(_.toDetailedMessage)
+                    .getOrElse(ExecutorLossMessage.decommissionFinished),
+                  decommissionSummary
+                )
+                exitExecutorWithReason(0, lossReason, notifyDriver = true)
               }
             } else {
               logInfo(s"Blocked from shutdown by ${executor.numRunningTasks} running tasks")

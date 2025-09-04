@@ -23,7 +23,7 @@ import scala.collection.mutable
 
 import com.codahale.metrics.Counter
 import org.mockito.ArgumentMatchers.any
-import org.mockito.Mockito.{doAnswer, mock, when}
+import org.mockito.Mockito.{doAnswer, mock, verify, when}
 
 import org.apache.spark._
 import org.apache.spark.executor.ExecutorMetrics
@@ -550,6 +550,34 @@ class ExecutorMonitorSuite extends SparkFunSuite {
       monitor.onOtherEvent(invocation.getArguments()(0).asInstanceOf[SparkListenerEvent])
     }.when(bus).post(any())
     bus
+  }
+
+  test("ExecutorDecommissionFinished should be classified as graceful decommission") {
+    val mockCounter = mock(classOf[Counter])
+    val mockMetrics = mock(classOf[ExecutorAllocationManagerSource])
+    when(mockMetrics.gracefullyDecommissioned).thenReturn(mockCounter)
+    when(mockMetrics.driverKilled).thenReturn(new Counter)
+    when(mockMetrics.decommissionUnfinished).thenReturn(new Counter)
+    when(mockMetrics.exitedUnexpectedly).thenReturn(new Counter)
+    val testMonitor = new ExecutorMonitor(conf, client, null, clock, mockMetrics)
+    val execInfo = new ExecutorInfo("host1", 1, Map.empty, Map.empty, Map.empty, 0)
+    testMonitor.onExecutorAdded(SparkListenerExecutorAdded(clock.getTimeMillis(), "1", execInfo))
+
+    val summary = DecommissionSummary.create("Test decommission", Some("host1")).markCompleted()
+    val decommissionFinishedReason = ExecutorDecommissionFinished(
+      Some("host1"),
+      summary.toDetailedMessage,
+      Some(summary)
+    )
+
+    testMonitor.onExecutorRemoved(SparkListenerExecutorRemoved(
+      clock.getTimeMillis(),
+      "1",
+      decommissionFinishedReason.message
+    ))
+
+    // Verify that the gracefullyDecommissioned counter was incremented
+    verify(mockCounter).inc()
   }
 
 }

@@ -87,3 +87,32 @@ private [spark] case class ExecutorDecommission(
 private[spark] object ExecutorDecommission {
   val msgPrefix = "Executor decommission: "
 }
+
+/**
+ * A loss reason that means the executor has finished decommissioning and exited gracefully.
+ *
+ * This is distinct from ExecutorDecommission which indicates an executor is in the process
+ * of being decommissioned. ExecutorDecommissionFinished indicates the decommissioning
+ * process has completed successfully.
+ *
+ * @param workerHost it is defined when the worker was decommissioned too
+ * @param reason basic decommission completion message
+ * @param summary optional comprehensive decommission summary with timing and migration details
+ */
+private [spark] case class ExecutorDecommissionFinished(
+    workerHost: Option[String] = None,
+    reason: String = ExecutorLossMessage.decommissionFinished,
+    summary: Option[DecommissionSummary] = None)
+  extends ExecutorLossReason(
+    ExecutorDecommissionFinished.msgPrefix +
+    summary.map(_.toDetailedMessage).getOrElse(reason))
+
+private[spark] object ExecutorDecommissionFinished {
+  val msgPrefix = "Executor decommission finished: "
+
+  def apply(reason: String): ExecutorDecommissionFinished =
+    ExecutorDecommissionFinished(None, reason, None)
+
+  def apply(summary: DecommissionSummary): ExecutorDecommissionFinished =
+    ExecutorDecommissionFinished(summary.workerHost, summary.message, Some(summary))
+}
