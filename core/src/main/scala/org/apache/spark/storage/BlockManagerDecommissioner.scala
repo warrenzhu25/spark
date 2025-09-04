@@ -130,6 +130,7 @@ private[storage] class BlockManagerDecommissioner(
               logInfo(s"Migrated $shuffleBlockInfo (" +
                 s"size: ${Utils.bytesToString(blocks.map(b => b._2.size()).sum)}) to $peer " +
                 s"in ${System.currentTimeMillis() - startTime} ms")
+              lastMigrationActivity = System.currentTimeMillis()
             } catch {
               case e @ ( _ : IOException | _ : SparkException) =>
                 // If a block got deleted before netty opened the file handle, then trying to
@@ -146,11 +147,16 @@ private[storage] class BlockManagerDecommissioner(
                     && peer != FallbackStorage.FALLBACK_BLOCK_MANAGER_ID) {
                   fallbackStorage.foreach(_.copy(shuffleBlockInfo, bm))
                 } else {
-                  logError(s"Error occurred during migrating $shuffleBlockInfo", e)
+                  logError(s"Error occurred during migrating $shuffleBlockInfo to $peer " +
+                    s"(retry $retryCount/$maxReplicationFailuresForDecommission). " +
+                    s"Block size: ${Utils.bytesToString(blocks.map(b => b._2.size()).sum)}, " +
+                    s"Error: ${e.getClass.getSimpleName}: ${e.getMessage}", e)
                   keepRunning = false
                 }
               case e: Exception =>
-                logError(s"Error occurred during migrating $shuffleBlockInfo", e)
+                logError(s"Unexpected error during migration of $shuffleBlockInfo to $peer " +
+                  s"(retry $retryCount/$maxReplicationFailuresForDecommission). " +
+                  s"Error: ${e.getClass.getSimpleName}: ${e.getMessage}", e)
                 keepRunning = false
             }
           }
@@ -190,6 +196,11 @@ private[storage] class BlockManagerDecommissioner(
 
   // Number of shuffle blocks that were deleted during migration
   private[storage] val deletedShuffles = new AtomicInteger(0)
+
+  // Timing and progress tracking for enhanced logging
+  @volatile private var migrationStartTime: Long = 0
+  @volatile private var lastProgressLogTime: Long = 0
+  @volatile private var lastMigrationActivity: Long = 0
 
   // Shuffles which are queued for migration & number of retries so far.
   // Visible in storage for testing.
@@ -260,12 +271,13 @@ private[storage] class BlockManagerDecommissioner(
           lastShuffleMigrationTime = startTime
           logInfo(s"Finished current round refreshing migratable shuffle blocks, " +
             s"waiting for ${sleepInterval}ms before the next round refreshing.")
+          logProgressIfNeeded()
           Thread.sleep(sleepInterval)
         } catch {
           case _: InterruptedException if stopped =>
-            logInfo("Stop refreshing migratable shuffle blocks.")
+            logInfo("Shuffle block migration thread interrupted - stopping migration")
           case NonFatal(e) =>
-            logError("Error occurred during shuffle blocks migration.", e)
+            logError("Fatal error in shuffle block migration thread - stopping migration", e)
             stoppedShuffle = true
         }
       }
@@ -394,7 +406,27 @@ private[storage] class BlockManagerDecommissioner(
   }
 
   def start(): Unit = {
-    logInfo("Starting block migration")
+    logInfo("Starting BlockManager decommissioning")
+
+    // Log configuration details
+    logInfo(s"Decommissioning configuration: " +
+      s"maxReplicationFailures=$maxReplicationFailuresForDecommission, " +
+      s"rddBlocksEnabled=${conf.get(config.STORAGE_DECOMMISSION_RDD_BLOCKS_ENABLED)}, " +
+      s"shuffleBlocksEnabled=${conf.get(config.STORAGE_DECOMMISSION_SHUFFLE_BLOCKS_ENABLED)}")
+
+    // Log available peers
+    val peers = bm.getPeers(false)
+    if (peers.nonEmpty) {
+      logInfo(s"Found ${peers.size} available peers for migration: ${peers.mkString(", ")}")
+    } else {
+      logWarning("No peers available for block migration - decommissioning may not complete")
+    }
+
+    // Initialize timing tracking
+    migrationStartTime = System.currentTimeMillis()
+    lastProgressLogTime = migrationStartTime
+
+    logInfo("Starting block migration threads")
     rddBlockMigrationExecutor.foreach(_.submit(rddBlockMigrationRunnable))
     shuffleBlockMigrationRefreshExecutor.foreach(_.submit(shuffleBlockMigrationRefreshRunnable))
   }
@@ -403,6 +435,7 @@ private[storage] class BlockManagerDecommissioner(
     if (stopped) {
       return
     } else {
+      logInfo("Initiating BlockManager decommissioning shutdown")
       stopped = true
     }
     try {
@@ -423,6 +456,7 @@ private[storage] class BlockManagerDecommissioner(
       case NonFatal(e) =>
         logError(s"Error during shutdown shuffle block migration thread", e)
     }
+    logMigrationSummary()
     logInfo("Stopped block migration")
   }
 
@@ -460,6 +494,111 @@ private[storage] class BlockManagerDecommissioner(
     MigrationStat(migratingShuffles.size - numMigratedShuffles.get(),
       migratedShufflesSize.get(), numMigratedShuffles.get(),
       migratingShuffles.size, totalShufflesSize.get(), deletedShuffles.get())
+  }
+
+  /**
+   * Log periodic progress updates to provide visibility into migration status
+   */
+  private def logProgressIfNeeded(): Unit = {
+    val currentTime = System.currentTimeMillis()
+    // Log progress every 30 seconds
+    if (currentTime - lastProgressLogTime > 30000) {
+      val stats = buildShuffleStat()
+      val elapsedSeconds = (currentTime - migrationStartTime) / 1000
+
+      if (stats.totalBlocks > 0) {
+        val progressPct = (stats.numMigratedBlock * 100.0) / stats.totalBlocks
+        val sizePct = if (stats.totalSize > 0) {
+          (stats.totalMigratedSize * 100.0) / stats.totalSize
+        } else 0.0
+
+        logInfo(f"Migration progress after ${elapsedSeconds}s: " +
+          f"${stats.numMigratedBlock}/${stats.totalBlocks} blocks ($progressPct%.1f%%), " +
+          f"${Utils.bytesToString(stats.totalMigratedSize)}/" +
+          f"${Utils.bytesToString(stats.totalSize)} ($sizePct%.1f%%), " +
+          f"${stats.deletedBlocks} deleted, ${stats.numBlocksLeft} remaining")
+
+        // Calculate and log migration rate
+        if (elapsedSeconds > 0) {
+          val blocksPerSec = stats.numMigratedBlock.toDouble / elapsedSeconds
+          val bytesPerSec = stats.totalMigratedSize.toDouble / elapsedSeconds
+          logInfo(f"Migration rate: $blocksPerSec%.2f blocks/sec, " +
+            f"${Utils.bytesToString(bytesPerSec.toLong)}/sec")
+        }
+      } else {
+        logInfo(s"Migration progress after ${elapsedSeconds}s: No shuffle blocks to migrate")
+      }
+
+      // Check for stalled migration
+      checkForStalledMigration(currentTime)
+
+      lastProgressLogTime = currentTime
+    }
+  }
+
+  /**
+   * Detect and log warnings for stalled migration
+   */
+  private def checkForStalledMigration(currentTime: Long): Unit = {
+    val stallThreshold = 120000L // 2 minutes
+    if (lastMigrationActivity > 0 &&
+        currentTime - lastMigrationActivity > stallThreshold &&
+        !stopped && !stoppedShuffle) {
+      val stats = buildShuffleStat()
+      if (stats.numBlocksLeft > 0) {
+        val stalledSeconds = (currentTime - lastMigrationActivity) / 1000
+        logWarning(s"Migration appears stalled: no activity for ${stalledSeconds}s. " +
+          s"${stats.numBlocksLeft} blocks remaining. " +
+          s"Possible causes: slow/overloaded peers, network issues, or resource constraints. " +
+          s"Consider checking peer health and network connectivity.")
+      }
+    }
+  }
+
+  /**
+   * Log comprehensive migration summary with timing and statistics
+   */
+  private def logMigrationSummary(): Unit = {
+    val currentTime = System.currentTimeMillis()
+    val totalDuration = if (migrationStartTime > 0) {
+      (currentTime - migrationStartTime) / 1000
+    } else 0L
+
+    val stats = buildShuffleStat()
+
+    logInfo("=== BlockManager Decommissioning Summary ===")
+    logInfo(s"Total duration: ${totalDuration}s")
+
+    val blockProgressPct = if (stats.totalBlocks > 0) {
+      (stats.numMigratedBlock * 100.0) / stats.totalBlocks
+    } else 0.0
+    logInfo(f"Shuffle blocks: ${stats.numMigratedBlock}/${stats.totalBlocks} " +
+      f"migrated ($blockProgressPct%.1f%%)")
+
+    val sizeProgressPct = if (stats.totalSize > 0) {
+      (stats.totalMigratedSize * 100.0) / stats.totalSize
+    } else 0.0
+    logInfo(s"Data migrated: ${Utils.bytesToString(stats.totalMigratedSize)}/" +
+      f"${Utils.bytesToString(stats.totalSize)} ($sizeProgressPct%.1f%%)")
+    logInfo(s"Blocks deleted during migration: ${stats.deletedBlocks}")
+    logInfo(s"Blocks remaining: ${stats.numBlocksLeft}")
+
+    if (totalDuration > 0 && stats.numMigratedBlock > 0) {
+      val avgBlocksPerSec = stats.numMigratedBlock.toDouble / totalDuration
+      val avgBytesPerSec = stats.totalMigratedSize.toDouble / totalDuration
+      logInfo(f"Average migration rate: $avgBlocksPerSec%.2f blocks/sec, " +
+        f"${Utils.bytesToString(avgBytesPerSec.toLong)}/sec")
+    }
+
+    val migrationStatus = if (stats.numBlocksLeft == 0) {
+      "COMPLETED"
+    } else if (stopped) {
+      "STOPPED_INCOMPLETE"
+    } else {
+      "IN_PROGRESS"
+    }
+    logInfo(s"Migration status: $migrationStatus")
+    logInfo("=== End Decommissioning Summary ===")
   }
 }
 
