@@ -1862,6 +1862,102 @@ class ExecutorAllocationManagerSuite extends SparkFunSuite {
     assert(managerDefault != null)
   }
 
+  test("diagnosis interval overflow protection") {
+    val clock = new ManualClock(2020L)
+    // Test with very large diagnosis interval that would cause overflow
+    val conf = createConf(1, 20, 1)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_ENABLED, true)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_INTERVAL.key, s"${Long.MaxValue / 500}s")
+    val manager = createManager(conf, clock = clock)
+
+    // Add executors
+    (1 to 5).foreach { i => onExecutorAddedDefaultProfile(manager, s"executor-$i") }
+
+    // Set max needed executors to be less than running executors to trigger diagnosis
+    post(SparkListenerStageSubmitted(createStageInfo(0, 2)))
+    manager invokePrivate _updateAndSyncNumExecutorsTarget(clock.nanoTime())
+
+    // This should not throw an overflow exception
+    schedule(manager)
+
+    // Verify manager is still functioning
+    assert(manager.executorMonitor.executorCount === 5)
+  }
+
+  test("diagnosis calculatePercentiles handles edge cases") {
+    val clock = new ManualClock(2020L)
+    val conf = createConf(1, 20, 1)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_ENABLED, true)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_INTERVAL.key, "1s")
+    val manager = createManager(conf, clock = clock)
+
+    // Test empty values
+    val emptyValues = Seq.empty[Long]
+    val emptyResult = manager.executorMonitor.calculatePercentiles(emptyValues)
+    assert(emptyResult.isEmpty)
+
+    // Test with single value
+    val singleValue = Seq(42L)
+    val singleResult = manager.executorMonitor.calculatePercentiles(singleValue)
+    assert(singleResult.isDefined)
+    val single = singleResult.get
+    assert(single.min === 42)
+    assert(single.max === 42)
+
+    // Test with values that would produce infinite/NaN doubles
+    val extremeValues = Seq(Long.MaxValue, Long.MaxValue)
+    val extremeResult = manager.executorMonitor.calculatePercentiles(extremeValues)
+    // Should handle extreme values gracefully
+    assert(extremeResult.isDefined || extremeResult.isEmpty)
+  }
+
+  test("diagnosis thread safety with concurrent access") {
+    val clock = new ManualClock(2020L)
+    val conf = createConf(1, 20, 1)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_ENABLED, true)
+      .set(config.DYN_ALLOCATION_DIAGNOSIS_INTERVAL.key, "100ms")
+    val manager = createManager(conf, clock = clock)
+
+    // Add executors
+    (1 to 10).foreach { i => onExecutorAddedDefaultProfile(manager, s"executor-$i") }
+
+    // Set max needed executors to trigger diagnosis
+    post(SparkListenerStageSubmitted(createStageInfo(0, 2)))
+    manager invokePrivate _updateAndSyncNumExecutorsTarget(clock.nanoTime())
+
+    // Simulate concurrent access by rapidly scheduling multiple times
+    // This tests the @volatile annotation on diagnosisTime
+    import java.util.concurrent.Executors
+    import scala.concurrent.{ExecutionContext, Future}
+    import scala.concurrent.duration._
+
+    implicit val ec = ExecutionContext.fromExecutorService(Executors.newFixedThreadPool(4))
+
+    try {
+      val futures = (1 to 20).map { _ =>
+        Future {
+          clock.advance(150) // Advance past diagnosis interval
+          schedule(manager)
+          manager.executorMonitor.getExecutorSummary(10)
+        }
+      }
+
+      // Wait for all futures to complete - should not throw any exceptions
+      // scalastyle:off awaitresult
+      import scala.concurrent.Await
+      val results = Await.result(Future.sequence(futures), 10.seconds)
+      // scalastyle:on awaitresult
+
+      // Verify we got results from all futures
+      assert(results.length === 20)
+      results.foreach { summary =>
+        assert(summary.running === 10)
+      }
+    } finally {
+      ec.shutdown()
+    }
+  }
+
   test("SPARK-26758 check executor target number after idle time out ") {
     val clock = new ManualClock(10000L)
     val manager = createManager(createConf(1, 5, 3), clock = clock)

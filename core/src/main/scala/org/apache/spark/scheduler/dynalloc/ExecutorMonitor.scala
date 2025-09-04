@@ -582,7 +582,7 @@ private[spark] class ExecutorMonitor(
     )
   }
 
-  private def calculatePercentiles(values: Seq[Long]): Option[Percentiles] = {
+  private[spark] def calculatePercentiles(values: Seq[Long]): Option[Percentiles] = {
     if (values.isEmpty) {
       None
     } else {
