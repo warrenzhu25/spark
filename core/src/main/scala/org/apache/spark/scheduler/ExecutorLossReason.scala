@@ -78,11 +78,14 @@ case class ExecutorProcessLost(
  *
  * @param workerHost it is defined when the worker is decommissioned too
  * @param reason detailed decommission message
+ * @param summary optional comprehensive decommission summary with timing and migration details
  */
 private [spark] case class ExecutorDecommission(
     workerHost: Option[String] = None,
-    reason: String = "")
-  extends ExecutorLossReason(ExecutorDecommission.msgPrefix + reason)
+    reason: String = "",
+    summary: Option[DecommissionSummary] = None)
+  extends ExecutorLossReason(
+    summary.map(_.toDetailedMessage).getOrElse(ExecutorDecommission.msgPrefix + reason))
 
 private[spark] object ExecutorDecommission {
   val msgPrefix = "Executor decommission: "
