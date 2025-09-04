@@ -31,7 +31,7 @@ import org.apache.spark.resource.ResourceProfile.UNKNOWN_RESOURCE_PROFILE_ID
 import org.apache.spark.scheduler._
 import org.apache.spark.scheduler.dynalloc.ExecutorMonitor.{ExecutorSummary, Percentiles}
 import org.apache.spark.storage.{RDDBlockId, ShuffleDataBlockId}
-import org.apache.spark.util.Clock
+import org.apache.spark.util.{Clock, Distribution}
 
 private[spark] object ExecutorMonitor {
   case class Percentiles(min: Long, p25: Long, median: Long, p75: Long, max: Long) {
@@ -573,25 +573,15 @@ private[spark] class ExecutorMonitor(
     if (values.isEmpty) {
       None
     } else {
-      val sorted = values.sorted
-      val count = sorted.length
-      val min = sorted.head
-      val max = sorted.last
-      val median = calculatePercentile(sorted, 0.5)
-      val p25 = calculatePercentile(sorted, 0.25)
-      val p75 = calculatePercentile(sorted, 0.75)
-      Some(Percentiles(min, p25, median, p75, max))
-    }
-  }
-
-  private def calculatePercentile(sorted: Seq[Long], percentile: Double): Long = {
-    if (sorted.length == 1) {
-      sorted.head
-    } else {
-      val index = (sorted.length - 1) * percentile
-      val lower = sorted(index.toInt)
-      val upper = sorted(math.min(index.ceil.toInt, sorted.length - 1))
-      (lower + (upper - lower) * (index - index.toInt)).toLong
+      val distribution = new Distribution(values.map(_.toDouble))
+      val quantiles = distribution.getQuantiles() // Returns [min, 25%, 50%, 75%, max]
+      Some(Percentiles(
+        quantiles(0).toLong,  // min
+        quantiles(1).toLong,  // 25%
+        quantiles(2).toLong,  // 50% (median)
+        quantiles(3).toLong,  // 75%
+        quantiles(4).toLong   // max
+      ))
     }
   }
 
