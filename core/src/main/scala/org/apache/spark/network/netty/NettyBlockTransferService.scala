@@ -189,8 +189,12 @@ private[spark] class NettyBlockTransferService(
 
     // We always transfer shuffle blocks as a stream for simplicity with the receiving code since
     // they are always written to disk. Otherwise we check the block size.
-    val asStream = (blockData.size() > conf.get(config.MAX_REMOTE_BLOCK_SIZE_FETCH_TO_MEM) ||
-      blockId.isShuffle)
+    // Use conservative threshold to prevent blocks from approaching frame size limits in RPC mode.
+    val maxRpcBlockSize = Math.min(
+      conf.get(config.MAX_REMOTE_BLOCK_SIZE_FETCH_TO_MEM),
+      maxSafeSize / 2 // Use half of max safe size for RPC to provide extra safety margin
+    )
+    val asStream = (blockData.size() > maxRpcBlockSize || blockId.isShuffle)
     val callback = new RpcResponseCallback {
       override def onSuccess(response: ByteBuffer): Unit = {
         if (logger.isTraceEnabled) {

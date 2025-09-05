@@ -24,7 +24,7 @@ import scala.reflect.ClassTag
 import scala.util.Random
 
 import org.mockito.ArgumentMatchers.any
-import org.mockito.Mockito.{mock, when}
+import org.mockito.Mockito.{mock, times, verify, when}
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.matchers.must.Matchers
 import org.scalatest.matchers.should.Matchers._
@@ -192,6 +192,44 @@ class NettyBlockTransferServiceSuite
     // We don't wait for completion as the upload itself may fail due to test setup,
     // but the important thing is that it doesn't fail immediately with size validation
     uploadFuture should not be null
+  }
+
+  test("uploadBlock should use stream mode for blocks approaching size limits") {
+    service0 = createService(port = 0)
+
+    val blockId = new TestBlockId("large-block")
+    // Create a block that's larger than half of max safe size but smaller than max safe size
+    val maxSafeSize = Integer.MAX_VALUE - (8 * 1024 * 1024) // 2GB - 8MB safety margin
+    val largeBlockSize = (maxSafeSize / 2) + (1024 * 1024) // Half + 1MB, should trigger stream mode
+    val largeBuffer = mock(classOf[ManagedBuffer])
+    when(largeBuffer.size()).thenReturn(largeBlockSize)
+
+    // Mock the client factory and client to capture the upload method used
+    val mockClientFactory = mock(classOf[TransportClientFactory])
+    val mockClient = mock(classOf[TransportClient])
+    when(mockClientFactory.createClient(any(), any())).thenReturn(mockClient)
+
+    // Set the mock client factory using reflection
+    val clientFactoryField = service0.getClass
+      .getSuperclass.getSuperclass.getDeclaredField("clientFactory")
+    clientFactoryField.setAccessible(true)
+    clientFactoryField.set(service0, mockClientFactory)
+
+    // Attempt upload - this should use stream mode due to conservative threshold
+    val uploadFuture = service0.uploadBlock(
+      hostname = "localhost",
+      port = service0.port,
+      execId = "test-exec",
+      blockId = blockId,
+      blockData = largeBuffer,
+      level = StorageLevel.MEMORY_ONLY,
+      classTag = scala.reflect.classTag[Array[Byte]]
+    )
+
+    // Verify that uploadStream was called (indicating stream mode was used)
+    // and sendRpc was NOT called (indicating RPC mode was not used)
+    verify(mockClient, times(1)).uploadStream(any(), any(), any())
+    verify(mockClient, times(0)).sendRpc(any(), any())
   }
 
   private def verifyServicePort(expectedPort: Int, actualPort: Int): Unit = {
