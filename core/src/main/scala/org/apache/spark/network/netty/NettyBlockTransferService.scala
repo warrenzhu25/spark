@@ -28,7 +28,7 @@ import scala.util.{Success, Try}
 
 import com.codahale.metrics.{Metric, MetricSet}
 
-import org.apache.spark.{SecurityManager, SparkConf}
+import org.apache.spark.{SecurityManager, SparkConf, SparkException}
 import org.apache.spark.ExecutorDeadException
 import org.apache.spark.internal.config
 import org.apache.spark.network._
@@ -170,6 +170,17 @@ private[spark] class NettyBlockTransferService(
       level: StorageLevel,
       classTag: ClassTag[_]): Future[Unit] = {
     val result = Promise[Unit]()
+
+    // Validate block size to prevent frame decoder errors
+    val blockSize = blockData.size()
+    val maxSafeSize = Integer.MAX_VALUE - (8 * 1024 * 1024) // 2GB - 8MB safety margin
+    if (blockSize >= maxSafeSize) {
+      val errorMsg = s"Block $blockId size ($blockSize bytes) exceeds maximum transferable " +
+        s"size ($maxSafeSize bytes). Consider increasing the number of partitions to " +
+        s"reduce individual block sizes."
+      return Future.failed(new SparkException(errorMsg))
+    }
+
     val client = clientFactory.createClient(hostname, port)
 
     // StorageLevel and ClassTag are serialized as bytes using our JavaSerializer.
