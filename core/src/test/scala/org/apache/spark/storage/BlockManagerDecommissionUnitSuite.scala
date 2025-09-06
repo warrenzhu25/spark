@@ -79,7 +79,7 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
     var previousTime: Option[Long] = None
     try {
       bmDecomManager.start()
-      eventually(timeout(100.second), interval(10.milliseconds)) {
+      eventually(timeout(10.second), interval(10.milliseconds)) {
         val MigrationInfo(currentTime, done, _) = bmDecomManager.lastMigrationInfo()
         assert(!assertDone || done)
         // Make sure the time stamp starts moving forward.
@@ -101,7 +101,7 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
       }
       if (!fail) {
         // Wait 5 seconds and assert times keep moving forward.
-        Thread.sleep(5000)
+        Thread.sleep(50)
         val MigrationInfo(currentTime, done, _) = bmDecomManager.lastMigrationInfo()
         assert((!assertDone || done) && currentTime > previousTime.get)
       }
