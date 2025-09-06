@@ -75,7 +75,9 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
   }
 
   private def validateDecommissionTimestampsOnManager(bmDecomManager: BlockManagerDecommissioner,
-      fail: Boolean = false, assertDone: Boolean = true, numShuffles: Option[Int] = None) = {
+      fail: Boolean = false, assertDone: Boolean = true,
+    numShuffles: Option[Int] = None, numDeletedShuffles: Option[Int] = None,
+    numFailedShuffles: Option[Int] = None) = {
     var previousTime: Option[Long] = None
     try {
       bmDecomManager.start()
@@ -97,6 +99,12 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
         }
         numShuffles.foreach { s =>
           assert(bmDecomManager.numMigratedShuffles.get() === s)
+        }
+        numDeletedShuffles.foreach { s =>
+          assert(bmDecomManager.deletedShuffles.get() === s)
+        }
+        numFailedShuffles.foreach { s =>
+          assert(bmDecomManager.failedShuffles.get() === s)
         }
       }
       if (!fail) {
@@ -170,6 +178,18 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
       .thenReturn(Seq())
     when(bm.getPeers(mc.any()))
       .thenReturn(Seq(BlockManagerId("exec2", "host2", 12345)))
+    val blockTransferService = mock(classOf[BlockTransferService])
+    // Simulate FileNotFoundException wrap inside SparkException
+    when(
+      blockTransferService
+        .uploadBlock(mc.any(), mc.any(), mc.any(), mc.any(), mc.any(), mc.any(), mc.isNull()))
+      .thenReturn(Future.successful())
+    when(
+      blockTransferService
+        .uploadBlockSync(mc.any(), mc.any(), mc.any(), mc.any(), mc.any(), mc.any(), mc.isNull()))
+      .thenCallRealMethod()
+
+    when(bm.blockTransferService).thenReturn(blockTransferService)
 
     // Verify the decom manager handles this correctly
     validateDecommissionTimestamps(sparkConf, bm)
@@ -178,17 +198,19 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
   test("block decom manager does not re-add removed shuffle files") {
     // Set up the mocks so we return one shuffle block
     val bm = mock(classOf[BlockManager])
+    val shuffleBlockInfo = ShuffleBlockInfo(10, 10)
     val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
     registerShuffleBlocks(migratableShuffleBlockResolver, Set())
     when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(migratableShuffleBlockResolver.getMigrationBlocks(mc.any())).thenReturn(List.empty)
     when(bm.getMigratableRDDBlocks())
       .thenReturn(Seq())
     when(bm.getPeers(mc.any()))
       .thenReturn(Seq(BlockManagerId("exec2", "host2", 12345)))
     val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm)
-    bmDecomManager.migratingShuffles += ShuffleBlockInfo(10, 10)
+    bmDecomManager.shufflesToMigrate.add((shuffleBlockInfo, 0))
 
-    validateDecommissionTimestampsOnManager(bmDecomManager, fail = false, assertDone = false)
+    validateDecommissionTimestampsOnManager(bmDecomManager, numDeletedShuffles = Some(1))
   }
 
   test("SPARK-40168: block decom manager handles shuffle file not found") {
@@ -230,7 +252,7 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
     val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm)
     validateDecommissionTimestampsOnManager(
       bmDecomManager,
-      numShuffles = Option(1))
+      numDeletedShuffles = Some(1))
   }
 
   test("block decom manager handles IO failures") {
@@ -255,7 +277,8 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
 
     // Verify the decom manager handles this correctly
     val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm)
-    validateDecommissionTimestampsOnManager(bmDecomManager, fail = false)
+    validateDecommissionTimestampsOnManager(bmDecomManager, fail = false,
+      numFailedShuffles = Some(1))
   }
 
   test("block decom manager short circuits removed blocks") {
@@ -290,7 +313,42 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
     // Verify the decom manager handles this correctly
     val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm)
     validateDecommissionTimestampsOnManager(bmDecomManager, fail = false,
-      numShuffles = Some(1))
+      numDeletedShuffles = Some(1))
+  }
+
+  test("block decom manager handles shuffle migration failures after max retries") {
+    // Set up configuration with fewer max retries to make test faster
+    val testConf = sparkConf.clone()
+      .set(config.STORAGE_DECOMMISSION_MAX_REPLICATION_FAILURE_PER_BLOCK, 1)
+    // Set up the mocks so we return one shuffle block that will fail repeatedly
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+    registerShuffleBlocks(migratableShuffleBlockResolver, Set((1, 1L, 1)))
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks())
+      .thenReturn(Seq())
+    when(bm.getPeers(mc.any()))
+      .thenReturn(Seq(BlockManagerId("exec2", "host2", 12345),
+        BlockManagerId("exec1", "host1", 12345)))
+    val blockTransferService = mock(classOf[BlockTransferService])
+
+    // Simulate persistent failure that will exceed max retries
+    when(
+      blockTransferService
+        .uploadBlock(mc.any(), mc.any(), mc.any(), mc.any(), mc.any(), mc.any(), mc.isNull()))
+      .thenReturn(Future.successful())
+    when(
+      blockTransferService
+        .uploadBlockSync(mc.any(), mc.any(), mc.any(), mc.any(), mc.any(), mc.any(), mc.isNull()))
+      .thenThrow(new java.io.IOException("Persistent network error"))
+
+    when(bm.blockTransferService).thenReturn(blockTransferService)
+
+    // Verify the decom manager tracks failed shuffles after max retries
+    val bmDecomManager = new BlockManagerDecommissioner(testConf, bm)
+    validateDecommissionTimestampsOnManager(
+      bmDecomManager,
+      numFailedShuffles = Some(1))
   }
 
   test("test shuffle and cached rdd migration without any error") {
