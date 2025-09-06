@@ -99,6 +99,15 @@ public class Encoders {
     }
 
     public static void encode(ByteBuf buf, byte[] arr) {
+      if (arr.length < 0) {
+        throw new IllegalArgumentException("Negative array length: " + arr.length);
+      }
+      // Account for 8-byte frame header overhead to prevent frame decoder errors
+      if (arr.length > Integer.MAX_VALUE - 8) {
+        throw new IllegalArgumentException(
+          "Array too large for frame encoding: " + arr.length + 
+          " bytes exceeds maximum of " + (Integer.MAX_VALUE - 8) + " bytes");
+      }
       buf.writeInt(arr.length);
       buf.writeBytes(arr);
     }
