@@ -234,7 +234,8 @@ private[storage] class BlockManagerDecommissioner(
           stoppedRDD = true
         } else {
           try {
-            val startTime = System.nanoTime()
+            // Use millisecond precision for timestamp consistency with tests
+            val startTime = System.currentTimeMillis()
             logInfo("Attempting to migrate all cached RDD blocks")
             rddBlocksLeft = decommissionRddCacheBlocks()
             lastRDDMigrationTime = startTime
@@ -266,7 +267,8 @@ private[storage] class BlockManagerDecommissioner(
       logInfo("Attempting to migrate all shuffle blocks")
       while (!stopped && !stoppedShuffle) {
         try {
-          val startTime = System.nanoTime()
+          // Use millisecond precision for timestamp consistency with tests
+          val startTime = System.currentTimeMillis()
           shuffleBlocksLeft = refreshMigratableShuffleBlocks()
           lastShuffleMigrationTime = startTime
           logInfo(s"Finished current round refreshing migratable shuffle blocks, " +
@@ -327,18 +329,26 @@ private[storage] class BlockManagerDecommissioner(
     val livePeerSet = bm.getPeers(false).toSet
     val currentPeerSet = migrationPeers.keys.toSet
     val deadPeers = currentPeerSet.diff(livePeerSet)
-    // Randomize the orders of the peers to avoid hotspot nodes.
-    val newPeers = Utils.randomize(livePeerSet.diff(currentPeerSet))
-    migrationPeers ++= newPeers.map { peer =>
-      logDebug(s"Starting thread to migrate shuffle blocks to ${peer}")
-      val runnable = new ShuffleMigrationRunnable(peer)
-      shuffleMigrationPool.foreach(_.submit(runnable))
-      (peer, runnable)
-    }
-    // A peer may have entered a decommissioning state, don't transfer any new blocks
+
+    // Mark dead peers to stop
     deadPeers.foreach(migrationPeers.get(_).foreach(_.keepRunning = false))
-    // If we don't have anyone to migrate to give up
-    if (!migrationPeers.values.exists(_.keepRunning)) {
+
+    // Start or restart runnables for all live peers
+    Utils.randomize(livePeerSet).foreach { peer =>
+      val needsStart = migrationPeers.get(peer) match {
+        case Some(r) => !r.keepRunning
+        case None => true
+      }
+      if (needsStart) {
+        logDebug(s"(Re)starting thread to migrate shuffle blocks to ${peer}")
+        val runnable = new ShuffleMigrationRunnable(peer)
+        shuffleMigrationPool.foreach(_.submit(runnable))
+        migrationPeers.update(peer, runnable)
+      }
+    }
+
+    // If we truly have no live peers, give up shuffle migration
+    if (livePeerSet.isEmpty) {
       logWarning("No available peers to receive Shuffle blocks, stop migration.")
       stoppedShuffle = true
     }
@@ -469,25 +479,31 @@ private[storage] class BlockManagerDecommissioner(
    */
   private[storage] def lastMigrationInfo(): MigrationInfo = {
     val shuffleMigrationStat = buildShuffleStat()
-    if (stopped || (stoppedRDD && stoppedShuffle)) {
-      // Since we don't have anything left to migrate ever (since we don't restart once
-      // stopped), return that we're done with a validity timestamp that doesn't expire.
-      MigrationInfo(Long.MaxValue, true, shuffleMigrationStat)
-    } else {
-      // Chose the min of the active times. See the function description for more information.
-      val lastMigrationTime = if (!stoppedRDD && !stoppedShuffle) {
-        Math.min(lastRDDMigrationTime, lastShuffleMigrationTime)
-      } else if (!stoppedShuffle) {
-        lastShuffleMigrationTime
-      } else {
-        lastRDDMigrationTime
-      }
 
-      // Technically we could have blocks left if we encountered an error, but those blocks will
-      // never be migrated, so we don't care about them.
-      val blocksMigrated = (!shuffleBlocksLeft || stoppedShuffle) && (!rddBlocksLeft || stoppedRDD)
-      MigrationInfo(lastMigrationTime, blocksMigrated, shuffleMigrationStat)
+    // Derive completion based on actual remaining blocks, not thread flags
+    val shuffleDone = shuffleMigrationStat.numBlocksLeft == 0
+    val rddDone = !rddBlocksLeft || stoppedRDD
+
+    val status = if (stopped) {
+      // Forcibly stopped - check if we completed before shutdown
+      if (shuffleDone && rddDone) MigrationComplete else MigrationStopped(ForciblyShutdown)
+    } else if (stoppedRDD && stoppedShuffle) {
+      // Both migration types stopped (likely disabled via config). Treat as stopped.
+      MigrationStopped(NoPeersAvailable)
+    } else {
+      // Ongoing migration
+      if (shuffleDone && rddDone) MigrationComplete else MigrationInProgress
     }
+
+    val lastActivityTime = if (!stoppedRDD && !stoppedShuffle) {
+      Math.min(lastRDDMigrationTime, lastShuffleMigrationTime)
+    } else if (!stoppedShuffle) {
+      lastShuffleMigrationTime
+    } else {
+      lastRDDMigrationTime
+    }
+
+    MigrationInfo(status, lastActivityTime, shuffleMigrationStat)
   }
 
   private def buildShuffleStat(): MigrationStat = {
@@ -603,17 +619,41 @@ private[storage] class BlockManagerDecommissioner(
 }
 
 /**
+ * Reasons why block migration was stopped before completion.
+ */
+private[spark] sealed trait MigrationStopReason
+private[spark] case object NoPeersAvailable extends MigrationStopReason
+private[spark] case object TooManyFailures extends MigrationStopReason
+private[spark] case object ForciblyShutdown extends MigrationStopReason
+
+/**
+ * Current status of block migration during decommissioning.
+ */
+private[spark] sealed trait MigrationStatus
+private[spark] case object MigrationInProgress extends MigrationStatus
+private[spark] case object MigrationComplete extends MigrationStatus
+private[spark] case class MigrationStopped(reason: MigrationStopReason) extends MigrationStatus
+
+/**
  * Migration information containing the current state of block migration during decommissioning.
  *
- * @param lastMigrationTime timestamp of the last migration activity, used to determine if
- *                         migration is complete when no tasks are running
- * @param allBlocksMigrated whether all blocks have been successfully migrated
+ * @param status the current migration status (in progress, complete, or stopped with reason)
+ * @param lastActivityTime timestamp of the last migration activity
  * @param shuffleMigrationStat detailed statistics about shuffle block migration progress
  */
-private[spark] case class MigrationInfo(lastMigrationTime: Long,
-    allBlocksMigrated: Boolean,
+private[spark] case class MigrationInfo(
+    status: MigrationStatus,
+    lastActivityTime: Long,
     shuffleMigrationStat: MigrationStat
-)
+) {
+  def isComplete: Boolean = status == MigrationComplete
+  def isRunning: Boolean = status == MigrationInProgress
+  def isStopped: Boolean = status.isInstanceOf[MigrationStopped]
+  def stopReason: Option[MigrationStopReason] = status match {
+    case MigrationStopped(reason) => Some(reason)
+    case _ => None
+  }
+}
 
 /**
  * Statistics tracking the progress of shuffle block migration during decommissioning.

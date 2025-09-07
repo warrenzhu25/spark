@@ -49,7 +49,7 @@ import org.apache.spark.scheduler.TaskDescription
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.{KillTask,
   LaunchTask, RemoveExecutor}
 import org.apache.spark.serializer.JavaSerializer
-import org.apache.spark.storage.{MigrationInfo, MigrationStat}
+import org.apache.spark.storage.{MigrationComplete, MigrationInfo, MigrationStat}
 import org.apache.spark.util.{SerializableBuffer, ThreadUtils, Utils}
 
 class CoarseGrainedExecutorBackendSuite extends SparkFunSuite
@@ -665,8 +665,8 @@ class CoarseGrainedExecutorBackendSuite extends SparkFunSuite
 
       val migrationStat = MigrationStat(0, 1024L, 10, 10, 1024L, 0)
       val migrationInfo = MigrationInfo(
+        MigrationComplete,
         System.nanoTime(),
-        allBlocksMigrated = true,
         migrationStat)
 
       backend.decommissionSummary = Some(
@@ -754,7 +754,7 @@ class CoarseGrainedExecutorBackendSuite extends SparkFunSuite
       backend.driver = Some(mockDriver)
 
       val migrationStat = MigrationStat(2, 512L, 8, 10, 1024L, 1)
-      val migrationInfo = MigrationInfo(System.nanoTime(), allBlocksMigrated = true, migrationStat)
+      val migrationInfo = MigrationInfo(MigrationComplete, System.nanoTime(), migrationStat)
       val summary = DecommissionSummary
         .create("Integration test", Some("host1"))
         .markCompleted(Some(migrationInfo))

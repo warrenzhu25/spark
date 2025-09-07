@@ -44,7 +44,6 @@ import org.apache.spark.resource.ResourceUtils._
 import org.apache.spark.rpc._
 import org.apache.spark.scheduler.{DecommissionSummary, ExecutorDecommissionFinished, ExecutorLossMessage, ExecutorLossReason, TaskDescription}
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages._
-import org.apache.spark.storage.MigrationInfo
 import org.apache.spark.util.{ChildFirstURLClassLoader, MutableURLClassLoader, SignalUtils, ThreadUtils, Utils}
 
 private[spark] class CoarseGrainedExecutorBackend(
@@ -393,15 +392,15 @@ private[spark] class CoarseGrainedExecutorBackend(
             if (executor == null || executor.numRunningTasks == 0) {
               if (migrationEnabled) {
                 logInfo("No running tasks, checking migrations")
-                val MigrationInfo(migrationTime, done, _) =
-                  env.blockManager.lastMigrationInfo().get
-                // We can only trust the `done` boolean value if there were no tasks running
+                val migrationInfo = env.blockManager.lastMigrationInfo().get
+                // We can only trust the completion status if there were no tasks running
                 // since the start of computing it.
-                if (done && (migrationTime > lastTaskFinishTime.get())) {
+                if (migrationInfo.isComplete &&
+                    (migrationInfo.lastActivityTime > lastTaskFinishTime.get())) {
                   logInfo("No running tasks, all blocks migrated, stopping.")
                   // Complete decommission summary with migration info
                   decommissionSummary = decommissionSummary.map(
-                    _.markCompleted(env.blockManager.lastMigrationInfo()))
+                    _.markCompleted(Some(migrationInfo)))
                   val lossReason = ExecutorDecommissionFinished(
                     decommissionSummary.flatMap(_.workerHost),
                     decommissionSummary.map(_.toDetailedMessage)
