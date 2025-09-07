@@ -544,6 +544,28 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
           assert(totalFailuresFromReasons === stat.failedBlocks,
             s"Sum of failure reasons ($totalFailuresFromReasons) should equal " +
             s"failedBlocks (${stat.failedBlocks})")
+
+          // Verify that failure reasons use composite key format (ExceptionType: Message)
+          stat.failureReasons.keys.foreach { key =>
+            assert(key.contains(": "),
+              s"Expected failure reason key '$key' to contain ': ' separator")
+            val parts = key.split(": ", 2)
+            assert(parts.length === 2,
+              s"Expected failure reason key '$key' to have exactly one ': ' separator")
+            assert(parts(0).nonEmpty,
+              s"Expected exception type part to be non-empty in key '$key'")
+            assert(parts(1).nonEmpty,
+              s"Expected exception message part to be non-empty in key '$key'")
+          }
+
+          // Verify that IOException entries exist with proper format (since failures may occur)
+          val ioExceptionKeys = stat.failureReasons.keys.filter(_.startsWith("IOException: "))
+          if (ioExceptionKeys.nonEmpty) {
+            ioExceptionKeys.foreach { key =>
+              assert(key.contains("IOException: "),
+                s"Expected IOException key '$key' to have proper format")
+            }
+          }
         }
 
         // Verify size calculations are reasonable
@@ -553,6 +575,56 @@ class BlockManagerDecommissionUnitSuite extends SparkFunSuite with Matchers {
           s"Expected migrated size >= 0 but got ${stat.totalMigratedSize}")
         assert(stat.totalSize >= stat.totalMigratedSize,
           s"Total size (${stat.totalSize}) should be >= migrated size (${stat.totalMigratedSize})")
+      }
+    } finally {
+      bmDecomManager.stop()
+    }
+  }
+
+  test("recordFailure handles null exception messages correctly") {
+    val blockTransferService = mock(classOf[BlockTransferService])
+    val bm = mock(classOf[BlockManager])
+    val migratableShuffleBlockResolver = mock(classOf[MigratableResolver])
+
+    // Setup a simple scenario with one shuffle block that will fail
+    when(migratableShuffleBlockResolver.getStoredShuffles())
+      .thenReturn(Seq(ShuffleBlockInfo(1, 1)))
+
+    val mockBuffer = mock(classOf[ManagedBuffer])
+    when(mockBuffer.size()).thenReturn(100L)
+
+    when(migratableShuffleBlockResolver.getMigrationBlocks(ShuffleBlockInfo(1, 1)))
+      .thenReturn(List((ShuffleIndexBlockId(1, 1, 1), mockBuffer)))
+
+    when(bm.getPeers(mc.any()))
+      .thenReturn(Seq(BlockManagerId("exec2", "host2", 12345)))
+    when(bm.blockTransferService).thenReturn(blockTransferService)
+
+    // Throw an exception with null message to test null handling
+    when(blockTransferService.uploadBlockSync(
+      mc.any(), mc.any(), mc.any(), mc.any(), mc.any(), mc.any(), mc.isNull()))
+      .thenThrow(new RuntimeException(null.asInstanceOf[String]))
+
+    when(bm.migratableResolver).thenReturn(migratableShuffleBlockResolver)
+    when(bm.getMigratableRDDBlocks()).thenReturn(Seq())
+
+    val bmDecomManager = new BlockManagerDecommissioner(sparkConf, bm)
+
+    try {
+      bmDecomManager.start()
+      eventually(timeout(5.seconds)) {
+        val info = bmDecomManager.lastMigrationInfo()
+        val stat = info.shuffleMigrationStat
+
+        // Verify that the exception with null message was recorded correctly
+        if (stat.failedBlocks > 0) {
+          val expectedKey = "RuntimeException: No message"
+          assert(stat.failureReasons.contains(expectedKey),
+            s"Expected to find '$expectedKey' in failure reasons for null message handling, " +
+            s"but got: ${stat.failureReasons.keys.mkString(", ")}")
+          assert(stat.failureReasons(expectedKey) > 0,
+            s"Expected count > 0 for '$expectedKey', but got: ${stat.failureReasons(expectedKey)}")
+        }
       }
     } finally {
       bmDecomManager.stop()

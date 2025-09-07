@@ -207,8 +207,10 @@ private[storage] class BlockManagerDecommissioner(
    */
   private def recordFailure(exception: Throwable): Unit = {
     failedShuffles.incrementAndGet()
-    val failureType = exception.getClass.getSimpleName
-    failureReasons.computeIfAbsent(failureType, _ => new AtomicInteger(0)).incrementAndGet()
+    val exceptionType = exception.getClass.getSimpleName
+    val exceptionMessage = Option(exception.getMessage).getOrElse("No message")
+    val failureKey = s"$exceptionType: $exceptionMessage"
+    failureReasons.computeIfAbsent(failureKey, _ => new AtomicInteger(0)).incrementAndGet()
   }
 
   // Shuffles which are queued for migration & number of retries so far.
