@@ -45,6 +45,7 @@ import org.apache.spark.rpc.RpcEnv
 import org.apache.spark.scheduler.{SparkListener, SparkListenerExecutorAdded, SparkListenerExecutorRemoved, TaskDescription}
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.{KillTask, LaunchTask}
 import org.apache.spark.serializer.JavaSerializer
+import org.apache.spark.storage.{MigrationComplete, MigrationInfo, MigrationStat}
 import org.apache.spark.util.{SerializableBuffer, ThreadUtils, Utils}
 
 class CoarseGrainedExecutorBackendSuite extends SparkFunSuite
@@ -595,7 +596,6 @@ class CoarseGrainedExecutorBackendSuite extends SparkFunSuite
       sc.removeSparkListener(listener)
     }
   }
-
   private def createMockEnv(conf: SparkConf, serializer: JavaSerializer,
       rpcEnv: Option[RpcEnv] = None): SparkEnv = {
     val mockEnv = mock[SparkEnv]

@@ -18,7 +18,7 @@
 package org.apache.spark.scheduler
 
 import org.apache.spark.SparkFunSuite
-import org.apache.spark.storage.{MigrationInfo, MigrationStat}
+import org.apache.spark.storage.{MigrationComplete, MigrationInfo, MigrationStat}
 
 class DecommissionSummarySuite extends SparkFunSuite {
 
@@ -57,7 +57,7 @@ class DecommissionSummarySuite extends SparkFunSuite {
       totalSize = 2048L,
       deletedBlocks = 3
     )
-    val migrationInfo = MigrationInfo(System.nanoTime(), allBlocksMigrated = true, migrationStat)
+    val migrationInfo = MigrationInfo(MigrationComplete, System.nanoTime(), migrationStat)
 
     val summary = DecommissionSummary.create("Migration test")
     val completedSummary = summary.markCompleted(Some(migrationInfo))
@@ -88,7 +88,7 @@ class DecommissionSummarySuite extends SparkFunSuite {
       totalSize = 2048L, // 2KB
       deletedBlocks = 3
     )
-    val migrationInfo = MigrationInfo(System.nanoTime(), allBlocksMigrated = true, migrationStat)
+    val migrationInfo = MigrationInfo(MigrationComplete, System.nanoTime(), migrationStat)
 
     val startTime = System.currentTimeMillis()
     val summary = DecommissionSummary("Migration test", None, startTime)
@@ -125,7 +125,7 @@ class DecommissionSummarySuite extends SparkFunSuite {
   test("DecommissionSummary.createCompleted") {
     val startTime = System.currentTimeMillis() - 1000 // 1 second ago
     val migrationStat = MigrationStat(0, 512L, 10, 10, 512L, 0)
-    val migrationInfo = MigrationInfo(System.nanoTime(), allBlocksMigrated = true, migrationStat)
+    val migrationInfo = MigrationInfo(MigrationComplete, System.nanoTime(), migrationStat)
 
     val summary = DecommissionSummary.createCompleted(
       "Completed test",
@@ -144,8 +144,8 @@ class DecommissionSummarySuite extends SparkFunSuite {
 
   test("DecommissionSummary preserves existing migration info when marking completed") {
     val originalMigrationStat = MigrationStat(0, 256L, 5, 5, 256L, 0)
-    val originalMigrationInfo = MigrationInfo(System.nanoTime(),
-      allBlocksMigrated = true, originalMigrationStat)
+    val originalMigrationInfo = MigrationInfo(MigrationComplete, System.nanoTime(),
+      originalMigrationStat)
 
     val summary = DecommissionSummary.create("Test")
       .copy(migrationInfo = Some(originalMigrationInfo))
@@ -157,12 +157,12 @@ class DecommissionSummarySuite extends SparkFunSuite {
 
   test("DecommissionSummary replaces migration info when marking completed with new info") {
     val originalMigrationStat = MigrationStat(0, 256L, 5, 5, 256L, 0)
-    val originalMigrationInfo = MigrationInfo(System.nanoTime(),
-      allBlocksMigrated = true, originalMigrationStat)
+    val originalMigrationInfo = MigrationInfo(MigrationComplete, System.nanoTime(),
+      originalMigrationStat)
 
     val newMigrationStat = MigrationStat(0, 1024L, 20, 20, 1024L, 2)
-    val newMigrationInfo = MigrationInfo(System.nanoTime(),
-      allBlocksMigrated = true, newMigrationStat)
+    val newMigrationInfo = MigrationInfo(MigrationComplete, System.nanoTime(),
+      newMigrationStat)
 
     val summary = DecommissionSummary.create("Test")
       .copy(migrationInfo = Some(originalMigrationInfo))
@@ -173,9 +173,15 @@ class DecommissionSummarySuite extends SparkFunSuite {
     assert(completedSummary.migrationInfo.get !== originalMigrationInfo)
   }
 
+  test("ExecutorDecommission loss reason basic functionality") {
+    val lossReason = ExecutorDecommission(Some("fallbackhost"), "fallback reason")
+
+    assert(lossReason.message === "Executor decommission: fallback reason")
+  }
+
   test("ExecutorDecommission loss reason with DecommissionSummary") {
-    val migrationStat = MigrationStat(2, 800L, 8, 10, 1000L, 1)
-    val migrationInfo = MigrationInfo(System.nanoTime(), allBlocksMigrated = true, migrationStat)
+    val migrationStat = MigrationStat(1, 512L, 9, 10, 1024L, 0)
+    val migrationInfo = MigrationInfo(MigrationComplete, System.nanoTime(), migrationStat)
 
     val summary = DecommissionSummary.create("Loss reason test", Some("losshost"))
       .markCompleted(Some(migrationInfo))
