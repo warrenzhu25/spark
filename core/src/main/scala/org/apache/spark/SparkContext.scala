@@ -237,6 +237,7 @@ class SparkContext(config: SparkConf) extends Logging {
   private var _shuffleDriverComponents: ShuffleDriverComponents = _
   private var _plugins: Option[PluginContainer] = None
   private var _resourceProfileManager: ResourceProfileManager = _
+  private[spark] var _hangDetector: Option[DriverHangDetector] = None
 
   /* ------------------------------------------------------------------------------------- *
    | Accessors and public fields. These provide access to the internal state of the        |
@@ -699,6 +700,16 @@ class SparkContext(config: SparkConf) extends Logging {
     }
     appStatusSource.foreach(_env.metricsSystem.registerSource(_))
     _plugins.foreach(_.registerMetrics(applicationId))
+
+    // Start driver hang detector if enabled
+    _hangDetector =
+      if (_conf.get(DRIVER_HANG_DETECTION_ENABLED)) {
+        val detector = new DriverHangDetector(this)
+        detector.start()
+        Some(detector)
+      } else {
+        None
+      }
   } catch {
     case NonFatal(e) =>
       logError("Error initializing SparkContext.", e)
@@ -2289,6 +2300,9 @@ class SparkContext(config: SparkConf) extends Logging {
         _heartbeater.stop()
       }
       _heartbeater = null
+    }
+    Utils.tryLogNonFatalError {
+      _hangDetector.foreach(_.stop())
     }
     if (env != null && _heartbeatReceiver != null) {
       Utils.tryLogNonFatalError {

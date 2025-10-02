@@ -272,6 +272,31 @@ package object config {
       .intConf
       .createWithDefault(60)
 
+  private[spark] val DRIVER_HANG_DETECTION_ENABLED =
+    ConfigBuilder("spark.driver.hang.detection.enabled")
+      .doc("Whether to enable driver hang detection. When enabled, the driver will " +
+        "periodically take thread dumps of non-daemon threads and detect hangs by " +
+        "comparing consecutive dumps.")
+      .version("4.0.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  private[spark] val DRIVER_HANG_DETECTION_INTERVAL =
+    ConfigBuilder("spark.driver.hang.detection.interval")
+      .doc("Interval between thread dumps for hang detection.")
+      .version("4.0.0")
+      .timeConf(TimeUnit.MILLISECONDS)
+      .createWithDefaultString("60s")
+
+  private[spark] val DRIVER_HANG_DETECTION_THRESHOLD =
+    ConfigBuilder("spark.driver.hang.detection.threshold")
+      .doc("Number of consecutive identical thread dumps to trigger hang detection. " +
+        "Must be at least 2.")
+      .version("4.0.0")
+      .intConf
+      .checkValue(_ >= 2, "Hang detection threshold must be at least 2")
+      .createWithDefault(3)
+
   private[spark] val EXECUTOR_PROCESS_TREE_METRICS_ENABLED =
     ConfigBuilder("spark.executor.processTreeMetrics.enabled")
       .doc("Whether to collect process tree metrics (from the /proc filesystem) when collecting " +
