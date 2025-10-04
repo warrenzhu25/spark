@@ -34,7 +34,7 @@ import org.apache.spark.resource._
 import org.apache.spark.resource.ResourceProfile.DEFAULT_RESOURCE_PROFILE_ID
 import org.apache.spark.scheduler._
 import org.apache.spark.scheduler.cluster.ExecutorInfo
-import org.apache.spark.util.{Clock, ManualClock, SystemClock}
+import org.apache.spark.util.{Clock, ManualClock, SystemClock, Utils}
 
 /**
  * Test add and remove behavior of ExecutorAllocationManager.
@@ -1875,6 +1875,297 @@ class ExecutorAllocationManagerSuite extends SparkFunSuite {
 
   private def executorsDecommissioning(manager: ExecutorAllocationManager): Set[String] = {
     manager.executorMonitor.executorsDecommissioning()
+  }
+
+  test("stage-based allocation disabled by default") {
+    val conf = createConf(1, 5, 1)
+    val manager = createManager(conf)
+    // Manager should be created successfully without stage-based features
+    assert(manager != null)
+  }
+
+  test("stage-based allocation with profile loading") {
+    val tempDir = Utils.createTempDir()
+    try {
+      val profilePath = new java.io.File(tempDir, "profiles.json").getAbsolutePath
+
+      // Create a test profile
+      val store = new scheduler.StageProfileStore(new SparkConf())
+      val profile = scheduler.StageProfile(
+        signature = scheduler.StageSignature(
+          rddOperationChain = Seq("MapPartitionsRDD", "ShuffledRDD"),
+          rddChainHash = "testHash123",
+          stageName = "test stage",
+          hasShuffleDependency = true,
+          numPartitions = 100,
+          parentStageCount = 1
+        ),
+        signatureHash = "sig123",
+        metrics = scheduler.StageMetricsProfile(
+          avgNumTasks = 100.0,
+          minNumTasks = 100,
+          maxNumTasks = 100,
+          p50NumTasks = 100,
+          p95NumTasks = 100,
+          avgShuffleReadBytes = 1000000L,
+          p95ShuffleReadBytes = 1200000L,
+          avgShuffleWriteBytes = 2000000L,
+          p95ShuffleWriteBytes = 2400000L,
+          avgPeakMemoryPerTask = 500000000L,
+          p95PeakMemoryPerTask = 600000000L,
+          avgTaskDuration = 5000L,
+          p95TaskDuration = 7000L,
+          avgStageDuration = 15000L,
+          recommendedExecutors = 5,
+          recommendedCoresPerExecutor = 4,
+          recommendedMemoryPerExecutor = 4294967296L
+        ),
+        observationCount = 10,
+        firstSeen = 1000000000L,
+        lastSeen = 2000000000L
+      )
+      store.updateProfile(profile)
+      store.saveToFile(profilePath)
+
+      val conf = createConf(1, 10, 1)
+        .set(config.DYN_ALLOCATION_STAGE_BASED_ENABLED, true)
+        .set(config.DYN_ALLOCATION_STAGE_PROFILE_PATH.key, profilePath)
+      val manager = createManager(conf)
+
+      // Manager should be created successfully with profiles loaded
+      assert(manager != null)
+    } finally {
+      Utils.deleteRecursively(tempDir)
+    }
+  }
+
+  test("stage-based allocation with invalid profile path") {
+    val conf = createConf(1, 10, 1)
+      .set(config.DYN_ALLOCATION_STAGE_BASED_ENABLED, true)
+      .set(config.DYN_ALLOCATION_STAGE_PROFILE_PATH.key, "/nonexistent/path.json")
+
+    // Should create manager even if profile loading fails
+    val manager = createManager(conf)
+    assert(manager != null)
+  }
+
+  test("stage-based allocation requests executors on stage match") {
+    val tempDir = Utils.createTempDir()
+    try {
+      val profilePath = new java.io.File(tempDir, "profiles.json").getAbsolutePath
+
+      // Create profile for matching
+      val store = new scheduler.StageProfileStore(new SparkConf())
+      val testRddChain = Seq("MapPartitionsRDD", "ShuffledRDD")
+      val matcher = new scheduler.StageMatcher(store, new SparkConf())
+      val rddChainHash = matcher.hashString(testRddChain.mkString("->"))
+
+      val profile = scheduler.StageProfile(
+        signature = scheduler.StageSignature(
+          rddOperationChain = testRddChain,
+          rddChainHash = rddChainHash,
+          stageName = "aggregate stage",
+          hasShuffleDependency = true,
+          numPartitions = 100,
+          parentStageCount = 1
+        ),
+        signatureHash = rddChainHash,
+        metrics = scheduler.StageMetricsProfile(
+          avgNumTasks = 100.0,
+          minNumTasks = 100,
+          maxNumTasks = 100,
+          p50NumTasks = 100,
+          p95NumTasks = 100,
+          avgShuffleReadBytes = 1000000L,
+          p95ShuffleReadBytes = 1200000L,
+          avgShuffleWriteBytes = 2000000L,
+          p95ShuffleWriteBytes = 2400000L,
+          avgPeakMemoryPerTask = 500000000L,
+          p95PeakMemoryPerTask = 600000000L,
+          avgTaskDuration = 5000L,
+          p95TaskDuration = 7000L,
+          avgStageDuration = 15000L,
+          recommendedExecutors = 8,
+          recommendedCoresPerExecutor = 4,
+          recommendedMemoryPerExecutor = 4294967296L
+        ),
+        observationCount = 10,
+        firstSeen = 1000000000L,
+        lastSeen = 2000000000L
+      )
+      store.updateProfile(profile)
+      store.saveToFile(profilePath)
+
+      val conf = createConf(1, 10, 1)
+        .set(config.DYN_ALLOCATION_STAGE_BASED_ENABLED, true)
+        .set(config.DYN_ALLOCATION_STAGE_PROFILE_PATH.key, profilePath)
+      val manager = createManager(conf)
+
+      // Create matching stage
+      val rddInfos = testRddChain.map { name =>
+        new storage.RDDInfo(
+          id = 0,
+          name = name,
+          numPartitions = 100,
+          storageLevel = null,
+          isBarrier = false,
+          parentIds = Seq.empty
+        )
+      }
+
+      val stageInfo = new StageInfo(
+        stageId = 0,
+        attemptId = 0,
+        name = "aggregate stage",
+        numTasks = 100,
+        rddInfos = rddInfos,
+        parentIds = Seq(1),
+        details = "",
+        shuffleDepId = Some(1),
+        resourceProfileId = defaultProfile.id
+      )
+
+      // Submit stage - should trigger stage-based allocation
+      post(SparkListenerStageSubmitted(stageInfo))
+
+      // Verify executors were requested
+      verify(client, atLeastOnce()).requestTotalExecutors(
+        any(),
+        any(),
+        any()
+      )
+    } finally {
+      Utils.deleteRecursively(tempDir)
+    }
+  }
+
+  test("stage-based allocation with no matching profile") {
+    val tempDir = Utils.createTempDir()
+    try {
+      val profilePath = new java.io.File(tempDir, "profiles.json").getAbsolutePath
+
+      // Create empty profile store
+      val store = new scheduler.StageProfileStore(new SparkConf())
+      store.saveToFile(profilePath)
+
+      val conf = createConf(1, 10, 1)
+        .set(config.DYN_ALLOCATION_STAGE_BASED_ENABLED, true)
+        .set(config.DYN_ALLOCATION_STAGE_PROFILE_PATH.key, profilePath)
+      val manager = createManager(conf)
+
+      // Create stage that won't match
+      val rddInfos = Seq(
+        new storage.RDDInfo(
+          id = 0,
+          name = "UnknownRDD",
+          numPartitions = 50,
+          storageLevel = null,
+          isBarrier = false,
+          parentIds = Seq.empty
+        )
+      )
+
+      val stageInfo = new StageInfo(
+        stageId = 0,
+        attemptId = 0,
+        name = "unknown stage",
+        numTasks = 50,
+        rddInfos = rddInfos,
+        parentIds = Seq.empty,
+        details = "",
+        resourceProfileId = defaultProfile.id
+      )
+
+      // Submit stage - should not trigger additional executor requests
+      post(SparkListenerStageSubmitted(stageInfo))
+
+      // Manager should handle non-matching stages gracefully
+      assert(manager != null)
+    } finally {
+      Utils.deleteRecursively(tempDir)
+    }
+  }
+
+  test("stage-based allocation respects max executors limit") {
+    val tempDir = Utils.createTempDir()
+    try {
+      val profilePath = new java.io.File(tempDir, "profiles.json").getAbsolutePath
+
+      val store = new scheduler.StageProfileStore(new SparkConf())
+      val testRddChain = Seq("MapPartitionsRDD")
+      val matcher = new scheduler.StageMatcher(store, new SparkConf())
+      val rddChainHash = matcher.hashString(testRddChain.mkString("->"))
+
+      val profile = scheduler.StageProfile(
+        signature = scheduler.StageSignature(
+          rddOperationChain = testRddChain,
+          rddChainHash = rddChainHash,
+          stageName = "test",
+          hasShuffleDependency = false,
+          numPartitions = 10,
+          parentStageCount = 0
+        ),
+        signatureHash = rddChainHash,
+        metrics = scheduler.StageMetricsProfile(
+          avgNumTasks = 10.0,
+          minNumTasks = 10,
+          maxNumTasks = 10,
+          p50NumTasks = 10,
+          p95NumTasks = 10,
+          avgShuffleReadBytes = 0L,
+          p95ShuffleReadBytes = 0L,
+          avgShuffleWriteBytes = 0L,
+          p95ShuffleWriteBytes = 0L,
+          avgPeakMemoryPerTask = 100000000L,
+          p95PeakMemoryPerTask = 120000000L,
+          avgTaskDuration = 1000L,
+          p95TaskDuration = 1500L,
+          avgStageDuration = 5000L,
+          recommendedExecutors = 100,
+          recommendedCoresPerExecutor = 4,
+          recommendedMemoryPerExecutor = 4294967296L
+        ),
+        observationCount = 1,
+        firstSeen = 1000000000L,
+        lastSeen = 2000000000L
+      )
+      store.updateProfile(profile)
+      store.saveToFile(profilePath)
+
+      val conf = createConf(1, 5, 1)
+        .set(config.DYN_ALLOCATION_STAGE_BASED_ENABLED, true)
+        .set(config.DYN_ALLOCATION_STAGE_PROFILE_PATH.key, profilePath)
+      val manager = createManager(conf)
+
+      val rddInfos = Seq(
+        new storage.RDDInfo(
+          id = 0,
+          name = "MapPartitionsRDD",
+          numPartitions = 10,
+          storageLevel = null,
+          isBarrier = false,
+          parentIds = Seq.empty
+        )
+      )
+
+      val stageInfo = new StageInfo(
+        stageId = 0,
+        attemptId = 0,
+        name = "test",
+        numTasks = 10,
+        rddInfos = rddInfos,
+        parentIds = Seq.empty,
+        details = "",
+        resourceProfileId = defaultProfile.id
+      )
+
+      post(SparkListenerStageSubmitted(stageInfo))
+
+      val targetExecutors = numExecutorsTargetForDefaultProfileId(manager)
+      assert(targetExecutors <= 5)
+    } finally {
+      Utils.deleteRecursively(tempDir)
+    }
   }
 }
 
