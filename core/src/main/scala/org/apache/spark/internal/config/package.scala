@@ -667,6 +667,71 @@ package object config {
       .version("1.2.0")
       .fallbackConf(DYN_ALLOCATION_SCHEDULER_BACKLOG_TIMEOUT)
 
+  private[spark] val DYN_ALLOCATION_STAGE_BASED_ENABLED =
+    ConfigBuilder("spark.dynamicAllocation.stageBased.enabled")
+      .doc("Enable stage-based dynamic allocation using historical stage profiles. " +
+        "When enabled, the executor allocation manager will attempt to match submitted " +
+        "stages against historical profiles and proactively request executors based on " +
+        "predicted resource requirements.")
+      .version("4.0.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  private[spark] val DYN_ALLOCATION_STAGE_PROFILE_PATH =
+    ConfigBuilder("spark.dynamicAllocation.stageProfile.path")
+      .doc("Path to JSON file(s) containing historical stage profiles. " +
+        "Supports local file:// or HDFS paths. Multiple files can be specified " +
+        "as a comma-separated list. Profiles are used for stage-based allocation " +
+        "when spark.dynamicAllocation.stageBased.enabled is true.")
+      .version("4.0.0")
+      .stringConf
+      .createOptional
+
+  private[spark] val DYN_ALLOCATION_STAGE_MATCHING_CONFIDENCE_THRESHOLD =
+    ConfigBuilder("spark.dynamicAllocation.stageMatching.confidenceThreshold")
+      .doc("Minimum confidence score (0.0-1.0) required for stage matching. " +
+        "Higher values require more exact matches, lower values allow more fuzzy matching. " +
+        "Default 0.75 provides a good balance between precision and recall.")
+      .version("4.0.0")
+      .doubleConf
+      .checkValue(v => v >= 0.0 && v <= 1.0, "Must be between 0.0 and 1.0")
+      .createWithDefault(0.75)
+
+  private[spark] val DYN_ALLOCATION_STAGE_PROFILE_LEARNING_ENABLED =
+    ConfigBuilder("spark.dynamicAllocation.stageProfile.learning.enabled")
+      .doc("Enable collecting stage profiles from the current application. " +
+        "When enabled, completed stages will be analyzed and profiles can be exported " +
+        "for future use.")
+      .version("4.0.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  private[spark] val DYN_ALLOCATION_STAGE_PROFILE_EXPORT_PATH =
+    ConfigBuilder("spark.dynamicAllocation.stageProfile.export.path")
+      .doc("Path to export collected stage profiles on application completion. " +
+        "Only used when spark.dynamicAllocation.stageProfile.learning.enabled is true. " +
+        "Supports local file:// or HDFS paths.")
+      .version("4.0.0")
+      .stringConf
+      .createOptional
+
+  private[spark] val DYN_ALLOCATION_STAGE_MATCHING_USE_SQL_PLAN =
+    ConfigBuilder("spark.dynamicAllocation.stageMatching.useSQLPlan")
+      .doc("Use SQL execution plan for stage matching. Recommended for SQL workloads. " +
+        "When enabled, SQL physical plan structure will be used as the primary matching " +
+        "signal for stages that are part of SQL queries.")
+      .version("4.0.0")
+      .booleanConf
+      .createWithDefault(true)
+
+  private[spark] val DYN_ALLOCATION_STAGE_MATCHING_USE_RDD_CHAIN =
+    ConfigBuilder("spark.dynamicAllocation.stageMatching.useRDDChain")
+      .doc("Use RDD operation chain for stage matching. Recommended for RDD API workloads. " +
+        "When enabled, RDD lineage will be used for matching stages.")
+      .version("4.0.0")
+      .booleanConf
+      .createWithDefault(true)
+
   private[spark] val LEGACY_LOCALITY_WAIT_RESET =
     ConfigBuilder("spark.locality.wait.legacyResetOnTaskLaunch")
     .doc("Whether to use the legacy behavior of locality wait, which resets the delay timer " +
