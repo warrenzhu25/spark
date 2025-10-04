@@ -308,6 +308,187 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext
     assert(!failedTaskSet)
   }
 
+  test("Hybrid bin-pack: exact match - tasks equal RR capacity") {
+    val taskScheduler = setupScheduler(
+      config.SCHEDULER_TASK_ASSIGN_POLICY.key -> TaskAssignPolicy.BIN_PACK.toString,
+      config.DYN_ALLOCATION_MIN_EXECUTORS.key -> "5")
+    val numFreeCores = 3
+    val workerOffers = IndexedSeq(
+      WorkerOffer("executor0", "host0", numFreeCores),
+      WorkerOffer("executor1", "host1", numFreeCores),
+      WorkerOffer("executor2", "host2", numFreeCores),
+      WorkerOffer("executor3", "host3", numFreeCores),
+      WorkerOffer("executor4", "host4", numFreeCores),
+      WorkerOffer("executor5", "host5", numFreeCores))
+    val numTasks = 15 // Exactly 3 tasks per RR executor
+    val taskSet = FakeTask.createTaskSet(numTasks)
+    taskScheduler.submitTasks(taskSet)
+    val taskDescriptions = taskScheduler.resourceOffers(workerOffers).flatten
+    assert(numTasks === taskDescriptions.length)
+    // Each of executor0-4 gets exactly 3 tasks (fills all cores)
+    // executor5 remains idle
+    val tasksByExecutor = taskDescriptions.groupBy(_.executorId).mapValues(_.size)
+    assert(tasksByExecutor.size == 5,
+      s"Expected 5 executors used, got ${tasksByExecutor.size}")
+    assert(tasksByExecutor("executor0") == 3 && tasksByExecutor("executor1") == 3 &&
+      tasksByExecutor("executor2") == 3 && tasksByExecutor("executor3") == 3 &&
+      tasksByExecutor("executor4") == 3,
+      s"Expected each of first 5 executors to have 3 tasks, got ${tasksByExecutor}")
+    assert(!tasksByExecutor.contains("executor5"),
+      s"executor5 should be idle but got ${tasksByExecutor.get("executor5")}")
+    assert(!failedTaskSet)
+  }
+
+  test("Hybrid bin-pack: overflow - tasks exceed RR capacity") {
+    val taskScheduler = setupScheduler(
+      config.SCHEDULER_TASK_ASSIGN_POLICY.key -> TaskAssignPolicy.BIN_PACK.toString,
+      config.DYN_ALLOCATION_MIN_EXECUTORS.key -> "3")
+    val numFreeCores = 4
+    val workerOffers = IndexedSeq(
+      WorkerOffer("executor0", "host0", numFreeCores),
+      WorkerOffer("executor1", "host1", numFreeCores),
+      WorkerOffer("executor2", "host2", numFreeCores),
+      WorkerOffer("executor3", "host3", numFreeCores),
+      WorkerOffer("executor4", "host4", numFreeCores))
+    val numTasks = 20 // RR capacity = 12 (3 executors * 4 cores), total capacity = 20
+    val taskSet = FakeTask.createTaskSet(numTasks)
+    taskScheduler.submitTasks(taskSet)
+    val taskDescriptions = taskScheduler.resourceOffers(workerOffers).flatten
+    assert(numTasks === taskDescriptions.length)
+    // First 3 executors (RR) get 4 tasks each (12 total)
+    // Remaining 8 tasks bin-pack into executor3-4
+    val tasksByExecutor = taskDescriptions.groupBy(_.executorId).mapValues(_.size)
+    assert(tasksByExecutor("executor0") == 4 && tasksByExecutor("executor1") == 4 &&
+      tasksByExecutor("executor2") == 4,
+      s"Expected each of first 3 executors to have 4 tasks, got ${tasksByExecutor}")
+    // Bin-pack executors should handle overflow
+    val binPackTasks = tasksByExecutor.getOrElse("executor3", 0) +
+      tasksByExecutor.getOrElse("executor4", 0)
+    assert(binPackTasks == 8,
+      s"Expected 8 tasks on bin-pack executors, got ${binPackTasks}")
+    assert(!failedTaskSet)
+  }
+
+  test("Hybrid bin-pack: single RR executor") {
+    val taskScheduler = setupScheduler(
+      config.SCHEDULER_TASK_ASSIGN_POLICY.key -> TaskAssignPolicy.BIN_PACK.toString,
+      config.DYN_ALLOCATION_MIN_EXECUTORS.key -> "1")
+    val numFreeCores = 4
+    val workerOffers = IndexedSeq(
+      WorkerOffer("executor0", "host0", numFreeCores),
+      WorkerOffer("executor1", "host1", numFreeCores),
+      WorkerOffer("executor2", "host2", numFreeCores))
+    val numTasks = 10
+    val taskSet = FakeTask.createTaskSet(numTasks)
+    taskScheduler.submitTasks(taskSet)
+    val taskDescriptions = taskScheduler.resourceOffers(workerOffers).flatten
+    assert(numTasks === taskDescriptions.length)
+    // executor0 (RR) gets 4 tasks, remaining 6 bin-pack into executor1-2
+    val tasksByExecutor = taskDescriptions.groupBy(_.executorId).mapValues(_.size)
+    assert(tasksByExecutor("executor0") == 4,
+      s"Expected executor0 to have 4 tasks, got ${tasksByExecutor.get("executor0")}")
+    val binPackTasks = tasksByExecutor.getOrElse("executor1", 0) +
+      tasksByExecutor.getOrElse("executor2", 0)
+    assert(binPackTasks == 6,
+      s"Expected 6 tasks on bin-pack executors, got ${binPackTasks}")
+    assert(!failedTaskSet)
+  }
+
+  test("Hybrid bin-pack: all executors are RR (minExecutors >= total)") {
+    val taskScheduler = setupScheduler(
+      config.SCHEDULER_TASK_ASSIGN_POLICY.key -> TaskAssignPolicy.BIN_PACK.toString,
+      config.DYN_ALLOCATION_MIN_EXECUTORS.key -> "10")
+    val numFreeCores = 4
+    val workerOffers = IndexedSeq(
+      WorkerOffer("executor0", "host0", numFreeCores),
+      WorkerOffer("executor1", "host1", numFreeCores),
+      WorkerOffer("executor2", "host2", numFreeCores),
+      WorkerOffer("executor3", "host3", numFreeCores),
+      WorkerOffer("executor4", "host4", numFreeCores))
+    val numTasks = 12
+    val taskSet = FakeTask.createTaskSet(numTasks)
+    taskScheduler.submitTasks(taskSet)
+    val taskDescriptions = taskScheduler.resourceOffers(workerOffers).flatten
+    assert(numTasks === taskDescriptions.length)
+    // All executors are RR, so pure round-robin distribution
+    // 12 tasks / 5 executors = 2 tasks per executor (first pass)
+    // + 2 more tasks distributed to first 2 executors (second pass)
+    val tasksByExecutor = taskDescriptions.groupBy(_.executorId).mapValues(_.size)
+    assert(tasksByExecutor.size == 5,
+      s"Expected all 5 executors used, got ${tasksByExecutor.size}")
+    // Check round-robin distribution pattern
+    val taskCounts = tasksByExecutor.values.toSeq.sorted
+    assert(taskCounts == Seq(2, 2, 2, 3, 3),
+      s"Expected round-robin distribution [2,2,2,3,3], got ${taskCounts}")
+    assert(!failedTaskSet)
+  }
+
+  test("Hybrid bin-pack: uneven cores across executors") {
+    val taskScheduler = setupScheduler(
+      config.SCHEDULER_TASK_ASSIGN_POLICY.key -> TaskAssignPolicy.BIN_PACK.toString,
+      config.DYN_ALLOCATION_MIN_EXECUTORS.key -> "3")
+    val workerOffers = IndexedSeq(
+      WorkerOffer("executor0", "host0", 2),
+      WorkerOffer("executor1", "host1", 4),
+      WorkerOffer("executor2", "host2", 3),
+      WorkerOffer("executor3", "host3", 4),
+      WorkerOffer("executor4", "host4", 4))
+    val numTasks = 17 // Total capacity: 2+4+3+4+4 = 17 cores
+    val taskSet = FakeTask.createTaskSet(numTasks)
+    taskScheduler.submitTasks(taskSet)
+    val taskDescriptions = taskScheduler.resourceOffers(workerOffers).flatten
+    assert(numTasks === taskDescriptions.length)
+    // First 3 executors (RR) get tasks distributed by round-robin
+    // executor0: 2 cores, executor1: 4 cores, executor2: 3 cores (total 9)
+    val tasksByExecutor = taskDescriptions.groupBy(_.executorId).mapValues(_.size)
+    assert(tasksByExecutor("executor0") == 2,
+      s"Expected executor0 to have 2 tasks, got ${tasksByExecutor.get("executor0")}")
+    assert(tasksByExecutor("executor1") == 4,
+      s"Expected executor1 to have 4 tasks, got ${tasksByExecutor.get("executor1")}")
+    assert(tasksByExecutor("executor2") == 3,
+      s"Expected executor2 to have 3 tasks, got ${tasksByExecutor.get("executor2")}")
+    // Remaining 8 tasks bin-pack into executor3-4
+    val binPackTasks = tasksByExecutor.getOrElse("executor3", 0) +
+      tasksByExecutor.getOrElse("executor4", 0)
+    assert(binPackTasks == 8,
+      s"Expected 8 tasks on bin-pack executors, got ${binPackTasks}")
+    assert(!failedTaskSet)
+  }
+
+  test("Hybrid bin-pack: large scale (80 tasks, 10 min executors, 20 total)") {
+    val taskScheduler = setupScheduler(
+      config.SCHEDULER_TASK_ASSIGN_POLICY.key -> TaskAssignPolicy.BIN_PACK.toString,
+      config.DYN_ALLOCATION_MIN_EXECUTORS.key -> "10")
+    val numFreeCores = 4
+    val workerOffers = (0 until 20).map { i =>
+      WorkerOffer(s"executor$i", s"host$i", numFreeCores)
+    }.toIndexedSeq
+    val numTasks = 80 // Total capacity: 20 executors * 4 cores = 80
+    val taskSet = FakeTask.createTaskSet(numTasks)
+    taskScheduler.submitTasks(taskSet)
+    val taskDescriptions = taskScheduler.resourceOffers(workerOffers).flatten
+    assert(numTasks === taskDescriptions.length)
+    // First 10 executors (RR) should each get 4 tasks (40 total)
+    // Remaining 40 tasks should bin-pack into executor10-19
+    val tasksByExecutor = taskDescriptions.groupBy(_.executorId).mapValues(_.size)
+    val rrTaskCount = (0 until 10).map { i =>
+      tasksByExecutor.getOrElse(s"executor$i", 0)
+    }.sum
+    assert(rrTaskCount == 40,
+      s"Expected 40 tasks on RR executors, got ${rrTaskCount}")
+    val binPackTaskCount = (10 until 20).map { i =>
+      tasksByExecutor.getOrElse(s"executor$i", 0)
+    }.sum
+    assert(binPackTaskCount == 40,
+      s"Expected 40 tasks on bin-pack executors, got ${binPackTaskCount}")
+    // Verify each RR executor got exactly 4 tasks (filled all cores)
+    (0 until 10).foreach { i =>
+      assert(tasksByExecutor(s"executor$i") == 4,
+        s"Expected executor$i to have 4 tasks, got ${tasksByExecutor.get(s"executor$i")}")
+    }
+    assert(!failedTaskSet)
+  }
+
   test("Scheduler correctly accounts for multiple CPUs per task") {
     val taskCpus = 2
     val taskScheduler = setupSchedulerWithMaster(
