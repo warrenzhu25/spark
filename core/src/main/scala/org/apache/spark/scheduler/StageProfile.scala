@@ -120,6 +120,69 @@ case class StageMetricsProfile(
     @JsonProperty recommendedMemoryPerExecutor: Long)
 
 /**
+ * Companion object for StageMetricsProfile with executor calculation utilities.
+ */
+object StageMetricsProfile {
+  /**
+   * Calculate recommended executors from historical metrics.
+   *
+   * Uses a multi-factor approach considering:
+   * 1. Parallelism (task count / cores available)
+   * 2. Task duration (scale up for slow tasks)
+   * 3. Shuffle I/O intensity (scale up for shuffle-heavy stages)
+   *
+   * @param metrics Historical stage metrics
+   * @param coresPerExecutor Cores per executor (from spark.executor.cores)
+   * @param tasksPerCore Target tasks per core (default 2 for good CPU utilization)
+   * @param targetTaskDurationMs Target task duration in ms (default 30000 = 30s)
+   * @param shuffleThresholdBytes Shuffle bytes per task threshold for I/O scaling (default 1GB)
+   * @param maxExecutors Upper bound from spark.dynamicAllocation.maxExecutors
+   * @return Recommended number of executors
+   */
+  def calculateRecommendedExecutors(
+      metrics: StageMetricsProfile,
+      coresPerExecutor: Int,
+      tasksPerCore: Int = 2,
+      targetTaskDurationMs: Long = 30000,
+      shuffleThresholdBytes: Long = 1024 * 1024 * 1024,
+      maxExecutors: Int = Int.MaxValue): Int = {
+
+    // 1. Parallelism baseline: how many executors needed to run all tasks
+    val parallelismExecutors =
+      math.ceil(metrics.avgNumTasks / (coresPerExecutor * tasksPerCore).toDouble).toInt
+
+    // 2. Duration-based adjustment: scale up if tasks are slow
+    val durationMultiplier = if (metrics.avgTaskDuration > targetTaskDurationMs) {
+      // Scale up proportionally, but cap at 3x to avoid over-allocation
+      math.min(metrics.avgTaskDuration.toDouble / targetTaskDurationMs, 3.0)
+    } else {
+      1.0
+    }
+
+    // 3. Shuffle I/O adjustment: scale up for shuffle-intensive stages
+    val shuffleBytesPerTask = if (metrics.avgNumTasks > 0) {
+      (metrics.avgShuffleReadBytes + metrics.avgShuffleWriteBytes) / metrics.avgNumTasks
+    } else {
+      0L
+    }
+
+    val shuffleMultiplier = if (shuffleBytesPerTask > shuffleThresholdBytes) {
+      // Add 20% more executors per GB over threshold, capped at 50% increase
+      val extraGBs = (shuffleBytesPerTask - shuffleThresholdBytes).toDouble / shuffleThresholdBytes
+      1.0 + math.min(extraGBs * 0.2, 0.5)
+    } else {
+      1.0
+    }
+
+    // 4. Combine all factors
+    val recommended = (parallelismExecutors * durationMultiplier * shuffleMultiplier).toInt
+
+    // 5. Apply safety bounds: at least 1, at most maxExecutors
+    math.max(1, math.min(recommended, maxExecutors))
+  }
+}
+
+/**
  * Historical performance profile for a stage pattern.
  *
  * Represents aggregated data from multiple observations of stages with the same signature.

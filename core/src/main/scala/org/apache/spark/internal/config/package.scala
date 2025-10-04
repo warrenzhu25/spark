@@ -732,6 +732,33 @@ package object config {
       .booleanConf
       .createWithDefault(true)
 
+  private[spark] val DYN_ALLOCATION_STAGE_TASKS_PER_CORE =
+    ConfigBuilder("spark.dynamicAllocation.stage.tasksPerCore")
+      .doc("Target number of tasks per core for stage-based executor allocation calculations. " +
+        "Higher values mean more tasks running concurrently on each core. Default is 2.")
+      .version("4.0.0")
+      .intConf
+      .checkValue(_ > 0, "Tasks per core must be positive")
+      .createWithDefault(2)
+
+  private[spark] val DYN_ALLOCATION_STAGE_TARGET_TASK_DURATION =
+    ConfigBuilder("spark.dynamicAllocation.stage.targetTaskDuration")
+      .doc("Target task duration in milliseconds for stage-based executor allocation. " +
+        "Stages with tasks longer than this will get more executors allocated. Default 30s.")
+      .version("4.0.0")
+      .timeConf(TimeUnit.MILLISECONDS)
+      .checkValue(_ > 0, "Target task duration must be positive")
+      .createWithDefault(30000)
+
+  private[spark] val DYN_ALLOCATION_STAGE_SHUFFLE_THRESHOLD =
+    ConfigBuilder("spark.dynamicAllocation.stage.shuffleThreshold")
+      .doc("Shuffle bytes per task threshold for triggering I/O-based executor scaling. " +
+        "Stages exceeding this threshold will get additional executors. Default 1GB.")
+      .version("4.0.0")
+      .bytesConf(ByteUnit.BYTE)
+      .checkValue(_ > 0, "Shuffle threshold must be positive")
+      .createWithDefault(1024 * 1024 * 1024)
+
   private[spark] val LEGACY_LOCALITY_WAIT_RESET =
     ConfigBuilder("spark.locality.wait.legacyResetOnTaskLaunch")
     .doc("Whether to use the legacy behavior of locality wait, which resets the delay timer " +

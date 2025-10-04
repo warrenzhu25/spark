@@ -76,6 +76,9 @@ private[spark] class StageProfileStore(conf: SparkConf) extends Logging {
   /**
    * Load stage profiles from a JSON string.
    *
+   * Automatically recalculates recommendedExecutors if not present or zero,
+   * using current Spark configuration.
+   *
    * @param json JSON string containing a StageProfileCollection
    * @return Sequence of loaded StageProfile objects
    * @throws IOException if JSON parsing fails
@@ -84,7 +87,39 @@ private[spark] class StageProfileStore(conf: SparkConf) extends Logging {
     try {
       val collection = mapper.readValue(json, classOf[StageProfileCollection])
       collection.profiles.foreach { profile =>
-        profiles.put(profile.signatureHash, profile)
+        // Recalculate recommended executors if zero or missing
+        val finalProfile = if (profile.metrics.recommendedExecutors <= 0) {
+          val coresPerExecutor = conf.get(org.apache.spark.internal.config.EXECUTOR_CORES)
+          val tasksPerCore =
+            conf.get(org.apache.spark.internal.config.DYN_ALLOCATION_STAGE_TASKS_PER_CORE)
+          val targetDuration =
+            conf.get(org.apache.spark.internal.config.DYN_ALLOCATION_STAGE_TARGET_TASK_DURATION)
+          val shuffleThreshold =
+            conf.get(org.apache.spark.internal.config.DYN_ALLOCATION_STAGE_SHUFFLE_THRESHOLD)
+          val maxExecutors =
+            conf.get(org.apache.spark.internal.config.DYN_ALLOCATION_MAX_EXECUTORS)
+
+          val recommended = StageMetricsProfile.calculateRecommendedExecutors(
+            profile.metrics,
+            coresPerExecutor,
+            tasksPerCore,
+            targetDuration,
+            shuffleThreshold,
+            maxExecutors
+          )
+
+          logInfo(s"Calculated recommendedExecutors=$recommended for " +
+            s"profile ${profile.signatureHash}")
+
+          profile.copy(metrics = profile.metrics.copy(
+            recommendedExecutors = recommended,
+            recommendedCoresPerExecutor = coresPerExecutor
+          ))
+        } else {
+          profile
+        }
+
+        profiles.put(finalProfile.signatureHash, finalProfile)
       }
       collection.profiles
     } catch {
