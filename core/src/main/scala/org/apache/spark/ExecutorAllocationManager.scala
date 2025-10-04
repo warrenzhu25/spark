@@ -180,6 +180,32 @@ private[spark] class ExecutorAllocationManager(
   // ResourceProfile id to Host to possible task running on it, used for executor placement.
   private var rpIdToHostToLocalTaskCount: Map[Int, Map[String, Int]] = Map.empty
 
+  // Stage-based allocation components (optional, only if enabled)
+  private val stageBasedEnabled = conf.get(DYN_ALLOCATION_STAGE_BASED_ENABLED)
+
+  private val stageProfileStore: Option[StageProfileStore] = if (stageBasedEnabled) {
+    val store = new StageProfileStore(conf)
+
+    // Load profiles from external file if configured
+    conf.get(DYN_ALLOCATION_STAGE_PROFILE_PATH).foreach { path =>
+      try {
+        // Support comma-separated paths
+        path.split(",").map(_.trim).foreach { singlePath =>
+          logInfo(s"Loading stage profiles from $singlePath")
+          store.loadFromFile(singlePath)
+        }
+        logInfo(s"Loaded ${store.size} stage profiles")
+      } catch {
+        case NonFatal(e) =>
+          logWarning(s"Failed to load stage profiles from $path", e)
+      }
+    }
+    Some(store)
+  } else None
+
+  private val stageMatcher: Option[StageMatcher] =
+    stageProfileStore.map(store => new StageMatcher(store, conf))
+
   /**
    * Verify that the settings specified through the config are valid.
    * If not, throw an appropriate exception.
@@ -487,6 +513,60 @@ private[spark] class ExecutorAllocationManager(
   }
 
   /**
+   * Try to match the submitted stage against historical profiles and proactively
+   * request executors if a match is found.
+   *
+   * @param stageInfo The StageInfo of the submitted stage
+   * @param rpId The ResourceProfile id for this stage
+   */
+  private def tryStageBasedAllocation(stageInfo: StageInfo, rpId: Int): Unit = {
+    stageMatcher.foreach { matcher =>
+      try {
+        // Try to match the stage
+        // Note: SQL plan extraction would need to be done at SQL layer, not here
+        // For now we match based on RDD chain and stage structure
+        matcher.matchStage(stageInfo, sqlPlan = None) match {
+          case Some((profile, confidence)) =>
+            logInfo(s"Stage ${stageInfo.stageId} matched with profile " +
+              s"(confidence: ${confidence * 100}%). " +
+              s"Recommended executors: ${profile.metrics.recommendedExecutors}")
+
+            val recommendedExecutors = profile.metrics.recommendedExecutors
+            val currentTarget = numExecutorsTargetPerResourceProfileId.getOrElse(rpId, 0)
+            val currentActive = executorMonitor.executorCountWithResourceProfile(rpId)
+
+            // Proactively request more executors if the profile recommends it
+            if (recommendedExecutors > currentTarget || recommendedExecutors > currentActive) {
+              val targetExecutors = math.min(
+                math.max(recommendedExecutors, currentTarget),
+                maxNumExecutors
+              )
+
+              if (targetExecutors > currentTarget) {
+                numExecutorsTargetPerResourceProfileId(rpId) = targetExecutors
+                logInfo(s"Proactively requesting $targetExecutors executors based on " +
+                  s"stage profile for stage ${stageInfo.stageId}")
+
+                // Request executors immediately
+                client.requestTotalExecutors(
+                  numExecutorsTargetPerResourceProfileId.toMap,
+                  numLocalityAwareTasksPerResourceProfileId.toMap,
+                  rpIdToHostToLocalTaskCount
+                )
+              }
+            }
+
+          case None =>
+            logDebug(s"No profile match found for stage ${stageInfo.stageId}")
+        }
+      } catch {
+        case NonFatal(e) =>
+          logWarning(s"Failed to perform stage-based allocation for stage ${stageInfo.stageId}", e)
+      }
+    }
+  }
+
+  /**
    * Update the target number of executors and figure out how many to add.
    * If the cap on the number of executors is reached, give up and reset the
    * number of executors to add next round instead of continuing to double it.
@@ -690,6 +770,9 @@ private[spark] class ExecutorAllocationManager(
         resourceProfileIdToStageAttempt.getOrElseUpdate(
           profId, new mutable.HashSet[StageAttempt]) += stageAttempt
         numExecutorsToAddPerResourceProfileId.getOrElseUpdate(profId, 1)
+
+        // Try stage-based allocation if enabled
+        tryStageBasedAllocation(stageSubmitted.stageInfo, profId)
 
         // Compute the number of tasks requested by the stage on each host
         var numTasksPending = 0
