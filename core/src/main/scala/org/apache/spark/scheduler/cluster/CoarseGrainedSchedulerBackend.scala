@@ -462,7 +462,20 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
               ExecutorKilled
             } else if (decommissionInfoOpt.isDefined) {
               val decommissionInfo = decommissionInfoOpt.get
-              ExecutorDecommission(decommissionInfo.workerHost, decommissionInfo.message)
+              // If executor sent ExecutorDecommissionFinished, combine both messages
+              reason match {
+                case finished: ExecutorDecommissionFinished =>
+                  // Combine: original driver message + executor's detailed message
+                  val combinedMessage = s"${decommissionInfo.message} - ${finished.reason}"
+                  val enrichedSummary = finished.summary.map(
+                    _.copy(message = decommissionInfo.message))
+                  ExecutorDecommissionFinished(
+                    decommissionInfo.workerHost.orElse(finished.workerHost),
+                    combinedMessage,
+                    enrichedSummary)
+                case _ =>
+                  ExecutorDecommission(decommissionInfo.workerHost, decommissionInfo.message)
+              }
             } else {
               reason
             }

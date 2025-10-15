@@ -190,7 +190,9 @@ class BlockManagerDecommissionIntegrationSuite extends SparkFunSuite with LocalS
 
       override def onExecutorRemoved(execRemoved: SparkListenerExecutorRemoved): Unit = {
         executorRemovedSem.release()
-        if (execRemoved.reason == ExecutorDecommission.msgPrefix + "test msg 0") {
+        // Expect combined message: original message + executor's detailed finish message
+        if (execRemoved.reason.startsWith(ExecutorDecommissionFinished.msgPrefix) &&
+            execRemoved.reason.contains("test msg 0")) {
           removeReasonValidated = true
         }
       }

@@ -516,6 +516,65 @@ class CoarseGrainedSchedulerBackendSuite extends SparkFunSuite with LocalSparkCo
     assert(mockEndpointRef.decommissionReceived)
   }
 
+  test("removeExecutor preserves ExecutorDecommissionFinished loss reason") {
+    val conf = new SparkConf()
+      .setMaster("local-cluster[0, 3, 1024]")
+      .setAppName("test")
+
+    sc = new SparkContext(conf)
+    val backend = sc.schedulerBackend.asInstanceOf[CoarseGrainedSchedulerBackend]
+    val mockEndpointRef = mock[RpcEndpointRef]
+    val mockAddress = mock[RpcAddress]
+
+    // Register an executor
+    backend.driverEndpoint.askSync[Boolean](
+      RegisterExecutor("1", mockEndpointRef, mockAddress.host, 1, Map.empty, Map.empty,
+        Map.empty, ResourceProfile.DEFAULT_RESOURCE_PROFILE_ID))
+
+    // Decommission the executor so it's in the pendingDecommission map
+    val decommissionInfo = ExecutorDecommissionInfo("Test decommission")
+    backend.decommissionExecutor("1", decommissionInfo, adjustTargetNumExecutors = false,
+      triggeredByExecutor = false)
+
+    // Capture the ExecutorRemoved event
+    var capturedLossReason: Option[ExecutorLossReason] = None
+    val listener = new SparkListener() {
+      override def onExecutorRemoved(executorRemoved: SparkListenerExecutorRemoved): Unit = {
+        if (executorRemoved.executorId == "1") {
+          // Parse the loss reason from the string representation
+          val reasonStr = executorRemoved.reason
+          // Check if it contains the ExecutorDecommissionFinished message
+          if (reasonStr.contains("Executor decommission finished:")) {
+            capturedLossReason = Some(ExecutorDecommissionFinished("Test detailed message"))
+          }
+        }
+      }
+    }
+    sc.addSparkListener(listener)
+
+    // Create a detailed ExecutorDecommissionFinished with summary
+    val summary = DecommissionSummary.create("Test detailed message", Some("host1"))
+      .markCompleted()
+    val detailedReason = ExecutorDecommissionFinished(
+      Some("host1"),
+      summary.toDetailedMessage,
+      Some(summary))
+
+    // Send RemoveExecutor with ExecutorDecommissionFinished
+    backend.driverEndpoint.send(RemoveExecutor("1", detailedReason))
+
+    // Wait for the event to be processed
+    sc.listenerBus.waitUntilEmpty(executorUpTimeout.toMillis)
+
+    // Verify the detailed reason was preserved
+    eventually(timeout(5.seconds)) {
+      assert(capturedLossReason.isDefined,
+        "ExecutorRemoved event should have been fired")
+    }
+
+    sc.removeSparkListener(listener)
+  }
+
   private def testSubmitJob(sc: SparkContext, rdd: RDD[Int]): Unit = {
     sc.submitJob(
       rdd,
