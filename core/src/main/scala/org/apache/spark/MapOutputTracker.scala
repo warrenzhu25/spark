@@ -432,6 +432,54 @@ private class ShuffleStatus(
     f(mergeStatuses)
   }
 
+  /**
+   * Validate map status and log last available location if validation fails.
+   */
+  private def validateMapStatusWithLastLocation(
+      status: MapStatus,
+      mapIndex: Int,
+      shuffleId: Int,
+      partition: Int): Unit = {
+    if (status == null) {
+      var errorMessage =
+        s"Missing an output location for shuffle $shuffleId partition $partition"
+      // Check if we have the last available location
+      if (mapIndex >= 0 && mapIndex < mapStatusesDeleted.length &&
+          mapStatusesDeleted(mapIndex) != null) {
+        val lastStatus = mapStatusesDeleted(mapIndex)
+        errorMessage += s" (last available: mapId=${lastStatus.mapId} " +
+          s"at ${lastStatus.location})"
+      }
+      logError(errorMessage)
+      throw new MetadataFetchFailedException(shuffleId, partition, errorMessage)
+    }
+  }
+
+  /**
+   * Helper method to convert map statuses with validation that logs last location.
+   */
+  def convertMapStatusesWithValidation(
+      shuffleId: Int,
+      startPartition: Int,
+      endPartition: Int,
+      startMapIndex: Int,
+      endMapIndex: Int): MapSizesByExecutorId = withReadLock {
+    val actualEndMapIndex = if (endMapIndex == Int.MaxValue) mapStatuses.length else endMapIndex
+    val splitsByAddress = new HashMap[BlockManagerId, ListBuffer[(BlockId, Long, Int)]]
+    val iter = mapStatuses.iterator.zipWithIndex
+    for ((status, mapIndex) <- iter.slice(startMapIndex, actualEndMapIndex)) {
+      validateMapStatusWithLastLocation(status, mapIndex, shuffleId, startPartition)
+      for (part <- startPartition until endPartition) {
+        val size = status.getSizeForBlock(part)
+        if (size != 0) {
+          splitsByAddress.getOrElseUpdate(status.location, ListBuffer()) +=
+            ((ShuffleBlockId(shuffleId, status.mapId, part), size, mapIndex))
+        }
+      }
+    }
+    MapSizesByExecutorId(splitsByAddress.iterator, true)
+  }
+
   def getShufflePushMergerLocations: Seq[BlockManagerId] = withReadLock {
     shufflePushMergerLocations
   }
@@ -1205,13 +1253,10 @@ private[spark] class MapOutputTrackerMaster(
     logDebug(s"Fetching outputs for shuffle $shuffleId")
     shuffleStatuses.get(shuffleId) match {
       case Some(shuffleStatus) =>
-        shuffleStatus.withMapStatuses { statuses =>
-          val actualEndMapIndex = if (endMapIndex == Int.MaxValue) statuses.length else endMapIndex
-          logDebug(s"Convert map statuses for shuffle $shuffleId, " +
-            s"mappers $startMapIndex-$actualEndMapIndex, partitions $startPartition-$endPartition")
-          MapOutputTracker.convertMapStatuses(
-            shuffleId, startPartition, endPartition, statuses, startMapIndex, actualEndMapIndex)
-        }
+        logDebug(s"Convert map statuses for shuffle $shuffleId, " +
+          s"mappers $startMapIndex-$endMapIndex, partitions $startPartition-$endPartition")
+        shuffleStatus.convertMapStatusesWithValidation(
+          shuffleId, startPartition, endPartition, startMapIndex, endMapIndex)
       case None =>
         MapSizesByExecutorId(Iterator.empty, true)
     }
