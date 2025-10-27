@@ -109,14 +109,21 @@ object OptimizeShuffleWithLocalRead extends AQEShuffleReadRule {
 
   override def apply(plan: SparkPlan): SparkPlan = {
     if (!conf.getConf(SQLConf.LOCAL_SHUFFLE_READER_ENABLED)) {
+      logDebug("Local shuffle read optimization disabled by config " +
+        s"(${SQLConf.LOCAL_SHUFFLE_READER_ENABLED.key}=false)")
       return plan
     }
 
     plan match {
       case s: SparkPlan if canUseLocalShuffleRead(s) =>
+        logInfo("Optimizing shuffle with local read")
         createLocalRead(s)
       case s: SparkPlan =>
-        createProbeSideLocalRead(s)
+        val result = createProbeSideLocalRead(s)
+        if (!result.eq(s)) {
+          logInfo("Optimizing broadcast join probe side with local read")
+        }
+        result
     }
   }
 

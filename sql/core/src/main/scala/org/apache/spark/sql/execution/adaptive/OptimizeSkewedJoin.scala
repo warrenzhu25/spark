@@ -114,7 +114,11 @@ case class OptimizeSkewedJoin(ensureRequirements: EnsureRequirements)
       joinType: JoinType): Option[(SparkPlan, SparkPlan)] = {
     val canSplitLeft = canSplitLeftSide(joinType)
     val canSplitRight = canSplitRightSide(joinType)
-    if (!canSplitLeft && !canSplitRight) return None
+    if (!canSplitLeft && !canSplitRight) {
+      logInfo(s"Skew join optimization not applied: join type $joinType does not support " +
+        "splitting either side")
+      return None
+    }
 
     val leftSizes = left.mapStats.get.bytesByPartitionId
     val rightSizes = right.mapStats.get.bytesByPartitionId
@@ -136,6 +140,13 @@ case class OptimizeSkewedJoin(ensureRequirements: EnsureRequirements)
     val rightSkewThreshold = getSkewThreshold(rightMedSize)
     val leftTargetSize = targetSize(leftSizes, leftSkewThreshold)
     val rightTargetSize = targetSize(rightSizes, rightSkewThreshold)
+
+    logDebug(
+      s"Skew join thresholds - Left: ${FileUtils.byteCountToDisplaySize(leftSkewThreshold)}" +
+      s", Right: ${FileUtils.byteCountToDisplaySize(rightSkewThreshold)}")
+    logDebug(
+      s"Skew join target sizes - Left: ${FileUtils.byteCountToDisplaySize(leftTargetSize)}" +
+      s", Right: ${FileUtils.byteCountToDisplaySize(rightTargetSize)}")
 
     val leftSidePartitions = mutable.ArrayBuffer.empty[ShufflePartitionSpec]
     val rightSidePartitions = mutable.ArrayBuffer.empty[ShufflePartitionSpec]
@@ -159,6 +170,9 @@ case class OptimizeSkewedJoin(ensureRequirements: EnsureRequirements)
             s"(${FileUtils.byteCountToDisplaySize(leftSize)}) is skewed, " +
             s"split it into ${skewSpecs.get.length} parts.")
           numSkewedLeft += 1
+        } else {
+          logDebug(s"Left side partition $partitionIndex " +
+            s"(${FileUtils.byteCountToDisplaySize(leftSize)}) marked as skewed but cannot split")
         }
         skewSpecs.getOrElse(leftNoSkewPartitionSpec)
       } else {
@@ -173,6 +187,9 @@ case class OptimizeSkewedJoin(ensureRequirements: EnsureRequirements)
             s"(${FileUtils.byteCountToDisplaySize(rightSize)}) is skewed, " +
             s"split it into ${skewSpecs.get.length} parts.")
           numSkewedRight += 1
+        } else {
+          logDebug(s"Right side partition $partitionIndex " +
+            s"(${FileUtils.byteCountToDisplaySize(rightSize)}) marked as skewed but cannot split")
         }
         skewSpecs.getOrElse(rightNoSkewPartitionSpec)
       } else {
@@ -189,11 +206,16 @@ case class OptimizeSkewedJoin(ensureRequirements: EnsureRequirements)
     }
     logDebug(s"number of skewed partitions: left $numSkewedLeft, right $numSkewedRight")
     if (numSkewedLeft > 0 || numSkewedRight > 0) {
+      logInfo(s"Skew join optimization applied: $numSkewedLeft left and $numSkewedRight right " +
+        s"skewed partitions out of $numPartitions total partitions")
       Some((
         SkewJoinChildWrapper(AQEShuffleReadExec(left, leftSidePartitions.toSeq)),
         SkewJoinChildWrapper(AQEShuffleReadExec(right, rightSidePartitions.toSeq))
       ))
     } else {
+      logInfo(s"Skew join optimization not applied: no skewed partitions found. " +
+        s"Left threshold: ${FileUtils.byteCountToDisplaySize(leftSkewThreshold)}, " +
+        s"Right threshold: ${FileUtils.byteCountToDisplaySize(rightSkewThreshold)}")
       None
     }
   }
@@ -219,6 +241,8 @@ case class OptimizeSkewedJoin(ensureRequirements: EnsureRequirements)
 
   override def apply(plan: SparkPlan): SparkPlan = {
     if (!conf.getConf(SQLConf.SKEW_JOIN_ENABLED)) {
+      logDebug("Skew join optimization disabled by config " +
+        s"(${SQLConf.SKEW_JOIN_ENABLED.key}=false)")
       return plan
     }
 
@@ -238,10 +262,15 @@ case class OptimizeSkewedJoin(ensureRequirements: EnsureRequirements)
         case SkewJoinChildWrapper(child) => child
       }
     } else if (conf.getConf(SQLConf.ADAPTIVE_FORCE_OPTIMIZE_SKEWED_JOIN)) {
+      logInfo("Skew join optimization would break distribution requirements, but applying " +
+        s"anyway because ${SQLConf.ADAPTIVE_FORCE_OPTIMIZE_SKEWED_JOIN.key}=true")
       ensureRequirements.apply(optimized).transform {
         case SkewJoinChildWrapper(child) => child
       }
     } else {
+      logInfo("Skew join optimization not applied: would introduce additional shuffle to " +
+        s"satisfy distribution requirements. Set " +
+        s"${SQLConf.ADAPTIVE_FORCE_OPTIMIZE_SKEWED_JOIN.key}=true to apply anyway")
       plan
     }
   }

@@ -43,6 +43,8 @@ case class CoalesceShufflePartitions(session: SparkSession) extends AQEShuffleRe
 
   override def apply(plan: SparkPlan): SparkPlan = {
     if (!conf.coalesceShufflePartitionsEnabled) {
+      logDebug("Coalesce shuffle partitions optimization disabled by config " +
+        s"(${SQLConf.COALESCE_PARTITIONS_ENABLED.key}=false)")
       return plan
     }
 
@@ -110,15 +112,24 @@ case class CoalesceShufflePartitions(session: SparkSession) extends AQEShuffleRe
         minPartitionSize = minPartitionSize)
 
       if (newPartitionSpecs.nonEmpty) {
-        shuffleStages.zip(newPartitionSpecs).map { case (stageInfo, partSpecs) =>
+        shuffleStages.zip(newPartitionSpecs).foreach { case (stageInfo, partSpecs) =>
+          val originalPartitions = stageInfo.partitionSpecs.map(_.length)
+            .getOrElse(stageInfo.shuffleStage.shuffle.numPartitions)
+          logInfo(s"Coalescing shuffle partitions for stage ${stageInfo.shuffleStage.id}: " +
+            s"$originalPartitions -> ${partSpecs.length} partitions " +
+            s"(target size: ${advisoryTargetSize / (1024 * 1024)}MB)")
           specsMap.put(stageInfo.shuffleStage.id, partSpecs)
         }
+      } else {
+        logDebug(s"Coalesce not applied to group: no partition specs generated")
       }
     }
 
     if (specsMap.nonEmpty) {
+      logInfo(s"Coalesce shuffle partitions applied to ${specsMap.size} shuffle stages")
       updateShuffleReads(plan, specsMap.toMap)
     } else {
+      logDebug("Coalesce shuffle partitions not applied: no eligible shuffle stages found")
       plan
     }
   }

@@ -55,12 +55,14 @@ object DynamicJoinSelection extends Rule[LogicalPlan] with JoinSelectionHelper {
   private def selectJoinStrategy(
       join: Join,
       isLeft: Boolean): Option[JoinStrategyHint] = {
+    val side = if (isLeft) "left" else "right"
     val plan = if (isLeft) join.left else join.right
     plan match {
       case LogicalQueryStage(_, stage: ShuffleQueryStageExec) if stage.isMaterialized
         && stage.mapStats.isDefined =>
 
-        val manyEmptyInPlan = hasManyEmptyPartitions(stage.mapStats.get)
+        val mapStats = stage.mapStats.get
+        val manyEmptyInPlan = hasManyEmptyPartitions(mapStats)
         val canBroadcastPlan = (isLeft && canBuildBroadcastLeft(join.joinType)) ||
           (!isLeft && canBuildBroadcastRight(join.joinType))
         val manyEmptyInOther = (if (isLeft) join.right else join.left) match {
@@ -69,12 +71,21 @@ object DynamicJoinSelection extends Rule[LogicalPlan] with JoinSelectionHelper {
           case _ => false
         }
 
+        logDebug(s"Dynamic join selection for $side side: " +
+          s"manyEmptyInPlan=$manyEmptyInPlan, canBroadcast=$canBroadcastPlan, " +
+          s"manyEmptyInOther=$manyEmptyInOther")
+
         val demoteBroadcastHash = if (manyEmptyInPlan && canBroadcastPlan) {
           join.joinType match {
             // don't demote BHJ since you cannot short circuit local join if inner (null-filled)
             // side is empty
-            case LeftOuter | RightOuter | LeftAnti => false
-            case _ => true
+            case LeftOuter | RightOuter | LeftAnti =>
+              logDebug(s"Not demoting broadcast hash for $side: join type ${join.joinType} " +
+                "cannot short-circuit when inner side is empty")
+              false
+            case _ =>
+              logDebug(s"Demoting broadcast hash for $side: many empty partitions detected")
+              true
           }
         } else if (manyEmptyInOther && canBroadcastPlan) {
           // for example, LOJ, !isLeft but it's the LHS that has many empty partitions if we
@@ -82,25 +93,37 @@ object DynamicJoinSelection extends Rule[LogicalPlan] with JoinSelectionHelper {
           // will assemble partitions as they were before the shuffle and that may no longer have
           // many empty partitions and thus cannot short-circuit local join
           join.joinType match {
-            case LeftOuter | RightOuter | LeftAnti => true
+            case LeftOuter | RightOuter | LeftAnti =>
+              logDebug(s"Demoting broadcast hash for $side: other side has many empty " +
+                "partitions and local read optimization may prevent short-circuiting")
+              true
             case _ => false
           }
         } else {
           false
         }
 
-        val preferShuffleHash = preferShuffledHashJoin(stage.mapStats.get)
+        val preferShuffleHash = preferShuffledHashJoin(mapStats)
         if (demoteBroadcastHash && preferShuffleHash) {
+          logInfo(s"Dynamic join selection for $side: choosing SHUFFLE_HASH " +
+            "(demote broadcast + prefer shuffle hash)")
           Some(SHUFFLE_HASH)
         } else if (demoteBroadcastHash) {
+          logInfo(s"Dynamic join selection for $side: choosing NO_BROADCAST_HASH " +
+            "(many empty partitions)")
           Some(NO_BROADCAST_HASH)
         } else if (preferShuffleHash) {
+          logInfo(s"Dynamic join selection for $side: choosing PREFER_SHUFFLE_HASH " +
+            "(all partitions below threshold)")
           Some(PREFER_SHUFFLE_HASH)
         } else {
+          logDebug(s"Dynamic join selection for $side: no strategy hint")
           None
         }
 
-      case _ => None
+      case _ =>
+        logDebug(s"Dynamic join selection for $side: not a materialized shuffle stage")
+        None
     }
   }
 

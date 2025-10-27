@@ -180,8 +180,8 @@ case class AdaptiveSparkPlanExec(
           if (ValidateRequirements.validate(applied, distribution)) {
             applied
           } else {
-            logDebug(s"Rule ${rule.ruleName} is not applied as it breaks the " +
-              "distribution requirement of the query plan.")
+            logInfo(s"Rule ${rule.ruleName} is not applied as it breaks the " +
+              s"distribution requirement of the query plan. Required: $distribution")
             latestPlan
           }
         case _ => applied
@@ -354,12 +354,15 @@ case class AdaptiveSparkPlanExec(
           val newCost = costEvaluator.evaluateCost(newPhysicalPlan)
           if (newCost < origCost ||
             (newCost == origCost && currentPhysicalPlan != newPhysicalPlan)) {
+            logOnLevel(s"Plan changed after re-optimization. Cost: $origCost -> $newCost")
             logOnLevel("Plan changed:\n" +
               sideBySide(currentPhysicalPlan.treeString, newPhysicalPlan.treeString).mkString("\n"))
             cleanUpTempTags(newPhysicalPlan)
             currentPhysicalPlan = newPhysicalPlan
             currentLogicalPlan = newLogicalPlan
             stagesToReplace = Seq.empty[QueryStageExec]
+          } else {
+            logDebug(s"Re-optimized plan not adopted. Cost: $origCost vs $newCost")
           }
         }
         // Now that some stages have finished, we can try creating new stages.
