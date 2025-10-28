@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Adaptive Input Partitioning Design Document</title>
+    <style>
+        body {
+            font-family: Georgia, serif;
+            line-height: 1.6;
+            max-width: 100%;
+            margin: 0 auto;
+            padding: 1em;
+            color: #000;
+            background-color: #fff;
+        }
+
+        h1 {
+            font-size: 1.8em;
+            margin-top: 1.5em;
+            margin-bottom: 0.5em;
+            page-break-after: avoid;
+        }
+
+        h2 {
+            font-size: 1.5em;
+            margin-top: 1.3em;
+            margin-bottom: 0.4em;
+            page-break-after: avoid;
+        }
+
+        h3 {
+            font-size: 1.2em;
+            margin-top: 1.1em;
+            margin-bottom: 0.3em;
+            page-break-after: avoid;
+        }
+
+        h4 {
+            font-size: 1.1em;
+            margin-top: 1em;
+            margin-bottom: 0.3em;
+            page-break-after: avoid;
+        }
+
+        .page-break {
+            page-break-after: always;
+        }
+
+        code {
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            background-color: #f4f4f4;
+            padding: 0.2em 0.4em;
+            border-radius: 3px;
+        }
+
+        pre {
+            background-color: #f8f8f8;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 1em;
+            overflow-x: auto;
+            font-size: 0.85em;
+            line-height: 1.4;
+            page-break-inside: avoid;
+        }
+
+        pre code {
+            background-color: transparent;
+            padding: 0;
+        }
+
+        .toc {
+            background-color: #f9f9f9;
+            border: 1px solid #ddd;
+            padding: 1em;
+            margin: 1.5em 0;
+            border-radius: 5px;
+        }
+
+        .toc ul {
+            list-style-type: none;
+            padding-left: 0;
+        }
+
+        .toc ul ul {
+            padding-left: 1.5em;
+        }
+
+        .toc li {
+            margin: 0.3em 0;
+        }
+
+        .toc a {
+            text-decoration: none;
+            color: #0066cc;
+        }
+
+        blockquote {
+            border-left: 4px solid #ddd;
+            padding-left: 1em;
+            margin-left: 0;
+            font-style: italic;
+            color: #555;
+        }
+
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 1em 0;
+            font-size: 0.9em;
+            page-break-inside: avoid;
+        }
+
+        th, td {
+            border: 1px solid #ddd;
+            padding: 0.5em;
+            text-align: left;
+        }
+
+        th {
+            background-color: #f4f4f4;
+            font-weight: bold;
+        }
+
+        .metadata {
+            background-color: #f0f0f0;
+            padding: 1em;
+            margin: 1em 0;
+            border-radius: 5px;
+            font-size: 0.9em;
+        }
+
+        .note {
+            background-color: #fffbea;
+            border-left: 4px solid #f59e0b;
+            padding: 0.8em;
+            margin: 1em 0;
+        }
+
+        .important {
+            background-color: #fef2f2;
+            border-left: 4px solid #ef4444;
+            padding: 0.8em;
+            margin: 1em 0;
+        }
+
+        .success {
+            background-color: #f0fdf4;
+            border-left: 4px solid #10b981;
+            padding: 0.8em;
+            margin: 1em 0;
+        }
+    </style>
+</head>
+<body>
+
+<div class="metadata">
+    <strong>Title:</strong> Adaptive Input Partitioning Design Document<br>
+    <strong>Subtitle:</strong> Dynamic Partition Size Adjustment for Apache Spark<br>
+    <strong>Author:</strong> Adaptive Input Partitioning Feature Team<br>
+    <strong>Date:</strong> 2025-10-27<br>
+    <strong>Version:</strong> 1.0<br>
+    <strong>Tags:</strong> Apache Spark, AQE, Performance, Optimization
+</div>
+
+<h1>Adaptive Input Partitioning Design Document</h1>
+<p><em>Dynamic Partition Size Adjustment for Apache Spark</em></p>
+
+<div class="toc">
+    <h2>Table of Contents</h2>
+    <ul>
+        <li><a href="#overview">1. Overview</a></li>
+        <li><a href="#current-implementation">2. Current Implementation Analysis</a></li>
+        <li><a href="#proposed-solution">3. Proposed Solution</a></li>
+        <li><a href="#use-cases">4. Use Cases and Examples</a></li>
+        <li><a href="#limitations">5. Limitations and Edge Cases</a></li>
+        <li><a href="#implementation-phases">6. Implementation Phases</a></li>
+        <li><a href="#testing">7. Testing Strategy</a></li>
+        <li><a href="#alternatives">8. Alternatives Considered</a></li>
+        <li><a href="#future">9. Future Enhancements</a></li>
+        <li><a href="#questions">10. Open Questions</a></li>
+        <li><a href="#references">11. References</a></li>
+    </ul>
+</div>
+
+<div class="page-break"></div>
+
+<h2 id="overview">1. Overview</h2>
+
+<h3>Problem Statement</h3>
+
+<p>Currently, <code>spark.sql.files.maxPartitionBytes</code> is a <strong>static configuration</strong> (default 128MB) that determines how much data each input partition reads from files. This static approach has three major limitations:</p>
+
+<ol>
+    <li><strong>Compression Ratio Unknown</strong>: When reading compressed files (Parquet, ORC), we don't know the output size until after reading</li>
+    <li><strong>Filter Selectivity Unknown</strong>: When applying filters, we don't know how much data will survive filtering</li>
+    <li><strong>Suboptimal Shuffle Sizes</strong>: Input partitions of 128MB might produce shuffle partitions of 10MB (too small, overhead) or 500MB (too large, memory pressure)</li>
+</ol>
+
+<div class="note">
+    <strong>Key Insight:</strong> Static partition sizing leads to inefficient resource utilization because we can't predict the compression ratio or filter selectivity at planning time.
+</div>
+
+<h3>Goal</h3>
+
+<p><strong>Dynamically adjust input partition sizes</strong> based on observed compression ratios and filter selectivity from earlier query stages to achieve optimal shuffle partition sizes.</p>
+
+<p><strong>Target:</strong> Produce shuffle partitions of optimal size (default 64MB) by learning from runtime statistics.</p>
+
+<h3>Example Scenario</h3>
+
+<p><strong>Current Behavior (Static):</strong></p>
+<pre><code>Task 1: Read 128MB → Apply filter → Write 10MB shuffle (12.8:1 ratio)
+Task 2: Read 128MB → Apply filter → Write 12MB shuffle
+Task 3: Read 128MB → Apply filter → Write 9MB shuffle
+
+Result: 100 shuffle partitions × 10-12MB each = High overhead
+</code></pre>
+
+<p><strong>Desired Behavior (Adaptive):</strong></p>
+<pre><code>Stage 1: Tasks read 128MB → Learn median ratio is ~12:1
+Stage 2: Adjust input to 1280MB to target ~100MB shuffle output
+
+Result: 16 shuffle partitions × 100MB each = Optimal size
+</code></pre>
+
+<div class="success">
+    <strong>Benefit:</strong> Fewer tasks, less overhead, better resource utilization.
+</div>
+
+<div class="page-break"></div>
+
+<h2 id="current-implementation">2. Current Implementation Analysis</h2>
+
+<h3>2.1 File Partition Assignment Flow</h3>
+
+<p>The current file partitioning process has four steps:</p>
+
+<h4>Step 1: Calculate maxSplitBytes</h4>
+<p><strong>Location:</strong> <code>FilePartition.scala:118</code></p>
+
+<pre><code>def maxSplitBytes(
+    sparkSession: SparkSession,
+    calculateTotalBytes: =&gt; Long): Long = {
+
+  val defaultMaxSplitBytes =
+    sparkSession.sessionState.conf.filesMaxPartitionBytes  // 128MB
+  val openCostInBytes =
+    sparkSession.sessionState.conf.filesOpenCostInBytes    // 4MB
+  val minPartitionNum =
+    sparkSession.sessionState.conf.filesMinPartitionNum
+      .getOrElse(sparkSession.leafNodeDefaultParallelism)
+
+  val totalBytes = calculateTotalBytes
+  val bytesPerCore = totalBytes / minPartitionNum
+
+  Math.min(defaultMaxSplitBytes,
+           Math.max(openCostInBytes, bytesPerCore))
+}
+</code></pre>
+
+<div class="important">
+    <strong>Key Point:</strong> Calculated <strong>at planning time</strong> using static configuration.
+</div>
+
+<h4>Step 2: Split Files</h4>
+<p><strong>Location:</strong> <code>PartitionedFileUtil.scala:27</code></p>
+
+<p>For splitable files (Parquet, ORC), create multiple <code>PartitionedFile</code> chunks:</p>
+
+<pre><code>def splitFiles(
+    file: FileStatusWithMetadata,
+    maxSplitBytes: Long,
+    partitionValues: InternalRow): Seq[PartitionedFile] = {
+
+  if (isSplitable) {
+    (0L until file.getLen by maxSplitBytes).map { offset =&gt;
+      val size = Math.min(maxSplitBytes, file.getLen - offset)
+      PartitionedFile(partitionValues, filePath, offset, size)
+    }
+  } else {
+    Seq(PartitionedFile(partitionValues, filePath, 0, file.getLen))
+  }
+}
+</code></pre>
+
+<p><strong>Result:</strong> Large files split into chunks of <code>maxSplitBytes</code> each.</p>
+
+<h4>Step 3: Pack into Partitions</h4>
+<p><strong>Location:</strong> <code>FilePartition.scala:58</code></p>
+
+<p>Uses <strong>"Next Fit Decreasing"</strong> algorithm to group file chunks.</p>
+
+<h4>Step 4: Task Reads Assigned Files</h4>
+<p><strong>Location:</strong> <code>FileScanRDD.scala:111</code></p>
+
+<p>Each task receives a <code>FilePartition</code> containing specific byte ranges to read.</p>
+
+<blockquote>
+    <strong>Critical Observation:</strong> <code>maxSplitBytes</code> is calculated <strong>at planning time</strong> before any data is read. We cannot use runtime statistics with the current architecture without modifications.
+</blockquote>
+
+<div class="page-break"></div>
+
+<h3>2.2 Adaptive Query Execution (AQE) Infrastructure</h3>
+
+<p>Spark already has a sophisticated AQE framework that collects runtime statistics and re-optimizes queries.</p>
+
+<h4>Shuffle Statistics Collection</h4>
+
+<p><code>MapOutputStatistics</code> contains per-partition shuffle sizes:</p>
+
+<pre><code>class MapOutputStatistics(
+    val shuffleId: Int,
+    val bytesByPartitionId: Array[Long])  // ← Size of each partition
+</code></pre>
+
+<h4>Existing AQE Optimizations</h4>
+
+<ol>
+    <li><strong>CoalesceShufflePartitions</strong>: Combines small partitions based on <code>bytesByPartitionId</code></li>
+    <li><strong>OptimizeSkewedJoin</strong>: Splits large partitions to handle data skew</li>
+    <li><strong>DynamicJoinSelection</strong>: Converts between join types based on partition sizes</li>
+    <li><strong>OptimizeShuffleWithLocalRead</strong>: Enables local reads instead of network shuffle</li>
+</ol>
+
+<div class="success">
+    <strong>Integration Opportunity:</strong> We can add a new AQE rule that adjusts file scan partition sizes based on completed shuffle statistics.
+</div>
+
+<div class="page-break"></div>
+
+<h2 id="proposed-solution">3. Proposed Solution</h2>
+
+<h3>3.1 Architecture</h3>
+
+<h4>High-Level Design</h4>
+
+<p><strong>Add new AQE rule:</strong> <code>AdaptiveInputPartitioning</code></p>
+
+<p><strong>Execution Flow:</strong></p>
+<ol>
+    <li>Stage 1 completes → Shuffle statistics collected</li>
+    <li>AQE re-optimization triggered</li>
+    <li><code>AdaptiveInputPartitioning</code> rule examines shuffle stats</li>
+    <li>Calculate compression/selectivity ratio</li>
+    <li>Adjust <code>maxSplitBytes</code> for subsequent file scans</li>
+    <li>Stage 2 executes with optimized partition sizes</li>
+</ol>
+
+<h3>3.2 Components</h3>
+
+<h4>Component 1: Statistics Tracker</h4>
+
+<p><strong>Purpose:</strong> Track input/output bytes for each stage to calculate compression ratio</p>
+
+<p><strong>Key Methods:</strong></p>
+<ul>
+    <li><code>recordStageStats()</code>: Store statistics when stage completes</li>
+    <li><code>getRecentCompressionRatio()</code>: Calculate ratio from recent N stages</li>
+    <li><code>medianShufflePartitionSize</code>: Use median (more robust than mean)</li>
+</ul>
+
+<div class="note">
+    <strong>Design Choice:</strong> Use rolling window of recent stages (default 3) to handle changing data characteristics.
+</div>
+
+<h4>Component 2: Adaptive Partitioning Rule</h4>
+
+<p>This is the core AQE rule that adjusts partition sizes based on observed compression ratios.</p>
+
+<p><strong>Adjustment Logic with Safety Bounds:</strong></p>
+<ul>
+    <li>Min partition size: 64MB</li>
+    <li>Max partition size: 1GB</li>
+    <li>Max scale factor: 10x</li>
+    <li>Min compression ratio: 1.5:1</li>
+</ul>
+
+<h4>Component 3: FileSourceScanExec Modification</h4>
+
+<p>Add optional override parameter for adaptive partitioning:</p>
+<ul>
+    <li>Add <code>maxSplitBytesOverride</code> parameter (default <code>None</code>)</li>
+    <li>Use override if present, otherwise use default calculation</li>
+    <li>Backward compatible (no changes to existing behavior)</li>
+</ul>
+
+<h4>Component 4: Integration with AQE</h4>
+
+<p>Integrate statistics tracker into AQE execution flow.</p>
+
+<div class="page-break"></div>
+
+<h3>3.3 Configuration Parameters</h3>
+
+<table>
+    <thead>
+        <tr>
+            <th>Configuration</th>
+            <th>Default</th>
+            <th>Range</th>
+            <th>Purpose</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><code>enabled</code></td>
+            <td><code>false</code></td>
+            <td>true/false</td>
+            <td>Enable feature</td>
+        </tr>
+        <tr>
+            <td><code>minCompressionRatio</code></td>
+            <td><code>1.5</code></td>
+            <td>≥ 1.0</td>
+            <td>Minimum ratio to trigger</td>
+        </tr>
+        <tr>
+            <td><code>minPartitionBytes</code></td>
+            <td><code>64MB</code></td>
+            <td>&gt; 0</td>
+            <td>Lower bound</td>
+        </tr>
+        <tr>
+            <td><code>maxPartitionBytes</code></td>
+            <td><code>1GB</code></td>
+            <td>&gt; 0</td>
+            <td>Upper bound</td>
+        </tr>
+        <tr>
+            <td><code>maxScaleFactor</code></td>
+            <td><code>10.0</code></td>
+            <td>≥ 1.0</td>
+            <td>Max adjustment</td>
+        </tr>
+        <tr>
+            <td><code>lookbackStages</code></td>
+            <td><code>3</code></td>
+            <td>&gt; 0</td>
+            <td>Rolling window size</td>
+        </tr>
+    </tbody>
+</table>
+
+<div class="page-break"></div>
+
+<h2 id="use-cases">4. Use Cases and Examples</h2>
+
+<h3>Use Case 1: Highly Compressed Parquet Files</h3>
+
+<p><strong>Scenario:</strong> Reading Snappy-compressed Parquet files with 10:1 compression ratio</p>
+
+<div class="important">
+    <strong>Problem:</strong> Shuffle partitions too large (640MB &gt;&gt; 64MB target)
+</div>
+
+<div class="success">
+    <strong>Solution:</strong> Adaptive adjustment reduces input to 12.8MB compressed, resulting in optimal 64MB shuffle partitions
+</div>
+
+<h3>Use Case 2: Selective Filters</h3>
+
+<p><strong>Scenario:</strong> Highly selective filter eliminates 95% of data</p>
+
+<div class="important">
+    <strong>Problem:</strong> Many small shuffle partitions (6.4MB &lt;&lt; 64MB target)
+</div>
+
+<div class="success">
+    <strong>Solution:</strong> Adaptive adjustment increases input to 1.28GB, resulting in optimal 64MB shuffle partitions
+</div>
+
+<h3>Use Case 3: Iterative ML Workloads</h3>
+
+<p><strong>Scenario:</strong> K-means clustering with multiple iterations</p>
+
+<div class="success">
+    <strong>Benefit:</strong> Self-optimizing workloads, no manual tuning required. First iteration learns ratio, subsequent iterations use adjusted partition sizes.
+</div>
+
+<div class="page-break"></div>
+
+<h2 id="limitations">5. Limitations and Edge Cases</h2>
+
+<h3>5.1 When It Doesn't Help</h3>
+
+<ol>
+    <li><strong>Single-stage queries:</strong> No prior shuffle statistics available</li>
+    <li><strong>Heterogeneous data:</strong> Files with vastly different compression ratios</li>
+    <li><strong>First query on new table:</strong> No historical statistics</li>
+</ol>
+
+<h3>5.2 Risk Factors</h3>
+
+<ol>
+    <li><strong>Memory Pressure:</strong> Larger input partitions require more memory
+        <ul>
+            <li>Mitigation: Enforce <code>maxPartitionBytes = 1GB</code> upper bound</li>
+        </ul>
+    </li>
+    <li><strong>Over-Correction:</strong> Extreme adjustments from outlier ratios
+        <ul>
+            <li>Mitigation: Use median, max scale factor, minimum sample size</li>
+        </ul>
+    </li>
+    <li><strong>Non-Uniform Distribution:</strong> Some partitions compress well, others don't
+        <ul>
+            <li>Mitigation: Per-partition ratio calculation (future)</li>
+        </ul>
+    </li>
+</ol>
+
+<div class="page-break"></div>
+
+<h2 id="implementation-phases">6. Implementation Phases</h2>
+
+<h3>Phase 1: Foundation (Week 1)</h3>
+<ul>
+    <li>Add configuration parameters to SQLConf</li>
+    <li>Create AdaptiveInputStatisticsTracker class</li>
+    <li>Unit tests for statistics tracking</li>
+    <li>Run scalastyle</li>
+</ul>
+
+<h3>Phase 2: Core Logic (Week 2)</h3>
+<ul>
+    <li>Implement AdaptiveInputPartitioning rule</li>
+    <li>Add maxSplitBytesOverride to FileSourceScanExec</li>
+    <li>Unit tests for adjustment calculations</li>
+    <li>Edge case handling tests</li>
+</ul>
+
+<h3>Phase 3: AQE Integration (Week 3)</h3>
+<ul>
+    <li>Integrate tracker into AdaptiveSparkPlanExec</li>
+    <li>Register rule in AQEOptimizer</li>
+    <li>Add metrics collection</li>
+    <li>Integration tests</li>
+</ul>
+
+<h3>Phase 4: Testing & Validation (Week 4)</h3>
+<ul>
+    <li>End-to-end tests with Parquet/ORC</li>
+    <li>TPC-DS benchmark queries</li>
+    <li>Memory pressure tests</li>
+    <li>Documentation</li>
+</ul>
+
+<h3>Phase 5: Tuning & Refinement (Week 5)</h3>
+<ul>
+    <li>Analyze benchmark results</li>
+    <li>Tune default values</li>
+    <li>Performance optimization</li>
+    <li>Code review</li>
+</ul>
+
+<div class="page-break"></div>
+
+<h2 id="testing">7. Testing Strategy</h2>
+
+<h3>7.1 Unit Tests</h3>
+
+<ul>
+    <li>Calculate compression ratio from shuffle statistics</li>
+    <li>Adjust maxSplitBytes based on compression ratio</li>
+    <li>Respect maximum scale factor</li>
+    <li>Respect min and max partition bytes</li>
+    <li>Skip adjustment when compression ratio too low</li>
+    <li>Handle empty shuffle partitions</li>
+</ul>
+
+<h3>7.2 Integration Tests</h3>
+
+<ul>
+    <li>Multi-stage query with adaptive partitioning</li>
+    <li>Iterative workload adjustment</li>
+    <li>Verify metrics in Spark UI</li>
+</ul>
+
+<h3>7.3 Performance Benchmarks</h3>
+
+<p><strong>TPC-DS Queries:</strong></p>
+<ul>
+    <li>Query 3: Highly selective filters (15-30% improvement expected)</li>
+    <li>Query 7: Multi-stage aggregations (10-25% improvement expected)</li>
+    <li>Query 42: Compressed data reads</li>
+</ul>
+
+<div class="page-break"></div>
+
+<h2 id="alternatives">8. Alternatives Considered</h2>
+
+<h3>Alternative 1: Static Table Statistics</h3>
+<p><strong>Decision:</strong> ❌ Rejected - Runtime adaptation is more accurate for query-specific selectivity</p>
+
+<h3>Alternative 2: Sample-Based Estimation</h3>
+<p><strong>Decision:</strong> ❌ Rejected for initial version - AQE-based approach is simpler and more accurate</p>
+
+<h3>Alternative 3: Per-File Metadata</h3>
+<p><strong>Decision:</strong> ❌ Rejected - Too complex for initial implementation</p>
+
+<div class="success">
+    <strong>Selected Approach:</strong> AQE-based dynamic adjustment
+    <ul>
+        <li>Zero configuration required</li>
+        <li>Query-specific accuracy</li>
+        <li>Self-correcting</li>
+        <li>No I/O overhead</li>
+        <li>Builds on proven framework</li>
+    </ul>
+</div>
+
+<div class="page-break"></div>
+
+<h2 id="future">9. Future Enhancements</h2>
+
+<h3>9.1 Persistent Learning</h3>
+<p>Store learned compression ratios in catalog for future queries</p>
+
+<h3>9.2 Per-Partition Adjustment</h3>
+<p>Vary partition size based on skew instead of uniform adjustment</p>
+
+<h3>9.3 ML-Based Prediction</h3>
+<p>Use machine learning to predict optimal partition sizes</p>
+
+<h3>9.4 Cross-Query Optimization</h3>
+<p>Share statistics across queries in same session</p>
+
+<h3>9.5 Memory-Aware Adjustment</h3>
+<p>Adjust partition sizes based on available executor memory</p>
+
+<div class="page-break"></div>
+
+<h2 id="questions">10. Open Questions</h2>
+
+<ol>
+    <li><strong>Non-Shuffle Operations:</strong> Should we adjust for broadcast joins? → No for initial version</li>
+    <li><strong>Skewed Compression Ratios:</strong> How to handle variance? → Use median for now, add CV check later</li>
+    <li><strong>Per-Table vs Per-Query:</strong> Which approach? → Per-query for initial version</li>
+    <li><strong>Mid-Query Changes:</strong> Re-adjust if ratio changes? → Rolling window handles this naturally</li>
+    <li><strong>Default Enabled:</strong> Opt-in or opt-out? → Disabled by default (opt-in for safety)</li>
+</ol>
+
+<div class="page-break"></div>
+
+<h2 id="references">11. References</h2>
+
+<h3>Existing Code</h3>
+<ul>
+    <li><code>FilePartition.scala</code></li>
+    <li><code>AdaptiveSparkPlanExec.scala</code></li>
+    <li><code>CoalesceShufflePartitions.scala</code></li>
+    <li><code>OptimizeSkewedJoin.scala</code></li>
+</ul>
+
+<h3>Related Configurations</h3>
+<ul>
+    <li><code>spark.sql.files.maxPartitionBytes</code> - Default: 128MB</li>
+    <li><code>spark.sql.adaptive.advisoryPartitionSizeInBytes</code> - Default: 64MB</li>
+    <li><code>spark.sql.adaptive.enabled</code> - Default: true (since Spark 3.2)</li>
+</ul>
+
+<div class="page-break"></div>
+
+<h2>Appendix: Kindle Conversion Instructions</h2>
+
+<h3>Using Pandoc</h3>
+<pre><code># Convert to EPUB
+pandoc adaptive-input-partitioning-design-kindle.html \
+  -o adaptive-input-partitioning.epub \
+  --metadata title="Adaptive Input Partitioning"
+
+# Then use Kindle Previewer to convert EPUB to AZW3
+</code></pre>
+
+<h3>Using Calibre</h3>
+<pre><code>ebook-convert \
+  adaptive-input-partitioning-design-kindle.html \
+  adaptive-input-partitioning.mobi \
+  --title "Adaptive Input Partitioning" \
+  --authors "Spark Team"
+</code></pre>
+
+<h3>Send to Kindle</h3>
+<ol>
+    <li>Convert to MOBI or EPUB format</li>
+    <li>Email to your Kindle email address (yourname@kindle.com)</li>
+    <li>Subject: "Convert" (for EPUB files)</li>
+    <li>Find your Kindle email in Amazon account settings</li>
+</ol>
+
+<div class="page-break"></div>
+
+<div class="metadata">
+    <strong>Document Version:</strong> 1.0 (HTML/Kindle Edition)<br>
+    <strong>Last Updated:</strong> 2025-10-27<br>
+    <strong>Format:</strong> HTML (Kindle-optimized)<br>
+    <strong>Author:</strong> Adaptive Input Partitioning Feature Team<br>
+    <strong>License:</strong> Apache License 2.0
+</div>
+
+</body>
+</html>
