@@ -174,8 +174,32 @@ private def reOptimize(logicalPlan: LogicalPlan): SparkPlan = {
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────────────┐
+│ Validation: Check Shuffle Partition Sizes                      │
+│   Median: 10MB > 1MB threshold → OK (forward optimization)     │
+│   OR                                                            │
+│   Median: 0.5MB < 1MB threshold → Re-execution candidate       │
+└──────────────┬────────────────────────┬─────────────────────────┘
+               │                        │
+     (≥ 1MB)   │                        │ (< 1MB + safety checks pass)
+               ▼                        ▼
+┌──────────────────────┐  ┌─────────────────────────────────────┐
+│ Forward Optimization │  │ Re-execute Stage 1                  │
+│ (Original Flow)      │  │   with larger input partitions      │
+└──────────┬───────────┘  └──────────┬──────────────────────────┘
+           │                         │
+           │                         ▼
+           │              ┌─────────────────────────────────────┐
+           │              │ Stage 1 Re-executed:                │
+           │              │   Input: 8GB partitions × 2 tasks   │
+           │              │   Output: 64MB shuffle partitions   │
+           │              └──────────┬──────────────────────────┘
+           │                         │
+           └─────────────────────────┘
+                       │
+                       ▼
+┌─────────────────────────────────────────────────────────────────┐
 │ AQE Re-optimization (AdaptiveInputPartitioning rule)           │
-│   Observes: median shuffle partition = 10MB                    │
+│   Observes: median shuffle partition = 10MB (or 64MB if re-run)│
 │   Target: 64MB shuffle partitions (ADVISORY_PARTITION_SIZE)    │
 │   Calculates: new maxSplitBytes = 128MB × (64MB/10MB) ≈ 819MB  │
 └──────────────────────┬──────────────────────────────────────────┘
@@ -454,6 +478,46 @@ val ADAPTIVE_INPUT_PARTITIONING_LOOKBACK_STAGES =
     .intConf
     .checkValue(v => v > 0, "Must be positive")
     .createWithDefault(3)
+
+// Re-execution configuration parameters
+val ADAPTIVE_INPUT_PARTITIONING_MIN_SHUFFLE_PARTITION_BYTES =
+  buildConf("spark.sql.adaptive.inputPartitioning.minShufflePartitionBytes")
+    .doc("Minimum acceptable median shuffle partition size in bytes. If a stage " +
+      "produces shuffle partitions below this threshold, the stage may be " +
+      "re-executed with larger input partitions to achieve better shuffle sizes. " +
+      "Set to 0 to disable re-execution based on partition size.")
+    .version("4.1.0")
+    .bytesConf(ByteUnit.BYTE)
+    .createWithDefaultString("1MB")
+
+val ADAPTIVE_INPUT_PARTITIONING_MAX_RE_EXECUTIONS =
+  buildConf("spark.sql.adaptive.inputPartitioning.maxReExecutions")
+    .doc("Maximum number of times a stage can be re-executed due to suboptimal " +
+      "shuffle partition sizes. This prevents infinite re-execution loops.")
+    .version("4.1.0")
+    .intConf
+    .checkValue(v => v >= 0, "Must be non-negative")
+    .createWithDefault(2)
+
+val ADAPTIVE_INPUT_PARTITIONING_MIN_IMPROVEMENT_FACTOR =
+  buildConf("spark.sql.adaptive.inputPartitioning.minImprovementFactor")
+    .doc("Minimum improvement factor required to trigger stage re-execution. " +
+      "Only re-execute if the adjusted partition size would be at least this " +
+      "many times larger than the current size. This prevents re-execution " +
+      "for marginal improvements.")
+    .version("4.1.0")
+    .doubleConf
+    .checkValue(v => v >= 1.0, "Must be >= 1.0")
+    .createWithDefault(2.0)
+
+val ADAPTIVE_INPUT_PARTITIONING_RE_EXECUTION_COST_BENEFIT_ENABLED =
+  buildConf("spark.sql.adaptive.inputPartitioning.reExecutionCostBenefitEnabled")
+    .doc("When true, perform cost-benefit analysis before re-executing a stage. " +
+      "Only re-execute if the expected benefit (based on remaining query " +
+      "complexity and data volume) outweighs the re-execution overhead.")
+    .version("4.1.0")
+    .booleanConf
+    .createWithDefault(true)
 ```
 
 ### 3.4 Metrics
@@ -467,6 +531,380 @@ private val adaptiveInputMetrics = Map(
   "avgCompressionRatio" -> SQLMetrics.createAverageMetric(sparkContext, "average compression ratio"),
   "inputPartitionSizeBefore" -> SQLMetrics.createSizeMetric(sparkContext, "input partition size before adjustment"),
   "inputPartitionSizeAfter" -> SQLMetrics.createSizeMetric(sparkContext, "input partition size after adjustment")
+)
+```
+
+### 3.5 Shuffle Partition Size Validation and Re-execution
+
+#### 3.5.1 Problem Statement
+
+The forward-looking adjustment approach described in Section 3.1 optimizes subsequent
+stages based on learned compression ratios. However, this leaves the first stage with
+suboptimal shuffle partition sizes when:
+
+1. **Initial Stage Produces Undersized Partitions**: First file scan may produce shuffle
+   partitions much smaller than the target size (e.g., 0.5MB instead of 64MB)
+2. **Single-Stage Queries**: Queries with only one shuffle stage never benefit from
+   adaptive adjustment
+3. **Query Performance Impact**: Undersized shuffle partitions create excessive task
+   overhead and reduce parallelism efficiency
+
+#### 3.5.2 Solution: Stage Re-execution
+
+When a completed stage produces shuffle partitions below the configurable threshold
+`minShufflePartitionBytes` (default 1MB), the stage can be re-executed with
+larger input partition sizes to achieve better shuffle output sizes.
+
+**Key Design Principles**:
+- Re-execution is optional and controlled by safety mechanisms
+- Only re-execute when expected benefit outweighs cost
+- Limit re-execution attempts to prevent infinite loops
+- Use learned compression ratios to calculate optimal input sizes
+
+#### 3.5.3 Detection Logic
+
+After a shuffle stage completes, validate the shuffle partition sizes:
+
+```scala
+case class ShufflePartitionValidator {
+  def shouldReExecute(
+      stage: ShuffleQueryStageExec,
+      reExecutionCount: Int,
+      conf: SQLConf): Boolean = {
+
+    // Extract shuffle partition sizes
+    val partitionSizes = stage.mapStats.get.bytesByPartitionId
+    val medianSize = Utils.median(partitionSizes, false).toLong
+
+    // Check if below threshold
+    val minThreshold = conf.adaptiveInputPartitioningMinShufflePartitionBytes
+    val isUnderSized = minThreshold > 0 && medianSize < minThreshold
+
+    if (!isUnderSized) {
+      return false
+    }
+
+    // Apply safety checks (detailed in Section 3.5.4)
+    val maxReExecutions = conf.adaptiveInputPartitioningMaxReExecutions
+    if (reExecutionCount >= maxReExecutions) {
+      logInfo(s"Skipping re-execution: max attempts ($maxReExecutions) reached")
+      return false
+    }
+
+    val improvementFactor = calculateImprovementFactor(stage)
+    val minImprovement = conf.adaptiveInputPartitioningMinImprovementFactor
+    if (improvementFactor < minImprovement) {
+      logInfo(s"Skipping re-execution: improvement factor $improvementFactor " +
+        s"< minimum $minImprovement")
+      return false
+    }
+
+    if (conf.adaptiveInputPartitioningReExecutionCostBenefitEnabled) {
+      val costBenefitRatio = calculateCostBenefitRatio(stage)
+      if (costBenefitRatio < 1.0) {
+        logInfo(s"Skipping re-execution: cost-benefit ratio $costBenefitRatio < 1.0")
+        return false
+      }
+    }
+
+    true
+  }
+}
+```
+
+#### 3.5.4 Re-execution Criteria
+
+**Three-Layer Safety Mechanism** (detailed in Section 3.5.5):
+
+1. **Maximum Attempts Check**:
+   ```scala
+   if (reExecutionCount >= conf.maxReExecutions) {
+     // Skip re-execution
+   }
+   ```
+   Default: 2 re-execution attempts per stage
+
+2. **Minimum Improvement Check**:
+   ```scala
+   val currentMedianSize = calculateMedianPartitionSize(stage)
+   val projectedMedianSize = calculateProjectedSize(stage, adjustedMaxSplit)
+   val improvementFactor = projectedMedianSize / currentMedianSize
+
+   if (improvementFactor < conf.minImprovementFactor) {
+     // Skip re-execution (marginal benefit)
+   }
+   ```
+   Default: 2.0x improvement required
+
+3. **Cost-Benefit Analysis**:
+   ```scala
+   val reExecutionCost = estimateReExecutionCost(stage)
+   val downstreamBenefit = estimateDownstreamBenefit(stage, remainingPlan)
+   val costBenefitRatio = downstreamBenefit / reExecutionCost
+
+   if (costBenefitRatio < 1.0) {
+     // Skip re-execution (cost exceeds benefit)
+   }
+   ```
+
+#### 3.5.5 Safety Mechanisms
+
+##### Safety Mechanism 1: Maximum Re-execution Attempts
+
+**Purpose**: Prevent infinite re-execution loops
+
+**Implementation**:
+```scala
+class StageReExecutionTracker {
+  private val reExecutionCounts = mutable.HashMap[Int, Int]()
+
+  def recordReExecution(stageId: Int): Unit = {
+    reExecutionCounts(stageId) = reExecutionCounts.getOrElse(stageId, 0) + 1
+  }
+
+  def getReExecutionCount(stageId: Int): Int = {
+    reExecutionCounts.getOrElse(stageId, 0)
+  }
+
+  def canReExecute(stageId: Int, maxAllowed: Int): Boolean = {
+    getReExecutionCount(stageId) < maxAllowed
+  }
+}
+```
+
+**Configuration**: `spark.sql.adaptive.inputPartitioning.maxReExecutions` (default: 2)
+
+**Example**:
+- Attempt 1: 128MB input → 0.5MB shuffle (too small)
+- Attempt 2: 8GB input → 32MB shuffle (too small)
+- Attempt 3: Blocked by max attempts (accept 32MB partitions)
+
+##### Safety Mechanism 2: Minimum Improvement Threshold
+
+**Purpose**: Avoid re-execution for marginal improvements
+
+**Calculation**:
+```scala
+def calculateImprovementFactor(
+    stage: ShuffleQueryStageExec,
+    adjustedMaxSplit: Long): Double = {
+
+  val currentMedian = medianShufflePartitionSize(stage)
+  val compressionRatio = calculateCompressionRatio(stage)
+  val projectedMedian = (adjustedMaxSplit / compressionRatio).toLong
+
+  if (currentMedian > 0) {
+    projectedMedian.toDouble / currentMedian.toDouble
+  } else {
+    1.0
+  }
+}
+```
+
+**Configuration**: `spark.sql.adaptive.inputPartitioning.minImprovementFactor` (default: 2.0)
+
+**Example**:
+- Current: 8MB median shuffle partition
+- Projected: 24MB median (3x improvement)
+- Decision: Re-execute (3x > 2x threshold)
+
+**Example (skipped)**:
+- Current: 32MB median shuffle partition
+- Projected: 48MB median (1.5x improvement)
+- Decision: Skip re-execution (1.5x < 2x threshold)
+
+##### Safety Mechanism 3: Cost-Benefit Analysis
+
+**Purpose**: Re-execute only when expected benefit justifies the cost
+
+**Cost Estimation**:
+```scala
+def estimateReExecutionCost(stage: ShuffleQueryStageExec): Double = {
+  val taskDuration = stage.metrics("taskDuration").value
+  val numTasks = stage.metrics("numTasks").value
+  val totalCost = taskDuration * numTasks
+
+  // Account for stage scheduling overhead
+  val schedulingOverhead = 5000.0  // ~5 seconds in milliseconds
+  totalCost + schedulingOverhead
+}
+```
+
+**Benefit Estimation**:
+```scala
+def estimateDownstreamBenefit(
+    stage: ShuffleQueryStageExec,
+    remainingPlan: SparkPlan): Double = {
+
+  // Count remaining stages that will read this shuffle
+  val dependentStages = countDependentStages(stage, remainingPlan)
+
+  // Estimate task overhead reduction
+  val currentMedian = medianShufflePartitionSize(stage)
+  val targetSize = conf.advisoryPartitionSizeInBytes
+  val taskOverheadPerPartition = 50.0  // ~50ms per task
+
+  val currentNumPartitions = stage.mapStats.get.bytesByPartitionId.length
+  val projectedNumPartitions = (stage.mapStats.get.bytesByPartitionId.sum /
+    targetSize).toInt.max(1)
+  val partitionReduction = currentNumPartitions - projectedNumPartitions
+
+  // Benefit = overhead saved × dependent stages
+  partitionReduction * taskOverheadPerPartition * dependentStages
+}
+```
+
+**Decision Logic**:
+```scala
+if (costBenefitRatio >= 1.0) {
+  // Benefit >= Cost: Re-execute
+  logInfo(s"Re-executing stage: benefit=$downstreamBenefit, cost=$reExecutionCost")
+  reExecuteStage(stage, adjustedMaxSplit)
+} else {
+  // Cost > Benefit: Skip re-execution
+  logInfo(s"Skipping re-execution: benefit=$downstreamBenefit < cost=$reExecutionCost")
+}
+```
+
+**Configuration**: `spark.sql.adaptive.inputPartitioning.reExecutionCostBenefitEnabled`
+(default: true)
+
+**Example Scenarios**:
+
+*Scenario 1: Multi-stage query (re-execute)*
+- Re-execution cost: 10 seconds
+- Downstream stages: 5 stages will read this shuffle
+- Overhead savings: 3 seconds per stage × 5 = 15 seconds
+- Cost-benefit ratio: 15 / 10 = 1.5
+- Decision: Re-execute
+
+*Scenario 2: Final stage (skip re-execution)*
+- Re-execution cost: 10 seconds
+- Downstream stages: 0 (this is the final shuffle)
+- Benefit: 0 seconds
+- Cost-benefit ratio: 0 / 10 = 0
+- Decision: Skip re-execution
+
+#### 3.5.6 Re-execution Flow
+
+**High-Level Flow**:
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Stage N Completes                                               │
+│   Shuffle output: 100 partitions × 0.5MB = 50MB total          │
+└───────────────────┬─────────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Validation: Check median partition size                         │
+│   Median: 0.5MB < 1MB threshold → UNDERSIZED                   │
+└───────────────────┬─────────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Safety Check 1: Maximum Attempts                                │
+│   Current attempts: 0 < 2 max → PASS                           │
+└───────────────────┬─────────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Safety Check 2: Minimum Improvement                             │
+│   Calculate: 128MB × (64MB / 0.5MB) = 16GB input               │
+│   Projected median: 64MB / compression_ratio ≈ 6MB             │
+│   Improvement: 6MB / 0.5MB = 12x > 2x threshold → PASS        │
+└───────────────────┬─────────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Safety Check 3: Cost-Benefit Analysis                           │
+│   Cost: 5 seconds re-execution                                  │
+│   Benefit: 8 seconds saved across 3 downstream stages           │
+│   Ratio: 8 / 5 = 1.6 > 1.0 → PASS                             │
+└───────────────────┬─────────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Re-execute Stage N with Adjusted Input                          │
+│   New input: 16GB partitions                                    │
+│   New output: 100 partitions × 6MB = 600MB (better!)           │
+└───────────────────┬─────────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Continue Query Execution                                        │
+│   Downstream stages benefit from larger shuffle partitions      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 3.5.7 Integration with Adaptive Partitioning Rule
+
+**Modify AdaptiveInputPartitioning to support re-execution**:
+
+```scala
+case class AdaptiveInputPartitioning(
+    session: SparkSession,
+    statsTracker: AdaptiveInputStatisticsTracker,
+    reExecutionTracker: StageReExecutionTracker) extends Rule[SparkPlan] {
+
+  def apply(plan: SparkPlan): SparkPlan = {
+    if (!conf.adaptiveInputPartitioningEnabled) {
+      return plan
+    }
+
+    // Check if any completed stages need re-execution
+    val stagesToReExecute = identifyStagesToReExecute(plan)
+
+    if (stagesToReExecute.nonEmpty) {
+      stagesToReExecute.foreach { stage =>
+        val adjustedMaxSplit = computeAdjustedMaxSplit(stage)
+        reExecuteStageWithAdjustment(stage, adjustedMaxSplit)
+        reExecutionTracker.recordReExecution(stage.id)
+      }
+    }
+
+    // Apply forward-looking adjustments to upcoming file scans
+    plan.transformUp {
+      case scan: FileSourceScanExec => adjustFileScan(scan)
+      case scan: BatchScanExec if scan.scan.isInstanceOf[FileScan] =>
+        adjustBatchScan(scan)
+    }
+  }
+
+  private def identifyStagesToReExecute(
+      plan: SparkPlan): Seq[ShuffleQueryStageExec] = {
+
+    plan.collect {
+      case stage: ShuffleQueryStageExec
+          if stage.isMaterialized && shouldReExecute(stage) =>
+        stage
+    }
+  }
+
+  private def shouldReExecute(stage: ShuffleQueryStageExec): Boolean = {
+    val validator = new ShufflePartitionValidator()
+    val reExecutionCount = reExecutionTracker.getReExecutionCount(stage.id)
+    validator.shouldReExecute(stage, reExecutionCount, conf)
+  }
+}
+```
+
+#### 3.5.8 Metrics for Re-execution
+
+Add metrics to track re-execution effectiveness:
+
+```scala
+// In AdaptiveSparkPlanExec metrics
+private val reExecutionMetrics = Map(
+  "numStageReExecutions" -> SQLMetrics.createMetric(
+    sparkContext, "number of stage re-executions"),
+  "reExecutionTimeMs" -> SQLMetrics.createTimingMetric(
+    sparkContext, "time spent in re-execution"),
+  "avgPartitionSizeBeforeReExecution" -> SQLMetrics.createSizeMetric(
+    sparkContext, "average partition size before re-execution"),
+  "avgPartitionSizeAfterReExecution" -> SQLMetrics.createSizeMetric(
+    sparkContext, "average partition size after re-execution"),
+  "reExecutionCostBenefitRatio" -> SQLMetrics.createAverageMetric(
+    sparkContext, "average cost-benefit ratio for re-executions")
 )
 ```
 
@@ -524,6 +962,88 @@ for i in range(10):
     # Subsequent iterations use adjusted partition sizes
 ```
 
+### Use Case 4: Stage Re-execution with Undersized Shuffle Partitions
+
+**Scenario**: First stage produces extremely small shuffle partitions that trigger re-execution
+
+```sql
+-- Query on highly selective filtered data
+SELECT product_id, SUM(revenue) as total_revenue
+FROM sales_data
+WHERE region = 'APAC' AND year = 2024  -- Very selective: 0.1% of data
+GROUP BY product_id
+HAVING total_revenue > 100000
+
+Configuration:
+  spark.sql.adaptive.inputPartitioning.enabled = true
+  spark.sql.adaptive.inputPartitioning.minShufflePartitionBytes = 1MB
+  spark.sql.adaptive.inputPartitioning.maxReExecutions = 2
+  spark.sql.adaptive.inputPartitioning.minImprovementFactor = 2.0
+```
+
+**Execution Timeline**:
+
+```
+Stage 1 - Initial Execution (Attempt 1):
+├─ File Scan: 200 tasks × 128MB = 25.6GB input
+├─ Filter: 0.1% selectivity → 25.6MB data remains
+├─ Shuffle Write: 200 partitions × 0.128MB = 25.6MB total
+└─ Median Shuffle Partition: 0.128MB
+
+Validation Phase:
+├─ Check: 0.128MB < 1MB threshold → UNDERSIZED ✓
+├─ Safety Check 1: Re-execution count (0) < max (2) → PASS ✓
+├─ Safety Check 2: Calculate improvement factor
+│   - Current median: 0.128MB
+│   - Compression ratio: 25.6GB / 25.6MB = 1000:1
+│   - Adjusted input: 128MB × (64MB / 0.128MB) = 64GB
+│   - Projected median: 64GB / 1000 = 64MB
+│   - Improvement: 64MB / 0.128MB = 500x > 2.0x → PASS ✓
+├─ Safety Check 3: Cost-benefit analysis
+│   - Re-execution cost: ~8 seconds (stage duration)
+│   - Downstream stages: 1 (final aggregation)
+│   - Current partitions: 200 (excessive overhead)
+│   - Projected partitions: 1 (optimal)
+│   - Task overhead saved: 199 tasks × 50ms = 9.95 seconds
+│   - Cost-benefit ratio: 9.95 / 8 = 1.24 > 1.0 → PASS ✓
+└─ Decision: RE-EXECUTE with adjusted input partitions
+
+Stage 1 - Re-execution (Attempt 2):
+├─ File Scan: 1 task × 25.6GB = 25.6GB input (same total, different split)
+├─ Filter: 0.1% selectivity → 25.6MB data remains
+├─ Shuffle Write: 1 partition × 25.6MB = 25.6MB total
+└─ Median Shuffle Partition: 25.6MB
+
+Validation Phase (Attempt 2):
+├─ Check: 25.6MB > 1MB threshold → OK (still not optimal, but acceptable)
+├─ Safety Check 1: Re-execution count (1) < max (2) → Could re-execute again
+├─ Safety Check 2: Calculate improvement factor
+│   - Current median: 25.6MB
+│   - Projected median: 64MB
+│   - Improvement: 64MB / 25.6MB = 2.5x > 2.0x → PASS ✓
+├─ Safety Check 3: Cost-benefit analysis
+│   - Re-execution cost: ~8 seconds
+│   - Task overhead saved: 0 tasks (already 1 partition)
+│   - Cost-benefit ratio: 0 / 8 = 0 < 1.0 → FAIL ✗
+└─ Decision: ACCEPT current partitions (cost-benefit check prevents wasteful re-execution)
+
+Stage 2 - Final Aggregation:
+├─ Reads: 1 partition × 25.6MB = 25.6MB
+├─ Aggregate: GROUP BY product_id, HAVING filter
+└─ Result: Optimal performance (single partition, no task overhead)
+```
+
+**Performance Impact**:
+- **Without Re-execution**: 200 tiny tasks (0.128MB each) with ~10 seconds overhead
+- **With Re-execution**: 1 optimal task (25.6MB) + 8 seconds re-execution cost
+- **Net Benefit**: ~2 seconds faster overall query execution
+
+**Key Insights**:
+1. First attempt produced 1000:1 compression ratio (extreme selectivity)
+2. Re-execution reduced task count from 200 → 1
+3. Cost-benefit analysis prevented a second re-execution (diminishing returns)
+4. Safety mechanisms balanced optimization benefit vs. re-execution overhead
+
 ## 5. Limitations and Edge Cases
 
 ### 5.1 When It Doesn't Help
@@ -560,6 +1080,32 @@ for i in range(10):
 4. **Filter Selectivity Changes**: Filter selectivity varies across stages
    - Mitigation: Use rolling window of recent stages
    - Decay older observations
+
+5. **Infinite Re-execution Loops**: Stage repeatedly re-executed without improvement
+   - Mitigation: Enforce `MAX_RE_EXECUTIONS` limit (default 2 attempts)
+   - Track re-execution count per stage
+   - Prevent re-execution if improvement factor < threshold
+
+6. **Excessive Re-execution Overhead**: Re-execution cost exceeds performance benefit
+   - Mitigation: Enable `RE_EXECUTION_COST_BENEFIT_ENABLED` (default true)
+   - Calculate cost-benefit ratio before re-executing
+   - Only re-execute if benefit > cost (ratio > 1.0)
+   - Skip re-execution for final stages (no downstream benefit)
+
+7. **Re-execution Thrashing**: Rapidly oscillating between different partition sizes
+   - Mitigation: Require `MIN_IMPROVEMENT_FACTOR` (default 2.0x)
+   - Only re-execute for significant improvements
+   - Use stable compression ratio estimates (median over multiple attempts)
+
+8. **Resource Contention**: Re-execution competes with other query stages for resources
+   - Mitigation: Re-execution uses same resource allocation as original stage
+   - No additional executor resources required
+   - Stage scheduling overhead (~5 seconds) included in cost estimation
+
+9. **Query Timeout Risk**: Re-execution may cause queries to exceed timeout limits
+   - Mitigation: Cost-benefit analysis accounts for query complexity
+   - Skip re-execution if remaining query is simple
+   - Consider disabling for time-sensitive queries via configuration
 
 ### 5.3 Edge Cases
 
@@ -707,6 +1253,170 @@ Metrics to track:
 - Average task duration
 - Shuffle read/write bytes
 - Memory consumption
+
+### 7.4 Re-execution Performance Analysis
+
+**Purpose**: Measure the overhead and benefit of stage re-execution
+
+#### 7.4.1 Re-execution Overhead Metrics
+
+Track these metrics specifically for re-executed stages:
+
+```scala
+// Re-execution overhead tracking
+case class ReExecutionMetrics(
+  numReExecutions: Int,
+  totalReExecutionTimeMs: Long,
+  avgReExecutionTimeMs: Double,
+  maxReExecutionTimeMs: Long,
+  reExecutionRatio: Double  // re-execution time / total query time
+)
+```
+
+**Key Metrics**:
+1. **Re-execution Frequency**: How often stages are re-executed
+   - Target: < 10% of all stages for typical workloads
+   - Alert if > 25% (may indicate misconfiguration)
+
+2. **Re-execution Time Overhead**: Time spent re-executing stages
+   - Measure: Re-execution duration vs. original stage duration
+   - Target: Re-execution time < 20% of total query time
+   - Alert if > 50% (re-execution may be counterproductive)
+
+3. **Partition Size Improvement**: Shuffle partition size before/after re-execution
+   - Measure: Median partition size improvement ratio
+   - Target: ≥ 2x improvement (matches MIN_IMPROVEMENT_FACTOR)
+   - Alert if < 1.5x (minimal benefit)
+
+4. **Task Count Reduction**: Number of tasks before/after re-execution
+   - Measure: Task count reduction ratio
+   - Target: ≥ 50% reduction for undersized partitions
+   - Alert if < 25% (marginal benefit)
+
+#### 7.4.2 Cost-Benefit Validation
+
+Validate that cost-benefit analysis is accurate:
+
+```scala
+test("cost-benefit analysis accuracy") {
+  withSQLConf(RE_EXECUTION_COST_BENEFIT_ENABLED.key -> "true") {
+    val query = // query with multiple stages
+
+    // Measure actual benefit
+    val metricsWithReExecution = runQuery(query)
+    val metricsWithoutReExecution = runQuery(query,
+      RE_EXECUTION_ENABLED.key -> "false")
+
+    val actualBenefit = metricsWithoutReExecution.totalTime -
+      metricsWithReExecution.totalTime
+    val reExecutionCost = metricsWithReExecution.reExecutionTime
+
+    val actualRatio = actualBenefit / reExecutionCost
+
+    // Predicted ratio should be within 2x of actual
+    assert(predictedRatio >= actualRatio * 0.5)
+    assert(predictedRatio <= actualRatio * 2.0)
+  }
+}
+```
+
+**Validation Criteria**:
+- Predicted cost-benefit ratio within 2x of actual ratio
+- False positive rate (re-execute when shouldn't) < 10%
+- False negative rate (don't re-execute when should) < 15%
+
+#### 7.4.3 Re-execution Performance Scenarios
+
+**Scenario 1: Extreme Selectivity (Best Case)**
+- Input: 100GB table, 0.01% selectivity → 10MB shuffle
+- Without re-execution: 1000 tasks × 10KB = high overhead
+- With re-execution: 1 task × 10MB = optimal
+- Expected benefit: 30-50% query speedup
+
+**Scenario 2: Moderate Selectivity (Common Case)**
+- Input: 100GB table, 10% selectivity → 10GB shuffle
+- Without re-execution: 1000 tasks × 10MB = moderate overhead
+- With re-execution: 160 tasks × 64MB = better
+- Expected benefit: 10-20% query speedup
+
+**Scenario 3: Minimal Selectivity (Edge Case)**
+- Input: 100GB table, 90% selectivity → 90GB shuffle
+- Without re-execution: 1000 tasks × 90MB = acceptable
+- With re-execution: Skipped (cost-benefit ratio < 1.0)
+- Expected overhead: 0% (re-execution correctly skipped)
+
+**Scenario 4: Single-Stage Query (Worst Case)**
+- Input: 100GB table, final aggregation
+- Without re-execution: Completes in 1 stage
+- With re-execution: 2x stage execution time
+- Expected overhead: Cost-benefit should prevent re-execution
+
+#### 7.4.4 Benchmark Configuration Matrix
+
+Test re-execution across different configurations:
+
+| Configuration | minShufflePartitionBytes | maxReExecutions | minImprovementFactor | costBenefitEnabled |
+|---------------|--------------------------|-----------------|----------------------|--------------------|
+| Conservative  | 512KB                    | 1               | 3.0                  | true               |
+| Moderate      | 1MB (default)            | 2 (default)     | 2.0 (default)        | true (default)     |
+| Aggressive    | 4MB                      | 3               | 1.5                  | false              |
+| Disabled      | 0                        | 0               | -                    | false              |
+
+**Expected Results**:
+- **Conservative**: Lowest re-execution rate, safest for production
+- **Moderate**: Balanced re-execution vs. benefit
+- **Aggressive**: Highest re-execution rate, may cause overhead
+- **Disabled**: Baseline for comparison
+
+#### 7.4.5 Performance Regression Tests
+
+Add automated regression tests:
+
+```scala
+test("re-execution should not regress query performance") {
+  val queries = Seq(tpcdsQuery3, tpcdsQuery7, tpcdsQuery42)
+
+  queries.foreach { query =>
+    // Baseline: without re-execution
+    val baselineTime = benchmark(query,
+      RE_EXECUTION_ENABLED.key -> "false")
+
+    // With re-execution
+    val reExecutionTime = benchmark(query,
+      RE_EXECUTION_ENABLED.key -> "true")
+
+    // Re-execution should not make queries slower
+    // Allow 5% variance for noise
+    assert(reExecutionTime <= baselineTime * 1.05,
+      s"Query regressed: $query took ${reExecutionTime}ms vs " +
+      s"baseline ${baselineTime}ms")
+  }
+}
+```
+
+#### 7.4.6 Memory Impact Analysis
+
+Monitor memory consumption during re-execution:
+
+```scala
+case class MemoryMetrics(
+  peakExecutorMemory: Long,
+  avgExecutorMemory: Long,
+  spilledBytes: Long,
+  oomErrors: Int
+)
+```
+
+**Validation**:
+- Re-execution should not cause OOM errors
+- Peak memory should stay within executor limits
+- Spill bytes should not increase significantly
+- If memory pressure detected, verify `MAX_BYTES` limit is enforced
+
+**Target Metrics**:
+- OOM error rate: 0%
+- Memory increase: < 20% vs. baseline
+- Spill increase: < 10% vs. baseline
 
 ## 8. Alternatives Considered
 
