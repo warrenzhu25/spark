@@ -14,14 +14,59 @@ Currently, Spark's shuffle fetch mechanism uses client-side throttling (`maxByte
 
 ### Proposed Solution
 
-Enable shuffle servers (executors) to respond to fetch requests with estimated wait time based on:
-1. Current queue depth (number of pending requests)
-2. Historical request processing time (exponential moving average)
+Enable shuffle servers (executors) to send **immediate wait time notifications** when fetch requests arrive and are queued in the separate thread pool. This allows clients to receive load information **before** the server is busy processing:
 
-Executors use this information to:
-1. Reorder requests to prioritize less-loaded servers
-2. Dynamically adjust parallelism to overlap waiting with additional fetches
-3. Make smarter throttling decisions
+**Server-side**:
+1. Use separate thread pool to handle fetch requests
+2. When request arrives, immediately calculate estimated wait time based on:
+   - Current queue depth (number of pending requests in thread pool)
+   - Historical request processing time (exponential moving average)
+3. Send immediate `WaitTimeNotification` message to client
+4. Queue request for processing in thread pool
+5. Eventually process request and send data (normal flow)
+
+**Client-side** uses this information to:
+1. Receive wait time estimates asynchronously as soon as requests are queued
+2. Proactively issue more requests to other executors if current server is busy
+3. Reorder pending requests to prioritize less-loaded servers
+4. Dynamically adjust parallelism to overlap waiting with additional fetches
+
+---
+
+## Key Innovation: Immediate Wait Time Notification
+
+**Problem with Traditional Approaches:**
+- Clients typically learn about server load only AFTER requests complete
+- By the time load information arrives, it's too late to act
+- Servers that become overloaded continue receiving requests until clients notice
+
+**Our Solution:**
+- Server uses **separate thread pool** for request handling
+- When request arrives, server **immediately** sends `WaitTimeNotification` message
+- Client receives notification **asynchronously** while server processes request
+- Client can **proactively** issue more requests to other servers during wait time
+- No wasted time - client makes smart decisions in real-time
+
+**Timeline Comparison:**
+
+Traditional (no optimization):
+```
+Client → Server: Request
+[Client waits... server processing... 500ms]
+Client ← Server: Response + Data
+Client: "That took long, maybe try another server next time"
+```
+
+With Immediate Notification:
+```
+Client → Server: Request
+Client ← Server: WaitTimeNotification (estimatedWait: 500ms) ⚡ [sent immediately!]
+Client: "500ms wait? Let me issue more requests to other servers now!"
+Client → Other Servers: Additional requests [parallel fetching while waiting]
+[200ms later, multiple responses arriving...]
+Client ← Server: Response + Data [original request completes]
+Client ← Other Servers: More data [reduced total wait time]
+```
 
 ---
 
@@ -36,25 +81,35 @@ Executors use this information to:
 ### Architecture Components
 
 ```
-┌─────────────┐                              ┌─────────────┐
-│  Executor   │                              │  Executor   │
-│  (Client)   │                              │  (Server)   │
-├─────────────┤                              ├─────────────┤
-│             │  1. FetchBlocks Request      │             │
-│  Shuffle    │ ──────────────────────────>  │  NettyBlock │
-│  Block      │                              │  Transfer   │
-│  Fetcher    │  2. StreamHandle Response    │  Service    │
-│  Iterator   │ <──────────────────────────  │             │
-│             │     + estimatedWaitTimeMs    │  Wait Time  │
-│             │                              │  Estimator  │
-│  - Track    │  3. Chunk Requests           │             │
-│    wait     │ ──────────────────────────>  │  - Track    │
-│    times    │                              │    queue    │
-│  - Reorder  │  4. Chunk Data               │    depth    │
-│    requests │ <──────────────────────────  │  - Track    │
-│  - Adjust   │                              │    avg      │
-│    parallel │                              │    latency  │
-└─────────────┘                              └─────────────┘
+┌─────────────┐                              ┌──────────────────────┐
+│  Executor   │                              │  Executor (Server)   │
+│  (Client)   │                              ├──────────────────────┤
+├─────────────┤                              │                      │
+│             │  1. FetchBlocks Request      │  ┌────────────────┐  │
+│  Shuffle    │ ──────────────────────────>  │  │ Request Thread │  │
+│  Block      │                              │  │     (Fast)     │  │
+│  Fetcher    │  2. WaitTimeNotification ⚡   │  └────────────────┘  │
+│  Iterator   │ <──────────────────────────  │         │            │
+│             │     estimatedWaitTimeMs=200  │         │ Queue      │
+│  - Track    │     (sent immediately!)      │         ▼            │
+│    wait     │                              │  ┌────────────────┐  │
+│    times    │                              │  │  Thread Pool   │  │
+│  - Reorder  │  [Client can now issue more  │  │  (Processing)  │  │
+│    requests │   requests to other servers] │  └────────────────┘  │
+│  - Adjust   │                              │         │            │
+│    parallel │  3. StreamHandle Response    │         │            │
+│             │ <──────────────────────────  │  ┌──────▼─────────┐  │
+│             │     (after processing)       │  │ Wait Estimator │  │
+│             │                              │  │ - Queue depth  │  │
+│             │  4. Chunk Requests           │  │ - Avg latency  │  │
+│             │ ──────────────────────────>  │  └────────────────┘  │
+│             │                              │                      │
+│             │  5. Chunk Data               │                      │
+│             │ <──────────────────────────  │                      │
+└─────────────┘                              └──────────────────────┘
+
+Key Innovation: Separate thread pool allows immediate wait time notification
+before request processing begins, enabling proactive client behavior.
 ```
 
 ---
@@ -114,61 +169,110 @@ class WaitTimeEstimator {
 
 ---
 
-### Phase 2: Protocol Extension
+### Phase 2: Protocol Extension - Immediate Wait Time Notification
 
-**Objective**: Extend the shuffle fetch protocol to include wait time estimates.
+**Objective**: Add new protocol message for immediate wait time notification sent before request processing.
 
 **Files to Modify**:
-- `common/network-shuffle/src/main/java/org/apache/spark/network/shuffle/protocol/StreamHandle.java`
+- `common/network-shuffle/src/main/java/org/apache/spark/network/shuffle/protocol/WaitTimeNotification.java` (NEW)
 - `common/network-shuffle/src/main/java/org/apache/spark/network/shuffle/ExternalBlockHandler.java`
 - `common/network-shuffle/src/main/java/org/apache/spark/network/shuffle/OneForOneBlockFetcher.java`
+- `common/network-common/src/main/java/org/apache/spark/network/client/TransportResponseHandler.java`
 - `core/src/main/scala/org/apache/spark/storage/BlockManager.scala`
 
 **Implementation Details**:
 
-1. **Extend StreamHandle Class**:
+1. **Create New WaitTimeNotification Message Class**:
 ```java
-public class StreamHandle extends BlockTransferMessage {
-  public final long streamId;
-  public final int numChunks;
-  public final long estimatedWaitTimeMs; // NEW FIELD
+public class WaitTimeNotification extends BlockTransferMessage {
+  public final long requestId;  // To correlate with original request
+  public final long estimatedWaitTimeMs;
+  public final int queueDepth;  // Optional: expose queue depth for debugging
 
-  public StreamHandle(long streamId, int numChunks, long estimatedWaitTimeMs) {
-    this.streamId = streamId;
-    this.numChunks = numChunks;
+  public WaitTimeNotification(
+      long requestId,
+      long estimatedWaitTimeMs,
+      int queueDepth) {
+    this.requestId = requestId;
     this.estimatedWaitTimeMs = estimatedWaitTimeMs;
+    this.queueDepth = queueDepth;
   }
 
-  // Update encode/decode methods
+  @Override
+  public Type type() { return Type.WAIT_TIME_NOTIFICATION; }
+
+  // Encode/decode methods for serialization
 }
 ```
 
-2. **Populate in ExternalBlockHandler.handleMessage()**:
+2. **Update BlockTransferMessage.Type Enum**:
 ```java
-// Line ~178
-long estimatedWaitTime = waitTimeEstimator.estimateWaitTime(message.execId);
-StreamHandle streamHandle = new StreamHandle(
-  streamId,
-  buf.size(),
-  estimatedWaitTime
-);
+public enum Type implements Encodable {
+  CHUNK_FETCH_REQUEST(0),
+  CHUNK_FETCH_SUCCESS(1),
+  CHUNK_FETCH_FAILURE(2),
+  // ... existing types
+  WAIT_TIME_NOTIFICATION(12);  // NEW
+}
 ```
 
-3. **Parse in OneForOneBlockFetcher**:
-   - Extract `estimatedWaitTimeMs` from `StreamHandle` response
-   - Pass to `BlockFetchingListener` callback
-   - Propagate to `ShuffleBlockFetcherIterator`
+3. **Send Notification Immediately in ExternalBlockHandler**:
+```java
+// In handleMessage() for OpenBlocks/FetchShuffleBlocks
+@Override
+public void receive(TransportClient client, ByteBuffer message) {
+  // Parse request
+  OpenBlocks openBlocks = (OpenBlocks) BlockTransferMessage.Decoder.fromByteBuffer(message);
 
-4. **Update Protocol Version**:
-   - Increment protocol version constant
-   - Document protocol changes
+  // Calculate wait time IMMEDIATELY
+  long estimatedWaitTime = waitTimeEstimator.estimateWaitTime(openBlocks.execId);
+  int queueDepth = waitTimeEstimator.getQueueDepth(openBlocks.execId);
+
+  // Send notification immediately (non-blocking)
+  WaitTimeNotification notification = new WaitTimeNotification(
+    client.getChannelId(),  // Use as request ID
+    estimatedWaitTime,
+    queueDepth
+  );
+  client.send(notification.toByteBuffer());
+
+  // Now queue request for processing in thread pool (existing logic)
+  ManagedBuffer[] buffers = streamManager.openBlocks(openBlocks);
+  // ... rest of existing logic
+}
+```
+
+4. **Handle Notification on Client Side**:
+```java
+// In OneForOneBlockFetcher or new handler
+public void handle(WaitTimeNotification notification) {
+  // Propagate to listener
+  if (listener instanceof WaitTimeAwareListener) {
+    ((WaitTimeAwareListener) listener).onWaitTimeReceived(
+      notification.estimatedWaitTimeMs,
+      notification.queueDepth
+    );
+  }
+}
+```
+
+5. **Update Client Listener Interface**:
+```java
+// Extend BlockFetchingListener
+public interface WaitTimeAwareBlockFetchingListener extends BlockFetchingListener {
+  void onWaitTimeReceived(long estimatedWaitTimeMs, int queueDepth);
+}
+```
+
+**Key Advantage**: Client receives wait time information **immediately** when request arrives at server, not after processing completes. This enables proactive behavior while server is still processing the request.
 
 **Testing**:
-- Unit tests for `StreamHandle` serialization/deserialization
-- Integration tests for end-to-end protocol flow
-- Test with various wait time values (0, small, large)
+- Unit tests for `WaitTimeNotification` serialization/deserialization
+- Test immediate sending (before StreamHandle response)
+- Test client receives notification asynchronously
+- Integration tests for end-to-end protocol flow with timing
 
-**Commit**: "Extend StreamHandle protocol with estimated wait time"
+**Commit**: "Add immediate WaitTimeNotification protocol message"
 
 ---
 
@@ -181,7 +285,7 @@ StreamHandle streamHandle = new StreamHandle(
 - `core/src/main/scala/org/apache/spark/executor/ShuffleReadMetrics.scala`
 - `core/src/main/scala/org/apache/spark/internal/config/package.scala`
 
-#### Phase 3a: Request Metadata Enhancement
+#### Phase 3a: Request Metadata and Asynchronous Wait Time Handling
 
 **Implementation**:
 
@@ -190,17 +294,40 @@ StreamHandle streamHandle = new StreamHandle(
 case class FetchRequest(
   address: BlockManagerId,
   blocks: Seq[(BlockId, Long, Int)],
-  var estimatedWaitTimeMs: Long = 0L // NEW FIELD
+  var estimatedWaitTimeMs: Long = 0L, // NEW FIELD
+  var queueDepth: Int = 0              // NEW FIELD (from server)
 )
 ```
 
-2. **Update BlockFetchingListener**:
+2. **Implement WaitTimeAware BlockFetchingListener**:
 ```scala
-// In sendRequest() method, capture wait time from response
-new BlockFetchingListener {
+// In sendRequest() method, create listener that handles immediate notifications
+new WaitTimeAwareBlockFetchingListener {
+  override def onWaitTimeReceived(waitTimeMs: Long, queueDepth: Int): Unit = {
+    // Store wait time in request metadata IMMEDIATELY
+    req.estimatedWaitTimeMs = waitTimeMs
+    req.queueDepth = queueDepth
+
+    // Update historical data
+    updateWaitTime(req.address, waitTimeMs)
+
+    // CRITICAL: If server is very busy, proactively issue more requests
+    if (waitTimeMs > waitTimeThresholdMs) {
+      logInfo(s"Server ${req.address} busy (wait: ${waitTimeMs}ms, " +
+              s"queue: $queueDepth), triggering adaptive fetch")
+      triggerAdaptiveFetch()  // Issue more requests to other servers
+    }
+  }
+
   override def onBlockFetchSuccess(blockId: String, buf: ManagedBuffer): Unit = {
-    // Store wait time in request metadata
-    req.estimatedWaitTimeMs = receivedWaitTime
+    // Existing logic - record actual fetch time
+    val actualTime = System.nanoTime() - requestStartTime
+    // ... existing logic
+  }
+
+  override def onBlockFetchFailure(blockId: String, e: Throwable): Unit = {
+    // Mark server as slow/unavailable
+    updateWaitTime(req.address, Long.MaxValue)
     // ... existing logic
   }
 }
@@ -214,6 +341,11 @@ def updateWaitTime(address: BlockManagerId, waitTimeMs: Long): Unit = {
   val history = waitTimeHistory.getOrElseUpdate(address, new Queue[Long]())
   history.enqueue(waitTimeMs)
   if (history.size > 10) history.dequeue() // Keep last 10 samples
+
+  // Immediately trigger reordering if new data suggests server is slow
+  if (adaptiveSchedulingEnabled && waitTimeMs > waitTimeThresholdMs) {
+    reorderPendingRequests()
+  }
 }
 
 def getAvgWaitTime(address: BlockManagerId): Long = {
@@ -223,7 +355,29 @@ def getAvgWaitTime(address: BlockManagerId): Long = {
 }
 ```
 
-**Commit**: "Track server wait times in shuffle fetch requests"
+4. **Add Proactive Request Triggering**:
+```scala
+// NEW: Trigger more requests when server busy notification received
+def triggerAdaptiveFetch(): Unit = {
+  if (!adaptiveSchedulingEnabled) return
+
+  // Try to send more requests from pending queue to other servers
+  // This happens WHILE waiting for the busy server to process
+  fetchUpToMaxBytes()
+
+  // Optionally: Temporarily increase parallelism limit
+  if (effectiveMaxReqsInFlight < maxReqsInFlight * 2) {
+    effectiveMaxReqsInFlight = Math.min(
+      effectiveMaxReqsInFlight + 1,
+      maxReqsInFlight * 2
+    )
+  }
+}
+```
+
+**Key Innovation**: Wait time notifications are received and acted upon **asynchronously** while the original request is still being processed. This enables immediate adaptive behavior without waiting for request completion.
+
+**Commit**: "Add asynchronous wait time notification handling"
 
 #### Phase 3b: Load-Aware Request Ordering
 
@@ -250,7 +404,7 @@ def requestScore(req: FetchRequest): Double = {
 }
 ```
 
-**Commit**: "Implement load-aware shuffle request ordering"
+**Commit**: "Implement dynamic load-aware shuffle request ordering"
 
 #### Phase 3c: Dynamic Parallelism Adjustment
 
@@ -413,18 +567,23 @@ When adaptive mode is enabled, `effectiveMaxReqsInFlight` may temporarily exceed
 
 | Metric Name | Type | Description |
 |-------------|------|-------------|
-| `shuffle.server.estimatedWaitTimeMs` | Histogram | Distribution of estimated wait times sent to clients |
-| `shuffle.server.activeRequestsPerExecutor` | Gauge | Current queue depth per executor |
+| `shuffle.server.waitTimeNotificationsSent` | Counter | Total number of wait time notifications sent |
+| `shuffle.server.estimatedWaitTimeMs` | Histogram | Distribution of estimated wait times sent in notifications |
+| `shuffle.server.queueDepthPerExecutor` | Gauge | Current queue depth per requesting executor |
 | `shuffle.server.avgProcessingTimeMs` | Gauge | Exponential moving average of request processing time |
+| `shuffle.server.notificationLatencyUs` | Histogram | Time to send notification after request received |
 
 ### Client-Side Metrics
 
 | Metric Name | Type | Description |
 |-------------|------|-------------|
-| `shuffle.client.serverEstimatedWaitTime` | Counter | Sum of all estimated wait times received |
-| `shuffle.client.parallelismAdjustments` | Counter | Number of times parallelism was adjusted |
-| `shuffle.client.avgServerWaitTime` | Gauge | Average wait time across all servers |
+| `shuffle.client.waitTimeNotificationsReceived` | Counter | Total number of wait time notifications received |
+| `shuffle.client.serverEstimatedWaitTime` | Histogram | Distribution of wait times received from servers |
+| `shuffle.client.adaptiveFetchTriggered` | Counter | Number of times adaptive fetch was triggered by busy notification |
+| `shuffle.client.parallelismAdjustments` | Counter | Number of times parallelism was adjusted dynamically |
+| `shuffle.client.avgServerWaitTime` | Gauge | Average wait time across all servers (from notifications) |
 | `shuffle.client.effectiveMaxReqsInFlight` | Gauge | Current effective max requests in flight |
+| `shuffle.client.requestReorderings` | Counter | Number of times pending requests were reordered based on wait times |
 
 ---
 
@@ -450,14 +609,19 @@ When adaptive mode is enabled, `effectiveMaxReqsInFlight` may temporarily exceed
 ### Integration Tests
 
 1. **Protocol Flow**:
-   - Test `StreamHandle` with wait time field
+   - Test `WaitTimeNotification` message serialization/deserialization
+   - Test immediate notification sent before `StreamHandle`
    - Test end-to-end propagation to client
    - Test protocol versioning
+   - **Timing test**: Verify notification arrives before data processing completes
 
 2. **Adaptive Behavior**:
-   - Mock multiple servers with different latencies
-   - Verify requests prioritize fast servers
-   - Verify parallelism increases with high wait times
+   - Mock multiple servers with different latencies and queue depths
+   - Verify client receives notifications asynchronously
+   - Verify `triggerAdaptiveFetch()` called when notification shows high wait time
+   - Verify requests prioritize fast servers based on notification data
+   - Verify parallelism increases dynamically when busy notifications received
+   - **Key test**: Verify client issues additional requests to other servers WHILE waiting for busy server
 
 ### Performance Tests
 
