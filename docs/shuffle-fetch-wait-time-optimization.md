@@ -70,13 +70,62 @@ Client ← Other Servers: More data [reduced total wait time]
 
 ---
 
+## Leveraging Existing Spark Infrastructure
+
+### Prerequisites
+
+This optimization builds on **existing** Spark shuffle infrastructure:
+
+**1. Separate Thread Pool for Chunk Fetch** (already in production):
+- **Config**: `spark.shuffle.server.chunkFetchHandlerThreadsPercent` (default: 0, disabled)
+- **Location**: `TransportContext.java:143-146`
+- **Thread pool**: `chunkFetchWorkers` EventLoopGroup
+- **Handler**: `ChunkFetchRequestHandler` processes requests in dedicated threads
+- **Requirement**: Must set `chunkFetchHandlerThreadsPercent > 0` to enable our optimization
+
+**2. Existing Metrics Infrastructure**:
+- **Location**: `ExternalBlockHandler.ShuffleMetrics` (line 315-373)
+- **Metrics library**: Codahale Metrics (Dropwizard)
+- **Existing Timer**: `openBlockRequestLatencyMillis` tracks request processing time
+- **Our enhancement**: Leverage this Timer for average processing time calculation
+
+### Getting Real Queue Depth from Netty
+
+**Netty EventLoop API**: Each EventLoop in the `chunkFetchWorkers` provides `pendingTasks()` method
+
+**Important Constraints**:
+- ⚠️ **Calling from outside event loop is expensive** (may block)
+- ✅ **Calling from within event loop is fast** (just reads a counter)
+- ✅ **Solution**: Schedule periodic monitoring task within each event loop
+
+**Implementation Strategy**:
+```java
+// For each EventLoop in chunkFetchWorkers EventLoopGroup
+eventLoop.scheduleAtFixedRate(() -> {
+    int pending = eventLoop.pendingTasks();
+    // Update shared counter
+    totalPendingTasksCounter.addAndGet(pending);
+}, 0, 100, TimeUnit.MILLISECONDS); // Check every 100ms
+```
+
+**Real Processing Time from Existing Timer**:
+```java
+// Codahale Timer already tracks request latency
+Snapshot snapshot = openBlockRequestLatencyMillis.getSnapshot();
+double meanLatencyMs = snapshot.getMean();           // Average
+double p99LatencyMs = snapshot.get99thPercentile();  // 99th percentile
+```
+
+---
+
 ## Design Specifications
 
 ### Scope
 - **Target**: Executor-to-executor shuffle transfers only (not external shuffle service)
 - **Strategy**: Combination approach (load-aware ordering + adaptive parallelism)
-- **Estimation**: Queue wait time + average processing time
+- **Estimation**: Real Netty EventLoop queue depth + processing time from Timer metrics
 - **Compatibility**: Requires updated components (no backwards compatibility requirement)
+- **Prerequisite**: Must enable `spark.shuffle.server.chunkFetchHandlerThreadsPercent > 0`
 
 ### Architecture Components
 
@@ -116,56 +165,203 @@ before request processing begins, enabling proactive client behavior.
 
 ## Implementation Plan
 
-### Phase 1: Server-Side Wait Time Tracking
+### Phase 1: Server-Side Wait Time Tracking with Netty Metrics
 
-**Objective**: Implement wait time estimation on the server side.
+**Objective**: Implement real-time wait time estimation using Netty EventLoop queue depth and existing Timer metrics.
 
 **Files to Modify**:
-- `common/network-common/src/main/java/org/apache/spark/network/shuffle/ExternalBlockHandler.java`
-- `core/src/main/scala/org/apache/spark/network/NettyBlockTransferService.scala`
+- `common/network-common/src/main/java/org/apache/spark/network/shuffle/NettyBasedWaitTimeEstimator.java` (NEW)
+- `common/network-common/src/main/java/org/apache/spark/network/TransportContext.java`
+- `common/network-shuffle/src/main/java/org/apache/spark/network/shuffle/ExternalBlockHandler.java`
+- `common/network-common/src/main/java/org/apache/spark/network/server/ChunkFetchRequestHandler.java`
 
 **Implementation Details**:
 
-1. **Add Wait Time Estimator Class** (`WaitTimeEstimator.java`):
+1. **Add Netty-Based Wait Time Estimator Class** (`NettyBasedWaitTimeEstimator.java`):
 ```java
-class WaitTimeEstimator {
-  // Exponential moving average for request processing time
-  private final AtomicLong avgProcessingTimeNs;
+public class NettyBasedWaitTimeEstimator {
+  private final EventLoopGroup chunkFetchWorkers;
+  private final Timer requestLatencyTimer;
+  private final AtomicInteger totalPendingTasks = new AtomicInteger(0);
+  private final boolean useP99;
+  private final long updateIntervalMs;
 
-  // Track active requests per executor
-  private final ConcurrentHashMap<String, AtomicInteger> activeRequestsPerExecutor;
-
-  // Configuration
-  private final double alpha = 0.3; // EMA smoothing factor
-
-  long estimateWaitTime(String executorId) {
-    int queueDepth = activeRequestsPerExecutor.getOrDefault(executorId, 0).get();
-    long avgTimeNs = avgProcessingTimeNs.get();
-    return (queueDepth * avgTimeNs) / 1_000_000; // Convert to milliseconds
+  public NettyBasedWaitTimeEstimator(
+      EventLoopGroup chunkFetchWorkers,
+      Timer requestLatencyTimer,
+      boolean useP99,
+      long updateIntervalMs) {
+    this.chunkFetchWorkers = chunkFetchWorkers;
+    this.requestLatencyTimer = requestLatencyTimer;
+    this.useP99 = useP99;
+    this.updateIntervalMs = updateIntervalMs;
   }
 
-  void recordRequestStart(String executorId);
-  void recordRequestComplete(String executorId, long durationNs);
+  /**
+   * Initialize periodic queue depth monitoring.
+   * Must be called after EventLoopGroup is created.
+   */
+  public void initialize() {
+    // Schedule monitoring task on each EventLoop in the group
+    chunkFetchWorkers.forEach(eventLoop -> {
+      eventLoop.scheduleAtFixedRate(() -> {
+        try {
+          // pendingTasks() is cheap when called from within the event loop
+          int pending = eventLoop.pendingTasks();
+          totalPendingTasks.set(pending);
+        } catch (Exception e) {
+          // Log and continue
+        }
+      }, 0, updateIntervalMs, TimeUnit.MILLISECONDS);
+    });
+  }
+
+  /**
+   * Estimate wait time based on real Netty queue depth and processing time.
+   * @return Estimated wait time in milliseconds
+   */
+  public long estimateWaitTimeMs() {
+    // Get current queue depth from Netty EventLoop
+    int queueDepth = totalPendingTasks.get();
+
+    if (queueDepth == 0) {
+      return 0L; // No wait if queue is empty
+    }
+
+    // Get processing time from existing Timer metric
+    Snapshot snapshot = requestLatencyTimer.getSnapshot();
+    double processingTimeMs = useP99
+      ? snapshot.get99thPercentile()  // Conservative estimate
+      : snapshot.getMean();            // Average estimate
+
+    // Handle case where no requests processed yet
+    if (Double.isNaN(processingTimeMs) || processingTimeMs <= 0) {
+      processingTimeMs = 10.0; // Default 10ms assumption
+    }
+
+    // Estimate: queue_depth * avg_processing_time
+    return (long) (queueDepth * processingTimeMs);
+  }
+
+  /**
+   * Get current queue depth.
+   * @return Number of pending tasks in Netty EventLoop
+   */
+  public int getQueueDepth() {
+    return totalPendingTasks.get();
+  }
+
+  /**
+   * Get average processing time for debugging/monitoring.
+   * @return Average processing time in milliseconds
+   */
+  public double getAvgProcessingTimeMs() {
+    Snapshot snapshot = requestLatencyTimer.getSnapshot();
+    return snapshot.getMean();
+  }
 }
 ```
 
-2. **Integrate into ExternalBlockHandler**:
-   - Add `WaitTimeEstimator` instance
-   - Call `recordRequestStart()` when handling `OpenBlocks` message
-   - Call `recordRequestComplete()` when stream is fully consumed
-   - Calculate wait time estimate before sending response
+2. **Initialize in TransportContext**:
+```java
+// In TransportContext constructor, after creating chunkFetchWorkers
+if (chunkFetchWorkers != null) {
+  this.waitTimeEstimator = new NettyBasedWaitTimeEstimator(
+    chunkFetchWorkers,
+    externalBlockHandler.getMetrics().openBlockRequestLatencyMillis,
+    conf.waitTimeEstimationUseP99(),
+    conf.waitTimeEstimationUpdateIntervalMs()
+  );
+  this.waitTimeEstimator.initialize();
+}
+```
 
-3. **Add Server Metrics**:
-   - `shuffleServerEstimatedWaitTimeMs` - Histogram of estimated wait times
-   - `shuffleServerActiveRequestsPerExecutor` - Gauge of queue depth
-   - `shuffleServerAvgProcessingTimeMs` - Gauge of average processing time
+3. **Integrate into ChunkFetchRequestHandler**:
+```java
+// In ChunkFetchRequestHandler.channelRead0()
+@Override
+protected void channelRead0(
+    ChannelHandlerContext ctx,
+    final ChunkFetchRequest msg) throws Exception {
+  Channel channel = ctx.channel();
+
+  // NEW: Send immediate wait time notification
+  if (waitTimeNotificationEnabled && waitTimeEstimator != null) {
+    long estimatedWaitMs = waitTimeEstimator.estimateWaitTimeMs();
+    int queueDepth = waitTimeEstimator.getQueueDepth();
+
+    if (logger.isDebugEnabled()) {
+      logger.debug("Queue depth: {}, estimated wait: {}ms",
+                   queueDepth, estimatedWaitMs);
+    }
+
+    WaitTimeNotification notification = new WaitTimeNotification(
+      msg.streamChunkId.streamId(),
+      estimatedWaitMs,
+      queueDepth
+    );
+
+    // Send immediately, non-blocking
+    channel.writeAndFlush(notification);
+  }
+
+  // Continue with existing request processing
+  processFetchRequest(channel, msg);
+}
+```
+
+4. **Add Server Metrics to ShuffleMetrics**:
+```java
+// In ExternalBlockHandler.ShuffleMetrics
+private final Counter waitTimeNotificationsSent = new Counter();
+private final Histogram estimatedWaitTimeMs = new Histogram(new UniformReservoir());
+private final Gauge<Integer> queueDepthGauge;
+private final Gauge<Double> avgProcessingTimeGauge;
+
+public ShuffleMetrics(NettyBasedWaitTimeEstimator estimator) {
+  // ... existing metrics
+  allMetrics.put("waitTimeNotificationsSent", waitTimeNotificationsSent);
+  allMetrics.put("estimatedWaitTimeMs", estimatedWaitTimeMs);
+
+  // Gauges that read from estimator
+  queueDepthGauge = () -> estimator != null ? estimator.getQueueDepth() : 0;
+  allMetrics.put("queueDepth", queueDepthGauge);
+
+  avgProcessingTimeGauge = () -> estimator != null ? estimator.getAvgProcessingTimeMs() : 0.0;
+  allMetrics.put("avgProcessingTimeMs", avgProcessingTimeGauge);
+}
+```
+
+5. **Add Configuration in TransportConf**:
+```java
+public boolean waitTimeNotificationEnabled() {
+  return conf.getBoolean("spark.shuffle.waitTimeNotification.enabled", false);
+}
+
+public long waitTimeEstimationUpdateIntervalMs() {
+  return conf.getLong("spark.shuffle.waitTimeEstimation.updateIntervalMs", 100L);
+}
+
+public boolean waitTimeEstimationUseP99() {
+  return conf.getBoolean("spark.shuffle.waitTimeEstimation.useP99", true);
+}
+```
+
+**Key Advantages**:
+- ✅ Uses **real** Netty EventLoop queue depth via `pendingTasks()`
+- ✅ Leverages **existing** `openBlockRequestLatencyMillis` Timer
+- ✅ **Low overhead**: Queue depth checked periodically within event loop
+- ✅ **Production-ready**: Uses Codahale Metrics already in Spark
+- ✅ **Accurate**: Based on actual queue state, not estimates
 
 **Testing**:
-- Unit tests for `WaitTimeEstimator` calculation logic
-- Test EMA updates with various request patterns
-- Test queue depth tracking with concurrent requests
+- Unit tests for `NettyBasedWaitTimeEstimator` calculation logic
+- Test queue depth monitoring with mock EventLoopGroup
+- Test estimation with various queue depths and processing times
+- Test periodic update scheduling
+- Integration test: verify estimator initialization in TransportContext
 
-**Commit**: "Add server-side wait time estimation for shuffle requests"
+**Commit**: "Add Netty-based server-side wait time estimation for shuffle requests"
 
 ---
 
@@ -542,10 +738,21 @@ def avgServerWaitTime: Double = _avgServerWaitTime.avg
 
 ### New Configuration Options
 
+#### Server-Side (Wait Time Notification)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `spark.shuffle.server.chunkFetchHandlerThreadsPercent` | `0` | **REQUIRED**: Percentage of server threads for separate chunk fetch handler. Must be > 0 to enable wait time notifications. Recommended: 50-100. |
+| `spark.shuffle.waitTimeNotification.enabled` | `false` | Enable immediate wait time notification messages sent to clients when requests arrive |
+| `spark.shuffle.waitTimeEstimation.updateIntervalMs` | `100` | Interval (ms) for monitoring Netty EventLoop queue depth. Lower = more accurate, higher = less overhead |
+| `spark.shuffle.waitTimeEstimation.useP99` | `true` | Use 99th percentile processing time instead of mean for more conservative estimates |
+
+#### Client-Side (Adaptive Fetch)
+
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `spark.reducer.adaptiveMaxReqsInFlight.enabled` | `false` | Enable adaptive adjustment of max concurrent shuffle fetch requests based on server wait times |
-| `spark.reducer.waitTime.threshold.ms` | `100` | Wait time threshold (ms) for triggering parallelism adjustment |
+| `spark.reducer.waitTime.threshold.ms` | `100` | Wait time threshold (ms) for triggering parallelism adjustment and request reordering |
 | `spark.reducer.parallelism.adjustment.factor` | `1.5` | Factor to multiply maxReqsInFlight when servers are busy |
 | `spark.shuffle.waitTime.history.size` | `10` | Number of historical wait time samples to track per server |
 
@@ -558,6 +765,33 @@ The adaptive fetch optimization works alongside existing shuffle configuration:
 - **`spark.reducer.maxBlocksInFlightPerAddress`** (default: Int.MaxValue): Still enforced per-address
 
 When adaptive mode is enabled, `effectiveMaxReqsInFlight` may temporarily exceed `maxReqsInFlight` up to 2x to overlap waiting.
+
+### Recommended Configuration for Shuffle-Heavy Workloads
+
+```properties
+# Server-side: Enable separate thread pool and wait time notifications
+spark.shuffle.server.chunkFetchHandlerThreadsPercent=100
+spark.shuffle.waitTimeNotification.enabled=true
+spark.shuffle.waitTimeEstimation.updateIntervalMs=100
+spark.shuffle.waitTimeEstimation.useP99=true
+
+# Client-side: Enable adaptive fetch behavior
+spark.reducer.adaptiveMaxReqsInFlight.enabled=true
+spark.reducer.waitTime.threshold.ms=100
+spark.reducer.parallelism.adjustment.factor=1.5
+```
+
+### Configuration Dependencies
+
+⚠️ **Important**: The following dependencies must be satisfied:
+
+1. **`spark.shuffle.server.chunkFetchHandlerThreadsPercent`** must be > 0 for wait time notifications to work
+   - This creates the separate EventLoopGroup needed for queue depth monitoring
+   - Without this, wait time estimation is not possible
+
+2. **`spark.shuffle.waitTimeNotification.enabled`** must be true on servers for clients to receive notifications
+   - Clients can enable adaptive fetch without server changes (falls back to historical timing)
+   - But full benefit requires server-side notifications
 
 ---
 
@@ -683,10 +917,28 @@ When adaptive mode is enabled, `effectiveMaxReqsInFlight` may temporarily exceed
 - [SPARK-25250](https://issues.apache.org/jira/browse/SPARK-25250) - Push-based shuffle
 - [SPARK-30602](https://issues.apache.org/jira/browse/SPARK-30602) - Adaptive shuffle fetch
 
-**Key Files**:
+**Key Files (Existing Infrastructure)**:
+- `common/network-common/src/main/java/org/apache/spark/network/TransportContext.java:143-146` - chunkFetchWorkers EventLoopGroup
+- `common/network-common/src/main/java/org/apache/spark/network/server/ChunkFetchRequestHandler.java` - Separate thread pool handler
+- `common/network-common/src/main/java/org/apache/spark/network/util/TransportConf.java:474-491` - chunkFetchHandlerThreadsPercent config
+- `common/network-shuffle/src/main/java/org/apache/spark/network/shuffle/ExternalBlockHandler.java:315-373` - Existing ShuffleMetrics
+
+**Key Files (Client-Side)**:
 - `core/src/main/scala/org/apache/spark/storage/ShuffleBlockFetcherIterator.scala` - Client fetch logic
-- `common/network-shuffle/src/main/java/org/apache/spark/network/shuffle/ExternalBlockHandler.java` - Server handler
-- `common/network-shuffle/src/main/java/org/apache/spark/network/shuffle/protocol/StreamHandle.java` - Protocol message
+- `core/src/main/scala/org/apache/spark/executor/ShuffleReadMetrics.scala` - Client metrics
+
+**Key Files (Protocol)**:
+- `common/network-shuffle/src/main/java/org/apache/spark/network/shuffle/protocol/StreamHandle.java` - Protocol messages
+- `common/network-common/src/main/java/org/apache/spark/network/protocol/` - Base protocol classes
+
+**Netty Monitoring Resources**:
+- [Monitoring Netty EventLoop Queue Depth - Stack Overflow](https://stackoverflow.com/questions/32933367/monitoring-the-size-of-the-netty-event-loop-queues)
+- [Netty Issue #8630 - EventLoopGroup Queue Monitoring](https://github.com/netty/netty/issues/8630)
+- [Netty EventLoop.pendingTasks() API](https://netty.io/4.0/api/io/netty/channel/nio/NioEventLoop.html)
+
+**Metrics Libraries**:
+- [Codahale Metrics (Dropwizard Metrics)](https://metrics.dropwizard.io/) - Already used in Spark
+- Timer, Histogram, Counter, Gauge documentation
 
 **Related Papers**:
 - Riffle: Optimized Shuffle Service for Large-Scale Data Analytics
