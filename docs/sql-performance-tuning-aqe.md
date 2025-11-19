@@ -19,96 +19,138 @@ license: |
   limitations under the License.
 ---
 
-Adaptive Query Execution (AQE) is an optimization technique in Spark SQL that makes use of the runtime statistics to choose the most efficient query execution plan.
+Adaptive Query Execution (AQE) is an optimization technique in Spark SQL that makes use of the runtime statistics to choose the most efficient query execution plan. By inspecting the data *during* query execution (specifically, as map tasks complete and write shuffle files), Spark can correct initial estimation errors and re-optimize the remaining logical plan.
 
 * Table of contents
 {:toc}
 
 ## AQE Overview
 
-### Purpose
-The primary purpose of AQE is to solve the problem of static query planning. Traditional query optimizers generate an execution plan before the query runs, basing decisions on estimated statistics. These estimates can be inaccurate due to complex data transformations, stale statistics, or unpredictable data distributions. AQE allows Spark to inspect the actual data characteristics at runtime (specifically, after shuffle stages) and re-optimize the remaining query plan dynamically.
+### Purpose: The Problem with Static Planning
+Traditional query optimizers in distributed systems perform "static planning." They generate a complete physical execution plan before a single task runs. This approach relies heavily on:
+1.  **Table Statistics:** Row counts, column histograms, and min/max values stored in the metastore (e.g., Hive Metastore).
+2.  **Estimation Logic:** Heuristics to estimate the output size of operators (e.g., "Filtering by `date > '2023-01-01'` will reduce rows by 50%").
+
+However, these static estimates are often wildly inaccurate because:
+*   Statistics may be stale, missing, or only available at the table level (not for intermediate transformation results).
+*   User-defined functions (UDFs) are "black boxes" to the optimizer, making output size prediction impossible.
+*   Data distribution can be non-uniform (skewed), which averages and histograms fail to capture effectively.
+
+**AQE solves this by breaking the query into "Query Stages".** The execution stops at materialization points (shuffles), collects precise runtime statistics from the completed stage, and then re-optimizes the subsequent stages.
 
 ### Benefits
-*   **Robustness:** Handles unpredictable data volume and distribution better than static planning.
-*   **Performance:** Reduces query latency by choosing better join strategies and reducing the amount of data shuffled.
-*   **Simplicity:** Simplifies tuning. Users typically need less manual configuration (e.g., tuning `spark.sql.shuffle.partitions`) because AQE can adjust these parameters automatically.
+*   **Robustness:** Queries are less likely to fail due to Out-Of-Memory (OOM) errors caused by under-provisioned partition counts or skewed data.
+*   **Performance:** Reduces query latency by choosing better join strategies (e.g., avoiding sorts) and minimizing network/disk I/O (e.g., reading less data).
+*   **Simplicity:** Drastically reduces the need for manual tuning of `spark.sql.shuffle.partitions` and join hints.
 
 ## Core Components
 
 AQE primarily relies on three major optimization features:
 
-### Dynamic Join Selection
-Spark can change the join strategy at runtime. For example, a join initially planned as a **Sort-Merge Join** might be converted to a **Broadcast Hash Join** if one of the participating datasets turns out to be small enough (smaller than the broadcast threshold) after the shuffle. This avoids the expensive sorting phase of the sort-merge join. It can also convert to a **Shuffled Hash Join** to optimize performance when Sort-Merge Join overhead is high.
+### 1. Dynamic Join Selection
+Spark supports different join strategies (Broadcast Hash Join, Shuffle Hash Join, Sort Merge Join). Static planning picks one based on estimated size.
+*   **The Optimization:** If the actual size of one join side is found to be smaller than the broadcast threshold (default 10MB) after a shuffle stage, AQE can dynamically switch the plan from a **Sort-Merge Join (SMJ)** to a **Broadcast Hash Join (BHJ)**.
+*   **Why it helps:**
+    *   **Eliminates Sorting:** SMJ requires sorting both sides of the join, which is CPU and memory-intensive. BHJ builds a hash map, which is generally faster.
+    *   **Local Shuffle Reader:** When converted to BHJ, Spark can use a `CustomShuffleReader` (specifically a local shuffle reader) to read the map outputs locally on the executors if the data was already shuffled, minimizing network traffic.
+*   **Fallback:** If the data is still too large for broadcast but small enough to fit in memory partitions, AQE might convert SMJ to a **Shuffled Hash Join**, which avoids sorting but still requires shuffling.
 
-### Dynamic Shuffle Partitions (Coalescing)
-One of the most difficult parameters to tune in Spark is `spark.sql.shuffle.partitions`.
-*   **Problem:** If set too small, tasks run out of memory (OOM). If set too large, it creates many small tasks, causing scheduling overhead.
-*   **AQE Solution:** Users can set a relatively large number of initial partitions. AQE will then look at the actual size of the data in each partition after the shuffle. If adjacent partitions are small, AQE will coalesce (merge) them into a single partition. This ensures that tasks process a reasonable amount of data, balancing parallelism and task overhead.
+### 2. Dynamic Shuffle Partitions (Coalescing)
+Tuning `spark.sql.shuffle.partitions` (default 200) is a classic Spark pain point.
+*   **Small Partition Problem:** If set too high (e.g., 2000 for 1GB of data), you get thousands of tiny files and tasks. The overhead of scheduling tasks and opening/closing files dominates execution time.
+*   **Large Partition Problem:** If set too low (e.g., 10 for 100GB of data), tasks become huge. They spill to disk (slow) or crash with OOM errors.
 
-### Skew Join Optimization
-Data skew occurs when keys are not evenly distributed, causing some tasks to take much longer than others (stragglers).
-*   **Problem:** A single slow task can delay the entire stage.
-*   **AQE Solution:** AQE detects skewed partitions automatically using runtime statistics. It splits the large skewed partitions into smaller sub-partitions and replicates the corresponding partition from the other side of the join. This allows the skewed data to be processed by multiple tasks in parallel, significantly speeding up the join.
+*   **AQE Solution (Coalescing):**
+    1.  Users set a **high initial shuffle partition count** (e.g., `spark.sql.shuffle.partitions=2000` or even higher based on cluster size).
+    2.  During the map stage, tasks write data to these many partitions.
+    3.  AQE inspects the file sizes. If it finds adjacent small partitions (e.g., partition 0 is 1MB, partition 1 is 2MB), it **coalesces** them into a single task (e.g., Task A processes partitions 0-4 to reach a target size of 64MB).
+    4.  **Result:** The reducer stage runs with the optimal number of tasks for the *actual* data volume.
 
-## Execution Flow
+### 3. Skew Join Optimization
+Data skew happens when one key (e.g., `NULL` or a popular `user_id`) has significantly more data than others.
+*   **The Symptom:** 99% of tasks finish in seconds, but 1% (the "stragglers") take hours. The entire stage waits for these stragglers.
+*   **AQE Solution:**
+    1.  AQE detects partitions that are significantly larger than the median size (controlled by skew factors).
+    2.  **Split:** The large partition on the skewed side is split into $N$ smaller sub-partitions.
+    3.  **Replicate:** The matching partition on the other join side is replicated $N$ times.
+    4.  Spark launches $N$ tasks to handle the skewed key in parallel, eliminating the bottleneck.
 
-### AQE Disabled
-1.  **Analysis & Logical Optimization:** Spark parses the SQL and creates a logical plan.
-2.  **Physical Planning:** Spark generates one or more physical plans and selects the best one based on cost model and static statistics.
-3.  **Execution:** The selected physical plan is executed from start to finish. If statistics were wrong, the plan might be suboptimal, but it cannot be changed.
+## Execution Flow: Detailed Walkthrough
 
-### AQE Enabled
-1.  **Initial Planning:** Similar to the disabled case, Spark creates an initial physical plan.
-2.  **Execution of Stages:** Spark executes the plan stage-by-stage.
-3.  **Materialization & Stats Collection:** As shuffle map stages finish, Spark collects accurate runtime statistics (e.g., actual row counts, partition sizes) from the map outputs.
-4.  **Re-optimization:** Before scheduling the next stage (e.g., the reduce stage), AQE interrupts the flow. It checks the statistics against the active plan. If optimization opportunities (like a smaller join side or skewed partitions) are found, it generates a new, optimized physical plan for the remaining query fragments.
-5.  **Continue Execution:** The query execution resumes with the new, optimized plan. This process repeats for subsequent stages.
+### Standard Execution (AQE Disabled)
+1.  **Analysis:** SQL is parsed.
+2.  **Logical Plan:** Optimization rules apply (filter pushdown, etc.).
+3.  **Physical Plan:** Spark estimates costs and picks the "best" plan (e.g., SortMergeJoin).
+4.  **Execution:**
+    *   Map Stage runs.
+    *   Shuffle Write.
+    *   Reduce Stage runs (using the pre-determined 200 partitions).
+    *   *If estimations were wrong, the Reduce stage might crash or crawl.*
 
-## Configuration
+### Adaptive Execution (AQE Enabled)
+1.  **Initial Plan:** Spark creates a plan with "Query Stages" separated by `Exchange` (shuffle) nodes.
+2.  **Execute Stage 1 (Map):** Spark runs the independent stages (leaves of the query tree).
+3.  **Materialization Point:** When the Map stage finishes, it writes shuffle files. **Execution Pauses.**
+4.  **Stats Collection:** The `MapOutputTracker` now holds the *exact* size of every partition and the total data size.
+5.  **Re-Optimization (The "Loop"):**
+    *   AQE rules inspect the stats.
+    *   **Rule 1 (Join):** "Is table A actually 5MB? Yes -> Switch SMJ to Broadcast."
+    *   **Rule 2 (Partitions):** "Are partitions 0-50 tiny? Yes -> Merge them into one task."
+    *   **Rule 3 (Skew):** "Is partition 100 huge? Yes -> Split it."
+6.  **New Plan Generation:** A new physical plan is generated for the next stage.
+7.  **Execute Stage 2 (Reduce):** The optimized reduce stage runs.
+8.  This repeats for every shuffle boundary in the query.
 
-AQE is enabled by default in Spark 3.2.0 and later.
+## Configuration Parameters
+
+AQE is enabled by default in Spark 3.2.0+.
 
 ### Enabling/Disabling
-*   `spark.sql.adaptive.enabled`: Set to `true` (default) or `false` to enable/disable the entire AQE framework.
+*   `spark.sql.adaptive.enabled` (Default: `true`)
 
-### Key Parameters
-*   **Coalescing Partitions:**
-    *   `spark.sql.adaptive.coalescePartitions.enabled`: (Default: `true`) Enables dynamic partition coalescing.
-    *   `spark.sql.adaptive.advisoryPartitionSizeInBytes`: (Default: `64MB`) The target size for coalesced partitions.
-    *   `spark.sql.adaptive.coalescePartitions.initialPartitionNum`: Initial number of partitions before coalescing (defaults to `spark.sql.shuffle.partitions`).
-*   **Join Optimization:**
-    *   `spark.sql.adaptive.autoBroadcastJoinThreshold`: (Default: uses `spark.sql.autoBroadcastJoinThreshold`) Configures the threshold for switching to broadcast join at runtime.
-    *   `spark.sql.adaptive.maxShuffledHashJoinLocalMapThreshold`: Configures threshold to prefer Shuffled Hash Join over Sort Merge Join.
-*   **Skew Join:**
-    *   `spark.sql.adaptive.skewJoin.enabled`: (Default: `true`) Enables automatic skew handling.
-    *   `spark.sql.adaptive.skewJoin.skewedPartitionFactor`: (Default: `5`) A partition is skewed if it is N times larger than the median partition size.
-    *   `spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes`: (Default: `256MB`) Minimum size for a partition to be considered skewed.
+### Tuning Coalescing
+*   `spark.sql.adaptive.coalescePartitions.enabled` (Default: `true`)
+*   `spark.sql.adaptive.advisoryPartitionSizeInBytes` (Default: `64MB`):
+    *   The target size for a task. Lower this if tasks are still running out of memory. Increase this if you want fewer tasks (e.g., for writing fewer output files).
+*   `spark.sql.adaptive.coalescePartitions.minPartitionSize` (Default: `1MB`):
+    *   Prevents coalescing partitions if they are already smaller than this, maintaining a minimum level of parallelism.
+*   `spark.sql.adaptive.coalescePartitions.initialPartitionNum`:
+    *   If not set, uses `spark.sql.shuffle.partitions`. **Crucial:** If this initial value is too low, AQE *cannot* create more partitions. It can only reduce them. Always err on the side of setting this higher (e.g., 1000-4000) when using AQE.
+
+### Tuning Join Optimization
+*   `spark.sql.adaptive.autoBroadcastJoinThreshold`:
+    *   AQE uses the standard broadcast threshold. However, you can set a specific one for AQE via `spark.sql.adaptive.autoBroadcastJoinThreshold` if you want different behavior dynamically (though usually not needed).
+*   `spark.sql.adaptive.localShuffleReader.enabled` (Default: `true`):
+    *   Optimizes coalesced or broadcast joins by avoiding network fetch when possible.
+
+### Tuning Skew Join
+*   `spark.sql.adaptive.skewJoin.enabled` (Default: `true`)
+*   `spark.sql.adaptive.skewJoin.skewedPartitionFactor` (Default: `5`):
+    *   A partition must be 5x larger than the median partition size to be considered skewed.
+*   `spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes` (Default: `256MB`):
+    *   A partition must *also* be larger than 256MB raw size to be optimized. This prevents optimizing "skew" in tiny datasets where it doesn't matter.
 
 ## Monitoring & Debugging
 
-### Metrics
-When AQE applies an optimization, specific metrics are often added to the query plan nodes.
-*   **Num Coalesced Partitions:** Indicates how many shuffle partitions were merged.
-*   **Num Split Partitions:** Indicates how many skewed partitions were split.
+### Identifying AQE in Spark UI
+1.  **SQL Tab:** Click on a query description.
+2.  **Plan Visualization:**
+    *   Look for the `AdaptiveSparkPlan` node at the top of the tree.
+    *   **Coalesced Partitions:** You will see a `CustomShuffleReader`. Hover over it to see metrics like "coalesced from 2000 to 50 partitions".
+    *   **Skew Join:** Look for the **SortMergeJoin** node. If skew optimization fired, the node name often changes to `SortMergeJoin(isSkew=true)`, or you will see multiple `Exchange` nodes feeding into it representing the split/replicated data.
+    *   **Join Strategy Change:** If you see a `BroadcastHashJoin` where you expected a `SortMergeJoin` (and there are `Exchange` nodes above it), AQE likely performed a runtime conversion.
 
-### UI Analysis
-In the Spark SQL UI (SQL Tab):
-1.  **"AdaptiveSparkPlan" Node:** You will see an `AdaptiveSparkPlan` node wrapping the query plan.
-2.  **"Final Plan" vs. "Initial Plan":** The UI often shows the plan changing. You might see a `CustomShuffleReader` node, which indicates that AQE has intervened (e.g., for coalescing or skew handling).
-    *   **Coalescing:** Look for `CustomShuffleReader coalesced`.
-    *   **Skew Join:** Look for `SortMergeJoin (isSkew=true)` or similar indicators in the details of the join node.
-3.  **Runtime Statistics:** The details of plan nodes (like `Exchange` or `QueryStage`) will show `isRuntime=true` for statistics, confirming they are real values observed during execution.
+### Explanation
+Running `df.explain()` often shows the *initial* plan. To see the *final* executed plan with AQE applied, you usually need to look at the UI after execution, or use `df.explain(mode="cost")` which might provide hints, but the runtime plan is best observed in the event logs or UI.
 
-## Use Cases
+## Use Cases and Limitations
 
-### When to Use (Recommended)
-*   **General ETL/SQL Workloads:** AQE is beneficial for almost all batch data processing where data volume can vary or is not perfectly known in advance.
-*   **Complex Joins:** Queries involving multiple joins where intermediate result sizes are hard to predict.
-*   **Skewed Data:** Workloads known to have uneven data distribution (e.g., null keys or popular items).
-*   **Star Schema Joins:** Fact-to-dimension table joins often benefit from dynamic broadcast join conversion.
+### Ideal Scenarios
+*   **Shared Clusters:** Where default configurations must work for both "small" and "big" queries. AQE normalizes the performance.
+*   **Complex ETL:** Chains of transformations where intermediate data sizes vary wildly (e.g., filter -> group by -> join).
+*   **Fact-Dim Joins:** Especially where the "Dimension" table is filtered at runtime (e.g., `WHERE date = 'today'`) making it small enough to broadcast, even if the full table is large.
 
-### When Not to Use
-*   **Streaming Workloads:** AQE is primarily designed for batch queries. While some concepts apply to Structured Streaming, the stateful nature and continuous execution of streaming make full AQE less applicable or supported differently.
-*   **Extremely Low Latency Queries:** The overhead of re-optimization (pausing execution, planning again) might introduce a small latency penalty that is undesirable for sub-second, interactive dashboard queries (though usually negligible compared to the gains).
-*   **Predictable Static Workloads:** If you have a highly tuned, static pipeline where data sizes never change and you have manually optimized every partition count and join type perfectly, AQE might not add value (though it rarely hurts).
+### Limitations
+*   **Requires Shuffle:** AQE only activates at shuffle boundaries. It cannot optimize a query that is purely map-only (e.g., a simple `FILTER` and `SELECT` with no `JOIN` or `GROUP BY`).
+*   **Initial Partition Count:** As mentioned, AQE can reduce partitions but cannot increase them beyond the `initialPartitionNum`. Users must still set a sufficiently high "ceiling" for parallelism.
+*   **Cache Interaction:** In older Spark versions, caching could interfere with AQE because the cache acts as a static barrier. In modern Spark (3.2+), this is largely resolved, but be aware that reading from a cached DataFrame might lock in the partitioning scheme of the cache.
