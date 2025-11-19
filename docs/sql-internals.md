@@ -104,3 +104,70 @@ Let's trace `df = spark.table("users").filter("age > 21").select("name")`:
     *   The DAGScheduler breaks the plan into Stages.
     *   Tasks are sent to Executors.
     *   On the Executor, the generated Java code runs, scanning the file, applying the filter in a tight loop, and returning the result rows.
+
+## Complex Query Walkthrough: Join & Aggregation
+
+Let's examine a more complex query involving a join and an aggregation to see how Spark handles shuffling and distributed state.
+
+**Query:**
+```sql
+SELECT d.dept_name, AVG(e.salary)
+FROM employees e
+JOIN departments d ON e.dept_id = d.id
+GROUP BY d.dept_name
+```
+
+### 1. Logical Plan & Optimization
+*   **Analysis:** Resolves `employees` (e) and `departments` (d). Checks that `salary`, `dept_id`, `id`, and `dept_name` exist.
+*   **Optimization:**
+    *   **Column Pruning:** Spark sees that only `e.salary`, `e.dept_id`, `d.id`, and `d.dept_name` are needed. Other columns (like `e.address` or `d.manager`) are removed from the scan.
+    *   **Predicate Pushdown:** If there were `WHERE` clauses, they would be pushed to the source.
+
+### 2. Physical Planning (Strategy Selection)
+Spark decides how to physically execute the Join and Aggregate.
+*   **Join Strategy:**
+    *   If `departments` is very small (< 10MB), Spark chooses **BroadcastHashJoin**.
+    *   If both are large, Spark chooses **SortMergeJoin** (or **ShuffledHashJoin** if enabled/applicable). Let's assume **SortMergeJoin** for this example.
+*   **Aggregate Strategy:**
+    *   Spark generally chooses **HashAggregate** (using an in-memory hash map).
+
+### 3. Execution Prep (The "EnsureRequirements" Rule)
+SortMergeJoin requires that data on both sides be:
+1.  **Partitioned** by the join key (`e.dept_id` and `d.id`).
+2.  **Sorted** by the join key.
+
+Since the raw files are likely not distributed this way, Spark inserts **Exchange** (Shuffle) and **Sort** operators.
+
+### 4. Final Execution Plan & Stages
+The physical plan is broken into **Stages** at Shuffle boundaries.
+
+**Stage 1: Scan & Shuffle Write (Employees)**
+*   **Scan:** Read `employees` file.
+*   **Filter/Project:** Extract `salary`, `dept_id`.
+*   **Shuffle Write:** Hash the rows by `dept_id` and write to local disk, divided into partition buckets.
+
+**Stage 2: Scan & Shuffle Write (Departments)**
+*   **Scan:** Read `departments` file.
+*   **Filter/Project:** Extract `id`, `dept_name`.
+*   **Shuffle Write:** Hash the rows by `id` and write to local disk.
+
+**Stage 3: Shuffle Read, Join, & Partial Aggregation**
+*   **Shuffle Read:** Read the relevant partitions from Stage 1 and Stage 2.
+*   **Sort:** Sort the employee rows by `dept_id` and department rows by `id`.
+*   **SortMergeJoin:** Merge the two sorted streams. Matches produce rows: `(dept_name, salary)`.
+*   **Partial Aggregation:**
+    *   Instead of sending all raw `(dept_name, salary)` rows to the next stage, Spark pre-aggregates.
+    *   It computes a running `SUM(salary)` and `COUNT(salary)` for each `dept_name` seen in this task.
+*   **Shuffle Write:** Hash the partial results by `dept_name` and write to disk.
+
+**Stage 4: Final Aggregation**
+*   **Shuffle Read:** Read partial sums/counts from Stage 3.
+*   **Final Aggregation:** Merge the partial sums/counts for each `dept_name`.
+    *   `Total Sum = sum(partial_sums)`
+    *   `Total Count = sum(partial_counts)`
+    *   `Average = Total Sum / Total Count`
+*   **Result:** Return final rows to the driver or write to output.
+
+### Key Optimizations in this Flow
+*   **Partial Aggregation:** drastically reduces data sent over the network between Stage 3 and 4.
+*   **Whole-Stage Codegen:** In Stage 3, the Sort -> Join -> Project -> Partial Aggregate chain is likely compiled into a single while-loop in Java, avoiding object creation for intermediate rows.
