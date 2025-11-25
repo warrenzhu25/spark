@@ -135,7 +135,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext
           val tsm = super.createTaskSetManager(taskSet, maxFailures)
           // we need to create a spied tsm just so we can set the SkewedExecutors
           val tsmSpy = spy[TaskSetManager](tsm)
-          when(tsmSpy.getSkewedExecutors()).thenReturn(Set("exe1"))
+          when(tsmSpy.getSkewedExecutors(any[Int])).thenReturn(Set("exe1"))
           when(tsmSpy.isShuffleMapTasks()).thenReturn(true)
           stageToMockTaskSetManager(taskSet.stageId) = tsmSpy
           tsmSpy
