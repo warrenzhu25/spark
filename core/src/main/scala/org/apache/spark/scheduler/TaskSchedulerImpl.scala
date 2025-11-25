@@ -397,6 +397,11 @@ private[spark] class TaskSchedulerImpl(
     // nodes and executors that are excluded for the entire application have already been
     // filtered out by this point
     val filteredOffers = filterShuffleSkewExecutors(taskSet, shuffledOffers)
+    // Map filteredOffers indices to shuffledOffers indices
+    // This allows us to correctly access the tasks array which is sized for shuffledOffers
+    val offerIndexMap = filteredOffers.map(offer => shuffledOffers.indexOf(offer))
+    assert(offerIndexMap.forall(_ >= 0),
+      "All filtered offers must exist in shuffled offers")
     for (i <- filteredOffers.indices) {
       val execId = filteredOffers(i).executorId
       val host = filteredOffers(i).host
@@ -417,13 +422,13 @@ private[spark] class TaskSchedulerImpl(
             noDelayScheduleRejects &= !didReject
             for (task <- taskDescOption) {
               val (locality, resources) = if (task != null) {
-                tasks(i) += task
+                tasks(offerIndexMap(i)) += task
                 addRunningTask(task.taskId, execId, taskSet)
                 (taskSet.taskInfos(task.taskId).taskLocality, task.resources)
               } else {
                 assert(taskSet.isBarrier, "TaskDescription can only be null for barrier task")
                 val barrierTask = taskSet.barrierPendingLaunchTasks(index)
-                barrierTask.assignedOfferIndex = i
+                barrierTask.assignedOfferIndex = offerIndexMap(i)
                 barrierTask.assignedCores = taskCpus
                 (barrierTask.taskLocality, barrierTask.assignedResources)
               }
