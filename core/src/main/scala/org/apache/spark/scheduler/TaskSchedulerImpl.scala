@@ -405,7 +405,7 @@ private[spark] class TaskSchedulerImpl(
       // on executors where resource profile exactly matches.
       // check whether the task can be scheduled to the executor base on resource profile.
       if (sc.resourceProfileManager
-        .canBeScheduled(taskSetRpID, shuffledOffers(i).resourceProfileId)) {
+        .canBeScheduled(taskSetRpID, filteredOffers(i).resourceProfileId)) {
         val taskResAssignmentsOpt = resourcesMeetTaskRequirements(taskSet, availableCpus(execId),
           availableResources(execId))
         taskResAssignmentsOpt.foreach { taskResAssignments =>
