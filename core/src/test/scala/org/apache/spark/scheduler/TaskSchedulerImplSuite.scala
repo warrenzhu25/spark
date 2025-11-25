@@ -229,6 +229,40 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext
     assert(!failedTaskSet)
   }
 
+  test("resource profile check with shuffle skew filtered executors") {
+    val taskScheduler = setupSchedulerWithMockTaskSetShuffleSkewExecutors()
+
+    // Create custom resource profile with GPU requirement
+    val execReqs = new ExecutorResourceRequests().cores(2).resource("gpu", 2)
+    val taskReqs = new TaskResourceRequests().cpus(1).resource("gpu", 1)
+    val customRP = new ResourceProfile(execReqs.requests, taskReqs.requests)
+    taskScheduler.sc.resourceProfileManager.addResourceProfile(customRP)
+
+    // Create mixed WorkerOffers:
+    // - exe0: default RP (should not get tasks)
+    // - exe1: default RP (mocked as skewed - filtered out)
+    // - exe2: custom RP (should get tasks)
+    // - exe3: custom RP (should get tasks)
+    val workerOffers = IndexedSeq(
+      WorkerOffer("exe0", "host0", 2),
+      WorkerOffer("exe1", "host1", 2),
+      WorkerOffer("exe2", "host2", 2, resourceProfileId = customRP.id),
+      WorkerOffer("exe3", "host3", 2, resourceProfileId = customRP.id))
+
+    // Submit taskset with custom resource profile requiring 2 tasks
+    val taskSet = FakeTask.createTaskSet(2, rpId = customRP.id)
+    taskScheduler.submitTasks(taskSet)
+
+    val taskDescriptions = taskScheduler.resourceOffers(workerOffers).flatten
+
+    // Verify: tasks should ONLY be on exe2 and exe3 (custom RP, non-filtered)
+    // Bug would cause tasks to be placed on wrong executors due to index mismatch
+    assert(taskDescriptions.length === 2)
+    assert(taskDescriptions.forall(t => t.executorId == "exe2" || t.executorId == "exe3"))
+    assert(taskDescriptions.forall(t => t.executorId != "exe0"))
+    assert(taskDescriptions.forall(t => t.executorId != "exe1"))
+  }
+
   test("Scheduler correctly accounts for multiple CPUs per task") {
     val taskCpus = 2
     val taskScheduler = setupSchedulerWithMaster(
