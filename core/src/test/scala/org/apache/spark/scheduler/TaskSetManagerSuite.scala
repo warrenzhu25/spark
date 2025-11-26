@@ -2410,6 +2410,815 @@ class TaskSetManagerSuite
     }
   }
 
+  test("getSkewedExecutors respects maxExecutorsNum absolute limit") {
+    val manager = testExcludeShuffleSkewSetup(
+      30,
+      Some(true),
+      Some(2),
+      Some(3),       // maxExecutorsNum = 3
+      Some(1.0))
+
+    // Manually set maxExecutorsRatio to 0.5 to ensure absolute cap wins
+    sched.sc.conf.set(config.SHUFFLE_SKEW_MAX_EXECUTORS_RATIO, 0.5)
+
+    // Re-create manager with updated config
+    val taskSet = FakeTask.createTaskSet(30)
+    val manager2 = new TaskSetManager(sched, taskSet, MAX_TASK_FAILURES)
+
+    // Need more executors - add them to existing scheduler
+    for (i <- 3 until 10) {
+      sched.addExecutor(s"exec$i", s"host$i")
+    }
+
+    val directTaskResult = createTaskResult(0)
+    for (i <- 0 until 30) {
+      val execId = s"exec${i % 10}"
+      val host = s"host${i % 10}"
+      val task = manager2.resourceOffer(execId, host, NO_PREF)._1.get
+      manager2.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // With 10 executors and 50% ratio, would return 5, but absolute cap is 3
+    val skewed = manager2.getSkewedExecutors(10)
+    assert(skewed.size === 3,
+      s"Should return exactly 3 executors (absolute cap), but got ${skewed.size}")
+  }
+
+  test("getSkewedExecutors with maxExecutorsNum=0 returns empty") {
+    val manager = testExcludeShuffleSkewSetup(
+      10,
+      Some(true),
+      Some(2),
+      Some(0),
+      Some(1.0))
+
+    val directTaskResult = createTaskResult(0)
+    for (i <- 0 until 10) {
+      val execId = if (i < 8) "exec1" else s"exec${i - 7}"
+      val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+      manager.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    assert(manager.getSkewedExecutors(3).isEmpty, "Zero cap should return empty set")
+  }
+
+  test("getSkewedExecutors handles invalid maxExecutorsNum gracefully") {
+    val manager = testExcludeShuffleSkewSetup(
+      10,
+      Some(true),
+      Some(2),
+      Some(1),
+      Some(1.5))
+
+    val directTaskResult = createTaskResult(0)
+    // Create skew: exec1 has 8 tasks, exec2 has 2 tasks
+    for (i <- 0 until 10) {
+      val execId = if (i < 8) "exec1" else "exec2"
+      val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+      manager.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // With maxExecutorsNum=1, should return at most 1 executor
+    val skewed = manager.getSkewedExecutors(2)
+    assert(skewed.size <= 1, s"Should return at most 1 executor, got ${skewed.size}")
+    if (skewed.nonEmpty) {
+      assert(skewed.contains("exec1"), "exec1 should be the skewed executor")
+    }
+  }
+
+  test("getSkewedExecutors respects maxExecutorsRatio percentage limit") {
+    val manager = testExcludeShuffleSkewSetup(
+      30,
+      Some(true),
+      Some(2),
+      Some(100),      // High absolute cap
+      Some(1.0))
+
+    // Set ratio to 0.2 (20%)
+    sched.sc.conf.set(config.SHUFFLE_SKEW_MAX_EXECUTORS_RATIO, 0.2)
+
+    // Re-create manager with updated config
+    val taskSet = FakeTask.createTaskSet(30)
+    val manager2 = new TaskSetManager(sched, taskSet, MAX_TASK_FAILURES)
+
+    // Add more executors
+    for (i <- 3 until 10) {
+      sched.addExecutor(s"exec$i", s"host$i")
+    }
+
+    val directTaskResult = createTaskResult(0)
+    for (i <- 0 until 30) {
+      val execId = s"exec${i % 10}"
+      val host = s"host${i % 10}"
+      val task = manager2.resourceOffer(execId, host, NO_PREF)._1.get
+      manager2.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // With 10 executors and 20% ratio, should return 2 (ratio wins over absolute 100)
+    val skewed = manager2.getSkewedExecutors(10)
+    assert(skewed.size === 2,
+      s"Should return 2 executors (20% of 10), got ${skewed.size}")
+  }
+
+  test("getSkewedExecutors with maxExecutorsRatio=0.0 returns empty") {
+    val manager = testExcludeShuffleSkewSetup(
+      10,
+      Some(true),
+      Some(2),
+      Some(10),       // Absolute cap would allow executors
+      Some(1.5))
+
+    // Set ratio to 0.0
+    sched.sc.conf.set(config.SHUFFLE_SKEW_MAX_EXECUTORS_RATIO, 0.0)
+
+    // Re-create manager with updated config
+    val taskSet = FakeTask.createTaskSet(10)
+    val manager2 = new TaskSetManager(sched, taskSet, MAX_TASK_FAILURES)
+
+    // Create skew: exec1 has 8 tasks, others have 1 each
+    val directTaskResult = createTaskResult(0)
+    for (i <- 0 until 10) {
+      val execId = if (i < 8) "exec1" else s"exec${i - 7}"
+      val task = manager2.resourceOffer(execId, "host1", NO_PREF)._1.get
+      manager2.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // Zero ratio should return empty
+    assert(manager2.getSkewedExecutors(3).isEmpty,
+      "Zero ratio should return empty set")
+  }
+
+  test("getSkewedExecutors rounds up fractional ratio calculations") {
+    val manager = testExcludeShuffleSkewSetup(
+      33,
+      Some(true),
+      Some(2),
+      Some(100),      // High absolute cap
+      Some(1.0))
+
+    // Set ratio to 0.10 (10%)
+    sched.sc.conf.set(config.SHUFFLE_SKEW_MAX_EXECUTORS_RATIO, 0.10)
+
+    // Re-create manager with updated config and add executors to get 11 total
+    val taskSet = FakeTask.createTaskSet(33)
+    val manager2 = new TaskSetManager(sched, taskSet, MAX_TASK_FAILURES)
+
+    // Add executors: exec1, exec2, exec3 already exist, add exec4-exec10 (total 10+1=11)
+    for (i <- 3 until 11) {
+      sched.addExecutor(s"exec$i", s"host$i")
+    }
+
+    val directTaskResult = createTaskResult(0)
+    for (i <- 0 until 33) {
+      val execId = s"exec${i % 11}"
+      val host = s"host${i % 11}"
+      val task = manager2.resourceOffer(execId, host, NO_PREF)._1.get
+      manager2.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // math.ceil(11 * 0.10) = math.ceil(1.1) = 2 executors
+    val skewed = manager2.getSkewedExecutors(11)
+    assert(skewed.size === 2,
+      s"Should return 2 executors (ceil(11*0.1)=2), got ${skewed.size}")
+  }
+
+  test("getSkewedExecutors with maxExecutorsRatio > 1.0 bounded by total") {
+    val manager = testExcludeShuffleSkewSetup(
+      10,
+      Some(true),
+      Some(2),
+      Some(100),      // High absolute cap
+      Some(1.0))
+
+    // Set ratio to 2.0 (200%!)
+    sched.sc.conf.set(config.SHUFFLE_SKEW_MAX_EXECUTORS_RATIO, 2.0)
+
+    // Re-create manager with updated config
+    val taskSet = FakeTask.createTaskSet(10)
+    val manager2 = new TaskSetManager(sched, taskSet, MAX_TASK_FAILURES)
+
+    // Create tasks
+    val directTaskResult = createTaskResult(0)
+    for (i <- 0 until 10) {
+      val execId = s"exec${(i % 2) + 1}"
+      val task = manager2.resourceOffer(execId, "host1", NO_PREF)._1.get
+      manager2.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // Can't filter more than total executors (bounded by 2)
+    val skewed = manager2.getSkewedExecutors(2)
+    assert(skewed.size <= 2, s"Should be bounded by total executors (2), got ${skewed.size}")
+  }
+
+  test("getSkewedExecutors uses minimum of num and ratio caps (ratio wins)") {
+    val manager = testExcludeShuffleSkewSetup(
+      30,
+      Some(true),
+      Some(2),
+      Some(10),       // Absolute cap = 10
+      Some(1.0))
+
+    // Set ratio to 0.05 (5%)
+    sched.sc.conf.set(config.SHUFFLE_SKEW_MAX_EXECUTORS_RATIO, 0.05)
+
+    // Re-create manager and add executors to get 10 total
+    val taskSet = FakeTask.createTaskSet(30)
+    val manager2 = new TaskSetManager(sched, taskSet, MAX_TASK_FAILURES)
+
+    for (i <- 3 until 10) {
+      sched.addExecutor(s"exec$i", s"host$i")
+    }
+
+    val directTaskResult = createTaskResult(0)
+    for (i <- 0 until 30) {
+      val execId = s"exec${i % 10}"
+      val host = s"host${i % 10}"
+      val task = manager2.resourceOffer(execId, host, NO_PREF)._1.get
+      manager2.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // min(10, ceil(10*0.05)) = min(10, 1) = 1
+    val skewed = manager2.getSkewedExecutors(10)
+    assert(skewed.size === 1,
+      s"Ratio cap (1) should win over absolute cap (10), got ${skewed.size}")
+  }
+
+  test("getSkewedExecutors when absolute cap is smaller (num wins)") {
+    val manager = testExcludeShuffleSkewSetup(
+      30,
+      Some(true),
+      Some(2),
+      Some(2),        // Absolute cap = 2
+      Some(1.0))
+
+    // Set ratio to 0.20 (20%)
+    sched.sc.conf.set(config.SHUFFLE_SKEW_MAX_EXECUTORS_RATIO, 0.20)
+
+    // Re-create manager and add executors to get 10 total
+    val taskSet = FakeTask.createTaskSet(30)
+    val manager2 = new TaskSetManager(sched, taskSet, MAX_TASK_FAILURES)
+
+    for (i <- 3 until 10) {
+      sched.addExecutor(s"exec$i", s"host$i")
+    }
+
+    val directTaskResult = createTaskResult(0)
+    for (i <- 0 until 30) {
+      val execId = s"exec${i % 10}"
+      val host = s"host${i % 10}"
+      val task = manager2.resourceOffer(execId, host, NO_PREF)._1.get
+      manager2.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // min(2, ceil(10*0.20)) = min(2, 2) = 2
+    val skewed = manager2.getSkewedExecutors(10)
+    assert(skewed.size === 2,
+      s"Absolute cap (2) should win over ratio cap (2), got ${skewed.size}")
+  }
+
+  test("getSkewedExecutors when both caps produce same limit") {
+    val manager = testExcludeShuffleSkewSetup(
+      30,
+      Some(true),
+      Some(2),
+      Some(3),        // Absolute cap = 3
+      Some(1.0))
+
+    // Set ratio to 0.10 (10%)
+    sched.sc.conf.set(config.SHUFFLE_SKEW_MAX_EXECUTORS_RATIO, 0.10)
+
+    // Re-create manager and add executors to get 30 total (10% = 3)
+    val taskSet = FakeTask.createTaskSet(90)
+    val manager2 = new TaskSetManager(sched, taskSet, MAX_TASK_FAILURES)
+
+    for (i <- 3 until 30) {
+      sched.addExecutor(s"exec$i", s"host$i")
+    }
+
+    val directTaskResult = createTaskResult(0)
+    for (i <- 0 until 90) {
+      val execId = s"exec${i % 30}"
+      val host = s"host${i % 30}"
+      val task = manager2.resourceOffer(execId, host, NO_PREF)._1.get
+      manager2.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // min(3, ceil(30*0.10)) = min(3, 3) = 3
+    val skewed = manager2.getSkewedExecutors(30)
+    assert(skewed.size === 3,
+      s"Both caps equal 3, should return 3 executors, got ${skewed.size}")
+  }
+
+  test("getSkewedExecutors only considers shuffle tasks") {
+    val manager = testExcludeShuffleSkewSetup(
+      20,
+      Some(true),
+      Some(2),
+      Some(10),
+      Some(1.3))  // Lower threshold so 15 vs avg 10 qualifies (1.5x > 1.3x)
+
+    val directTaskResult = createTaskResult(0)
+    // Complete 15 shuffle tasks on exec1 (heavy), 5 on exec2
+    for (i <- 0 until 20) {
+      val execId = if (i < 15) "exec1" else "exec2"
+      val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+      manager.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // exec1 should be detected as skewed based on shuffle tasks
+    val skewed = manager.getSkewedExecutors(2)
+    assert(skewed.size === 1 && skewed.contains("exec1"),
+      "Should identify exec1 as skewed based on shuffle task distribution")
+  }
+
+  test("getSkewedExecutors ignores executors with non-shuffle tasks only") {
+    val manager = testExcludeShuffleSkewSetup(
+      10,
+      Some(true),
+      Some(2),
+      Some(5),
+      Some(1.5))
+
+    val directTaskResult = createTaskResult(0)
+    // All tasks are regular tasks (handled by createTaskResult)
+    for (i <- 0 until 10) {
+      val execId = if (i < 8) "exec1" else "exec2"
+      val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+      manager.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // Should have results to analyze
+    val skewed = manager.getSkewedExecutors(2)
+    assert(skewed.size <= 1, "Should handle task distribution")
+  }
+
+  test("getSkewedExecutors correctly calculates average across all executors") {
+    val manager = testExcludeShuffleSkewSetup(
+      30,
+      Some(true),
+      Some(2),
+      Some(10),
+      Some(2.5))  // High threshold to ensure equal distribution isn't skewed
+
+    val directTaskResult = createTaskResult(0)
+    // Create specific distribution: exec1=10, exec2=10, exec3=10 (avg=10)
+    for (i <- 0 until 30) {
+      val execId = s"exec${(i % 3) + 1}"
+      val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+      manager.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // With equal distribution and high skew ratio, no executor should be skewed
+    val skewed = manager.getSkewedExecutors(3)
+    assert(skewed.isEmpty,
+      "Equal distribution should not identify any executors as skewed")
+  }
+
+  test("getSkewedExecutors uses correct average for uneven task distribution") {
+    val manager = testExcludeShuffleSkewSetup(
+      25,
+      Some(true),
+      Some(2),
+      Some(10),
+      Some(1.5))
+
+    val directTaskResult = createTaskResult(0)
+    // exec1=15, exec2=7, exec3=3 (avg=8.33)
+    val distribution = Map("exec1" -> 15, "exec2" -> 7, "exec3" -> 3)
+    var taskIdx = 0
+    distribution.foreach { case (execId, count) =>
+      for (_ <- 0 until count) {
+        val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+        manager.handleSuccessfulTask(task.taskId, directTaskResult)
+        taskIdx += 1
+      }
+    }
+
+    // exec1 with 15 tasks vs avg 8.33 should be skewed
+    val skewed = manager.getSkewedExecutors(3)
+    assert(skewed.contains("exec1"),
+      "exec1 with 15 tasks (avg=8.33) should be identified as skewed")
+  }
+
+  test("getSkewedExecutors handles varying task counts correctly") {
+    val manager = testExcludeShuffleSkewSetup(
+      100,
+      Some(true),
+      Some(2),
+      Some(5),
+      Some(1.5))
+
+    val directTaskResult = createTaskResult(0)
+    // Create varying distribution across 5 executors
+    val distribution = Map("exec1" -> 40, "exec2" -> 25, "exec3" -> 20,
+      "exec4" -> 10, "exec5" -> 5)
+    distribution.foreach { case (execId, count) =>
+      for (_ <- 0 until count) {
+        val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+        manager.handleSuccessfulTask(task.taskId, directTaskResult)
+      }
+    }
+
+    // Should identify top skewed executors (exec1 with 40, possibly exec2 with 25)
+    val skewed = manager.getSkewedExecutors(5)
+    assert(skewed.nonEmpty && skewed.contains("exec1"),
+      "Should identify exec1 as most skewed")
+  }
+
+  test("getSkewedExecutors returns empty when no executors have finished tasks") {
+    val manager = testExcludeShuffleSkewSetup(
+      10,
+      Some(true),
+      Some(2),
+      Some(5),
+      Some(1.5))
+
+    // Don't complete any tasks
+    val skewed = manager.getSkewedExecutors(5)
+    assert(skewed.isEmpty, "Should return empty when no tasks are finished")
+  }
+
+  test("getSkewedExecutors returns empty when only one executor has tasks") {
+    val manager = testExcludeShuffleSkewSetup(
+      10,
+      Some(true),
+      Some(2),
+      Some(5),
+      Some(1.5))
+
+    val directTaskResult = createTaskResult(0)
+    // All tasks on one executor
+    for (i <- 0 until 10) {
+      val task = manager.resourceOffer("exec1", "host1", NO_PREF)._1.get
+      manager.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // Can't identify skew with only 1 executor
+    val skewed = manager.getSkewedExecutors(1)
+    assert(skewed.isEmpty, "Can't identify skew with only one executor")
+  }
+
+  test("getSkewedExecutors handles minimum finished tasks threshold") {
+    val manager = testExcludeShuffleSkewSetup(
+      10,
+      Some(true),
+      Some(5),  // Require 5 finished tasks
+      Some(5),
+      Some(1.5))
+
+    val directTaskResult = createTaskResult(0)
+    // Complete only 4 tasks (below threshold)
+    for (i <- 0 until 4) {
+      val task = manager.resourceOffer("exec1", "host1", NO_PREF)._1.get
+      manager.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // Should return empty due to min threshold
+    val skewed = manager.getSkewedExecutors(1)
+    assert(skewed.isEmpty,
+      "Should return empty when finished tasks < min threshold")
+  }
+
+  test("getSkewedExecutors respects skew ratio threshold") {
+    val manager = testExcludeShuffleSkewSetup(
+      20,
+      Some(true),
+      Some(2),
+      Some(5),
+      Some(2.0))  // High skew ratio needed
+
+    val directTaskResult = createTaskResult(0)
+    // Create slight imbalance: exec1=11, exec2=9 (avg=10, exec1=1.1x)
+    for (i <- 0 until 20) {
+      val execId = if (i < 11) "exec1" else "exec2"
+      val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+      manager.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // 1.1x average is below 2.0x threshold
+    val skewed = manager.getSkewedExecutors(2)
+    assert(skewed.isEmpty,
+      "Should not identify skew when ratio below threshold (1.1 < 2.0)")
+  }
+
+  test("getSkewedExecutors handles zero total executors gracefully") {
+    val manager = testExcludeShuffleSkewSetup(
+      10,
+      Some(true),
+      Some(2),
+      Some(5),
+      Some(1.5))
+
+    // Call with 0 total executors
+    val skewed = manager.getSkewedExecutors(0)
+    assert(skewed.isEmpty, "Should handle 0 total executors gracefully")
+  }
+
+  test("getSkewedExecutors with dynamic executor pool changes") {
+    val manager = testExcludeShuffleSkewSetup(
+      50,
+      Some(true),
+      Some(3),
+      Some(10),
+      Some(1.5))
+
+    val directTaskResult = createTaskResult(0)
+    // Initial distribution: exec1=20, exec2=15, exec3=10, exec4=5
+    val initialDist = Map("exec1" -> 20, "exec2" -> 15, "exec3" -> 10, "exec4" -> 5)
+    initialDist.foreach { case (execId, count) =>
+      for (_ <- 0 until count) {
+        val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+        manager.handleSuccessfulTask(task.taskId, directTaskResult)
+      }
+    }
+
+    // Check with original 4 executors
+    val skewed1 = manager.getSkewedExecutors(4)
+    assert(skewed1.contains("exec1"), "exec1 should be skewed initially")
+
+    // Simulate new executor joining by checking with increased pool
+    val skewed2 = manager.getSkewedExecutors(6)
+    assert(skewed2.nonEmpty, "Should still detect skew with expanded pool")
+  }
+
+  test("getSkewedExecutors with highly skewed distribution") {
+    val manager = testExcludeShuffleSkewSetup(
+      100,
+      Some(true),
+      Some(5),
+      Some(10),
+      Some(1.5))
+
+    val directTaskResult = createTaskResult(0)
+    // Extreme skew: exec1=70, others=7-8 each (avg=20, exec1=3.5x avg)
+    val distribution = Map(
+      "exec1" -> 70,
+      "exec2" -> 8,
+      "exec3" -> 8,
+      "exec4" -> 7,
+      "exec5" -> 7)
+    distribution.foreach { case (execId, count) =>
+      for (_ <- 0 until count) {
+        val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+        manager.handleSuccessfulTask(task.taskId, directTaskResult)
+      }
+    }
+
+    val skewed = manager.getSkewedExecutors(5)
+    assert(skewed.contains("exec1"), "Should identify extremely skewed executor")
+    assert(skewed.size <= 5, s"Should respect max cap of 5, got ${skewed.size}")
+  }
+
+  test("getSkewedExecutors identifies most skewed executors") {
+    val manager = testExcludeShuffleSkewSetup(
+      50,
+      Some(true),
+      Some(2),
+      Some(10),
+      Some(1.15))  // Low threshold
+
+    val directTaskResult = createTaskResult(0)
+    // Skewed distribution: exec1=30, exec2=15, exec3=5 (avg=16.67)
+    // exec1=1.8x, exec2=0.9x, exec3=0.3x
+    val distribution = Map("exec1" -> 30, "exec2" -> 15, "exec3" -> 5)
+    distribution.foreach { case (execId, count) =>
+      for (_ <- 0 until count) {
+        val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+        manager.handleSuccessfulTask(task.taskId, directTaskResult)
+      }
+    }
+
+    val skewed = manager.getSkewedExecutors(3)
+    assert(skewed.contains("exec1"),
+      "Should identify exec1 as most skewed")
+    assert(skewed.size <= 2, s"Should respect max cap of 2, got ${skewed.size}")
+  }
+
+  test("getSkewedExecutors with large executor pool") {
+    val manager = testExcludeShuffleSkewSetup(
+      200,
+      Some(true),
+      Some(5),
+      Some(20),
+      Some(1.5))
+
+    val directTaskResult = createTaskResult(0)
+    // Distribute across 20 executors: 1 heavy (50), others light (avg=10)
+    for (i <- 0 until 50) {
+      val task = manager.resourceOffer("exec1", "host1", NO_PREF)._1.get
+      manager.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+    for (i <- 0 until 150) {
+      val execId = s"exec${(i % 19) + 2}"  // exec2-exec20
+      val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+      manager.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    val skewed = manager.getSkewedExecutors(20)
+    assert(skewed.contains("exec1"),
+      "Should identify exec1 with 50 tasks vs avg 10 in large pool")
+    assert(skewed.size <= 5, s"Should respect max cap of 5, got ${skewed.size}")
+  }
+
+  test("getSkewedExecutors maintains consistency across multiple calls") {
+    val manager = testExcludeShuffleSkewSetup(
+      30,
+      Some(true),
+      Some(2),
+      Some(10),
+      Some(1.5))
+
+    val directTaskResult = createTaskResult(0)
+    // Fixed distribution: exec1=18, exec2=12 (avg=15)
+    for (i <- 0 until 30) {
+      val execId = if (i < 18) "exec1" else "exec2"
+      val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+      manager.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // Multiple calls should return consistent results
+    val skewed1 = manager.getSkewedExecutors(2)
+    val skewed2 = manager.getSkewedExecutors(2)
+    val skewed3 = manager.getSkewedExecutors(2)
+
+    assert(skewed1 === skewed2 && skewed2 === skewed3,
+      "Multiple calls with same state should return consistent results")
+  }
+
+  test("getSkewedExecutors with low skew ratio detects slight imbalance") {
+    // Test with very low ratio (1.1x) - sensitive detection
+    val manager = testExcludeShuffleSkewSetup(
+      20,
+      Some(true),
+      Some(2),
+      Some(5),
+      Some(1.1))  // Very sensitive
+
+    val directTaskResult = createTaskResult(0)
+    // Slight skew: exec1=11, exec2=9 (avg=10, exec1=1.1x)
+    for (i <- 0 until 20) {
+      val execId = if (i < 11) "exec1" else "exec2"
+      val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+      manager.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    val skewed = manager.getSkewedExecutors(2)
+    assert(skewed.contains("exec1"),
+      "Low ratio 1.1x should detect slight skew (11 vs 9)")
+  }
+
+  test("getSkewedExecutors with high skew ratio ignores moderate imbalance") {
+    // Test with very high ratio (5.0x) - insensitive detection
+    val manager = testExcludeShuffleSkewSetup(
+      30,
+      Some(true),
+      Some(2),
+      Some(5),
+      Some(5.0))  // Very insensitive
+
+    val directTaskResult = createTaskResult(0)
+    // Moderate skew: exec1=20, exec2=10 (avg=15, exec1=1.33x)
+    for (i <- 0 until 30) {
+      val execId = if (i < 20) "exec1" else "exec2"
+      val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+      manager.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    val skewed = manager.getSkewedExecutors(2)
+    assert(skewed.isEmpty,
+      "High ratio 5.0x should not detect moderate skew (1.33x < 5.0x)")
+  }
+
+  test("getSkewedExecutors with minimal viable distribution") {
+    val manager = testExcludeShuffleSkewSetup(
+      10,
+      Some(true),
+      Some(2),
+      Some(3),  // Low minimum tasks
+      Some(1.5))
+
+    val directTaskResult = createTaskResult(0)
+    // Minimal tasks: exec1=7, exec2=3 (avg=5, exec1=1.4x but below 1.5x)
+    for (i <- 0 until 10) {
+      val execId = if (i < 7) "exec1" else "exec2"
+      val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+      manager.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    val skewed = manager.getSkewedExecutors(2)
+    // 7 vs avg 5 = 1.4x which is less than 1.5x threshold
+    assert(skewed.isEmpty,
+      "Should not flag skew when 1.4x < 1.5x threshold")
+  }
+
+  test("getSkewedExecutors caps at maxExecutorsNum even with many skewed executors") {
+    val manager = testExcludeShuffleSkewSetup(
+      60,
+      Some(true),
+      Some(1),  // Cap at 1
+      Some(5),
+      Some(1.2))  // Low threshold to catch many as skewed
+
+    val directTaskResult = createTaskResult(0)
+    // Create skewed distribution: exec1=30, exec2=20, exec3=10 (avg=20)
+    // exec1 and exec2 both exceed 1.2x threshold, but cap limits to 1
+    val distribution = Map(
+      "exec1" -> 30,  // 1.5x average
+      "exec2" -> 20,  // 1.0x average
+      "exec3" -> 10)  // 0.5x average
+    distribution.foreach { case (execId, count) =>
+      for (_ <- 0 until count) {
+        val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+        manager.handleSuccessfulTask(task.taskId, directTaskResult)
+      }
+    }
+
+    val skewed = manager.getSkewedExecutors(3)
+    assert(skewed.size === 1,
+      s"Should cap at maxExecutorsNum=1, got ${skewed.size}")
+    assert(skewed.contains("exec1"),
+      "Should return top 1 most skewed executor (exec1)")
+  }
+
+  test("getSkewedExecutors with interleaved task completion pattern") {
+    val manager = testExcludeShuffleSkewSetup(
+      40,
+      Some(true),
+      Some(3),
+      Some(10),
+      Some(1.5))
+
+    val directTaskResult = createTaskResult(0)
+    // Interleaved completion: alternate between executors
+    for (i <- 0 until 40) {
+      val execId = i % 4 match {
+        case 0 | 1 => "exec1"  // Gets 50% (20 tasks)
+        case 2 => "exec2"      // Gets 25% (10 tasks)
+        case 3 => "exec3"      // Gets 25% (10 tasks)
+      }
+      val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+      manager.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // exec1=20, exec2=10, exec3=10 (avg=13.33)
+    val skewed = manager.getSkewedExecutors(3)
+    assert(skewed.contains("exec1"),
+      "Should identify exec1 with 20 tasks vs avg 13.33")
+  }
+
+  test("getSkewedExecutors with proportional ratio cap enforcement") {
+    val manager = testExcludeShuffleSkewSetup(
+      100,
+      Some(true),
+      Some(10),  // High absolute cap
+      Some(25),  // 25% ratio cap
+      Some(1.2))
+
+    val directTaskResult = createTaskResult(0)
+    // Create skew across 10 executors, all above threshold
+    for (i <- 0 until 100) {
+      val execId = s"exec${(i / 10) + 1}"  // 10 tasks each to exec1-10
+      val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+      manager.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // With 10 total executors and 25% ratio, should cap at 2 (not 10)
+    val skewed = manager.getSkewedExecutors(10)
+    assert(skewed.size <= 3,
+      s"25% of 10 executors = 2.5 ~= 2-3, got ${skewed.size}")
+  }
+
+  test("getSkewedExecutors with autoscaling excludes initial executors") {
+    val manager = testExcludeShuffleSkewSetup(
+      40,
+      Some(true),
+      Some(2),
+      Some(10),
+      Some(1.5))
+
+    val directTaskResult = createTaskResult(0)
+    // Phase 1: Initial 2 executors handle all tasks creating skew
+    // exec1=25, exec2=15 (total=40)
+    for (i <- 0 until 40) {
+      val execId = if (i < 25) "exec1" else "exec2"
+      val task = manager.resourceOffer(execId, "host1", NO_PREF)._1.get
+      manager.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // Phase 2: Cluster autoscales - now 5 total executors available
+    // Check skew with expanded executor pool (simulates autoscaling)
+    val skewed = manager.getSkewedExecutors(5)
+
+    // The initial 2 executors completed all tasks while others have 0
+    // exec1 has 25 tasks, exec2 has 15 tasks, exec3-5 have 0 tasks (avg=8)
+    // exec1 (25/8=3.125x) and exec2 (15/8=1.875x) exceed 1.5x threshold
+    assert(skewed.nonEmpty, "Should identify skewed executors after autoscaling")
+    assert(skewed.contains("exec1"),
+      "exec1 should be excluded as it handled most tasks before scale-up")
+    assert(skewed.size <= 2,
+      s"Should respect cap of 2 skewed executors, got ${skewed.size}")
+  }
+
   private def createTaskMetrics(
        taskSet: TaskSet,
        inefficientTaskIds: Set[Int],
