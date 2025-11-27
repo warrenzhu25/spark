@@ -18,7 +18,9 @@
 package org.apache.spark.network.server;
 
 import java.net.SocketAddress;
+import java.util.concurrent.TimeUnit;
 
+import com.codahale.metrics.Timer;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
@@ -36,6 +38,7 @@ import org.apache.spark.network.protocol.ChunkFetchRequest;
 import org.apache.spark.network.protocol.ChunkFetchSuccess;
 import org.apache.spark.network.protocol.Encodable;
 import org.apache.spark.network.util.JavaUtils;
+import org.apache.spark.network.shuffle.ShuffleFetchMetrics;
 
 import static org.apache.spark.network.util.NettyUtils.*;
 
@@ -59,16 +62,46 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
   /** The max number of chunks being transferred and not finished yet. */
   private final long maxChunksBeingTransferred;
   private final boolean syncModeEnabled;
+  // Metrics for timing breakdown
+  private final Timer shuffleFetchRequestDurationMillis;
+  private final Timer getChunkLatencyMillis;
+  private final Timer respondLatencyMillis;
 
   public ChunkFetchRequestHandler(
       TransportClient client,
       StreamManager streamManager,
       Long maxChunksBeingTransferred,
       boolean syncModeEnabled) {
+    this(client, streamManager, maxChunksBeingTransferred, syncModeEnabled, null, null, null);
+  }
+
+  public ChunkFetchRequestHandler(
+      TransportClient client,
+      StreamManager streamManager,
+      Long maxChunksBeingTransferred,
+      boolean syncModeEnabled,
+      ShuffleFetchMetrics metrics) {
+    this(client, streamManager, maxChunksBeingTransferred, syncModeEnabled,
+      metrics != null ? metrics.getShuffleFetchRequestDurationMillis() : null,
+      metrics != null ? metrics.getGetChunkLatencyMillis() : null,
+      metrics != null ? metrics.getRespondLatencyMillis() : null);
+  }
+
+  public ChunkFetchRequestHandler(
+      TransportClient client,
+      StreamManager streamManager,
+      Long maxChunksBeingTransferred,
+      boolean syncModeEnabled,
+      Timer shuffleFetchRequestDurationMillis,
+      Timer getChunkLatencyMillis,
+      Timer respondLatencyMillis) {
     this.client = client;
     this.streamManager = streamManager;
     this.maxChunksBeingTransferred = maxChunksBeingTransferred;
     this.syncModeEnabled = syncModeEnabled;
+    this.shuffleFetchRequestDurationMillis = shuffleFetchRequestDurationMillis;
+    this.getChunkLatencyMillis = getChunkLatencyMillis;
+    this.respondLatencyMillis = respondLatencyMillis;
   }
 
   @Override
@@ -88,6 +121,9 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
 
   public void processFetchRequest(
       final Channel channel, final ChunkFetchRequest msg) throws Exception {
+    // Start timing total request processing
+    long requestStartNanos = System.nanoTime();
+
     if (logger.isTraceEnabled()) {
       logger.trace("Received req from {} to fetch block {}", getRemoteAddress(channel),
         msg.streamChunkId);
@@ -105,7 +141,16 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
     ManagedBuffer buf;
     try {
       streamManager.checkAuthorization(client, msg.streamChunkId.streamId());
+
+      // Time getChunk (disk I/O) separately for breakdown
+      long getChunkStartNanos = System.nanoTime();
       buf = streamManager.getChunk(msg.streamChunkId.streamId(), msg.streamChunkId.chunkIndex());
+      long getChunkDurationNanos = System.nanoTime() - getChunkStartNanos;
+
+      if (getChunkLatencyMillis != null) {
+        getChunkLatencyMillis.update(getChunkDurationNanos, TimeUnit.NANOSECONDS);
+      }
+
       if (buf == null) {
         throw new IllegalStateException("Chunk was not found");
       }
@@ -113,14 +158,41 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
       logger.error("Error opening block {} for request from {}", e,
         MDC.of(LogKeys.STREAM_CHUNK_ID, msg.streamChunkId),
         MDC.of(LogKeys.HOST_PORT, getRemoteAddress(channel)));
+      long respondStartNanos = System.nanoTime();
       respond(channel, new ChunkFetchFailure(msg.streamChunkId,
-        JavaUtils.stackTraceToString(e)));
+        JavaUtils.stackTraceToString(e))).addListener((ChannelFutureListener) future -> {
+          if (respondLatencyMillis != null) {
+            long respondDurationNanos = System.nanoTime() - respondStartNanos;
+            respondLatencyMillis.update(respondDurationNanos, TimeUnit.NANOSECONDS);
+          }
+          if (shuffleFetchRequestDurationMillis != null) {
+            long totalDuration = System.nanoTime() - requestStartNanos;
+            shuffleFetchRequestDurationMillis.update(totalDuration, TimeUnit.NANOSECONDS);
+          }
+        });
       return;
     }
 
     streamManager.chunkBeingSent(msg.streamChunkId.streamId());
+
+    // Time respond operation separately for breakdown
+    long respondStartNanos = System.nanoTime();
     respond(channel, new ChunkFetchSuccess(msg.streamChunkId, buf)).addListener(
-      (ChannelFutureListener) future -> streamManager.chunkSent(msg.streamChunkId.streamId()));
+      (ChannelFutureListener) future -> {
+        streamManager.chunkSent(msg.streamChunkId.streamId());
+
+        // Update respond time after response is sent
+        if (respondLatencyMillis != null) {
+          long respondDurationNanos = System.nanoTime() - respondStartNanos;
+          respondLatencyMillis.update(respondDurationNanos, TimeUnit.NANOSECONDS);
+        }
+
+        // Update total processing time (used for wait estimation)
+        if (shuffleFetchRequestDurationMillis != null) {
+          long totalDuration = System.nanoTime() - requestStartNanos;
+          shuffleFetchRequestDurationMillis.update(totalDuration, TimeUnit.NANOSECONDS);
+        }
+      });
   }
 
   /**
