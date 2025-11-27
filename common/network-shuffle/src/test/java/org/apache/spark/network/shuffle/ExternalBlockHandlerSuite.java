@@ -482,4 +482,122 @@ public class ExternalBlockHandlerSuite {
       .get("blockTransferRateBytes");
     assertEquals(24, blockTransferRateBytes.getCount());
   }
+
+  @Test
+  public void testShuffleFetchMetricsExposed() {
+    // Verify that shuffle fetch metrics are properly exposed in the metrics registry
+    Map<String, Metric> metrics = ((ExternalBlockHandler) handler)
+      .getAllMetrics()
+      .getMetrics();
+
+    // Verify all four shuffle fetch metrics are registered
+    assertTrue(metrics.containsKey("chunkFetchLatencyMillis"),
+      "chunkFetchLatencyMillis should be registered");
+    assertTrue(metrics.containsKey("chunkReadLatencyMillis"),
+      "chunkReadLatencyMillis should be registered");
+    assertTrue(metrics.containsKey("responseSendLatencyMillis"),
+      "responseSendLatencyMillis should be registered");
+    assertTrue(metrics.containsKey("chunkFetchQueueDepth"),
+      "chunkFetchQueueDepth should be registered");
+
+    // Verify they are correct types
+    assertTrue(metrics.get("chunkFetchLatencyMillis") instanceof Timer,
+      "chunkFetchLatencyMillis should be a Timer");
+    assertTrue(metrics.get("chunkReadLatencyMillis") instanceof Timer,
+      "chunkReadLatencyMillis should be a Timer");
+    assertTrue(metrics.get("responseSendLatencyMillis") instanceof Timer,
+      "responseSendLatencyMillis should be a Timer");
+    assertTrue(metrics.get("chunkFetchQueueDepth") instanceof com.codahale.metrics.Counter,
+      "chunkFetchQueueDepth should be a Counter");
+
+    // Verify initial values
+    Timer chunkFetchLatencyMillis = (Timer) metrics.get("chunkFetchLatencyMillis");
+    Timer chunkReadLatencyMillis = (Timer) metrics.get("chunkReadLatencyMillis");
+    Timer responseSendLatencyMillis = (Timer) metrics.get("responseSendLatencyMillis");
+    com.codahale.metrics.Counter queueDepth =
+      (com.codahale.metrics.Counter) metrics.get("chunkFetchQueueDepth");
+
+    assertEquals(0, chunkFetchLatencyMillis.getCount(),
+      "Initial count should be 0");
+    assertEquals(0, chunkReadLatencyMillis.getCount(),
+      "Initial count should be 0");
+    assertEquals(0, responseSendLatencyMillis.getCount(),
+      "Initial count should be 0");
+    assertEquals(0, queueDepth.getCount(),
+      "Initial queue depth should be 0");
+  }
+
+  @Test
+  public void testShuffleMetricsSourceInterface() {
+    // Verify ExternalBlockHandler implements ShuffleMetricsSource
+    assertTrue(handler instanceof ShuffleMetricsSource,
+      "ExternalBlockHandler should implement ShuffleMetricsSource");
+
+    // Get metrics through the interface
+    ShuffleFetchMetrics fetchMetrics =
+      ((ShuffleMetricsSource) handler).getShuffleFetchMetrics();
+    assertNotNull(fetchMetrics, "ShuffleFetchMetrics should not be null");
+
+    // Verify the metrics container has all metrics
+    assertNotNull(fetchMetrics.getChunkFetchLatencyMillis(),
+      "chunkFetchLatencyMillis should not be null");
+    assertNotNull(fetchMetrics.getChunkReadLatencyMillis(),
+      "chunkReadLatencyMillis should not be null");
+    assertNotNull(fetchMetrics.getResponseSendLatencyMillis(),
+      "responseSendLatencyMillis should not be null");
+    assertNotNull(fetchMetrics.getChunkFetchQueueDepth(),
+      "chunkFetchQueueDepth should not be null");
+
+    // Verify the metrics from the interface are the same as in the registry
+    Map<String, Metric> registeredMetrics = ((ExternalBlockHandler) handler)
+      .getAllMetrics()
+      .getMetrics();
+
+    assertSame(fetchMetrics.getChunkFetchLatencyMillis(),
+      registeredMetrics.get("chunkFetchLatencyMillis"),
+      "Metrics from interface should be same as registered metrics");
+    assertSame(fetchMetrics.getChunkReadLatencyMillis(),
+      registeredMetrics.get("chunkReadLatencyMillis"),
+      "Metrics from interface should be same as registered metrics");
+    assertSame(fetchMetrics.getResponseSendLatencyMillis(),
+      registeredMetrics.get("responseSendLatencyMillis"),
+      "Metrics from interface should be same as registered metrics");
+    assertSame(fetchMetrics.getChunkFetchQueueDepth(),
+      registeredMetrics.get("chunkFetchQueueDepth"),
+      "Metrics from interface should be same as registered metrics");
+  }
+
+  @Test
+  public void testShuffleFetchMetricsNaming() {
+    // Verify metric names follow conventions
+    Map<String, Metric> metrics = ((ExternalBlockHandler) handler)
+      .getAllMetrics()
+      .getMetrics();
+
+    // All three metrics should use "LatencyMillis" suffix (except chunkFetch)
+    String chunkFetchName = "chunkFetchLatencyMillis";
+    String chunkReadName = "chunkReadLatencyMillis";
+    String responseSendName = "responseSendLatencyMillis";
+
+    assertTrue(metrics.containsKey(chunkFetchName),
+      "Metric name should be " + chunkFetchName);
+    assertTrue(metrics.containsKey(chunkReadName),
+      "Metric name should be " + chunkReadName);
+    assertTrue(metrics.containsKey(responseSendName),
+      "Metric name should be " + responseSendName);
+
+    // Verify they follow the same pattern as existing metrics
+    assertTrue(metrics.containsKey("openBlockRequestLatencyMillis"),
+      "Existing metric pattern check");
+    assertTrue(metrics.containsKey("registerExecutorRequestLatencyMillis"),
+      "Existing metric pattern check");
+
+    // All latency metrics should end with "LatencyMillis"
+    assertTrue(chunkFetchName.endsWith("LatencyMillis"),
+      "Should follow naming pattern");
+    assertTrue(chunkReadName.endsWith("LatencyMillis"),
+      "Should follow naming pattern");
+    assertTrue(responseSendName.endsWith("LatencyMillis"),
+      "Should follow naming pattern");
+  }
 }

@@ -51,6 +51,8 @@ import org.apache.spark.network.protocol.MergedBlockMetaRequest;
 import org.apache.spark.network.server.OneForOneStreamManager;
 import org.apache.spark.network.server.RpcHandler;
 import org.apache.spark.network.server.StreamManager;
+import org.apache.spark.network.shuffle.ShuffleFetchMetrics;
+import org.apache.spark.network.shuffle.ShuffleMetricsSource;
 import org.apache.spark.network.shuffle.checksum.Cause;
 import org.apache.spark.network.shuffle.protocol.*;
 import org.apache.spark.network.util.TimerWithCustomTimeUnit;
@@ -66,7 +68,7 @@ import org.apache.spark.network.util.TransportConf;
  * is equivalent to one block.
  */
 public class ExternalBlockHandler extends RpcHandler
-    implements RpcHandler.MergedBlockMetaReqHandler {
+    implements RpcHandler.MergedBlockMetaReqHandler, ShuffleMetricsSource {
   private static final SparkLogger logger =
     SparkLoggerFactory.getLogger(ExternalBlockHandler.class);
   private static final String SHUFFLE_MERGER_IDENTIFIER = "shuffle-push-merger";
@@ -117,6 +119,11 @@ public class ExternalBlockHandler extends RpcHandler
     this.streamManager = streamManager;
     this.blockManager = blockManager;
     this.mergeManager = mergeManager;
+  }
+
+  @Override
+  public ShuffleFetchMetrics getShuffleFetchMetrics() {
+    return metrics.toShuffleFetchMetrics();
   }
 
   @Override
@@ -326,6 +333,17 @@ public class ExternalBlockHandler extends RpcHandler
     // Time latency for processing finalize shuffle merge request latency in ms
     private final Timer finalizeShuffleMergeLatencyMillis =
         new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS);
+    // NEW: Total chunk fetch request latency (used for wait time estimation)
+    private final Timer chunkFetchLatencyMillis =
+        new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS);
+    // NEW: Time spent reading chunk from disk (disk I/O breakdown)
+    private final Timer chunkReadLatencyMillis =
+        new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS);
+    // NEW: Time spent sending response over network (network breakdown)
+    private final Timer responseSendLatencyMillis =
+        new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS);
+    // NEW: Current queue depth of chunk fetch requests being processed
+    private final Counter chunkFetchQueueDepth = new Counter();
     // Block transfer rate in blocks per second
     private final Meter blockTransferRate = new Meter();
     // Block fetch message rate per second. When using non-batch fetches
@@ -347,6 +365,10 @@ public class ExternalBlockHandler extends RpcHandler
       allMetrics.put("registerExecutorRequestLatencyMillis", registerExecutorRequestLatencyMillis);
       allMetrics.put("fetchMergedBlocksMetaLatencyMillis", fetchMergedBlocksMetaLatencyMillis);
       allMetrics.put("finalizeShuffleMergeLatencyMillis", finalizeShuffleMergeLatencyMillis);
+      allMetrics.put("chunkFetchLatencyMillis", chunkFetchLatencyMillis);
+      allMetrics.put("chunkReadLatencyMillis", chunkReadLatencyMillis);
+      allMetrics.put("responseSendLatencyMillis", responseSendLatencyMillis);
+      allMetrics.put("chunkFetchQueueDepth", chunkFetchQueueDepth);
       allMetrics.put("blockTransferRate", blockTransferRate);
       allMetrics.put("blockTransferMessageRate", blockTransferMessageRate);
       allMetrics.put("blockTransferRateBytes", blockTransferRateBytes);
@@ -365,6 +387,30 @@ public class ExternalBlockHandler extends RpcHandler
                      (Gauge<Integer>) () -> blockManager.getRegisteredExecutorsSize());
       allMetrics.put("numActiveConnections", activeConnections);
       allMetrics.put("numCaughtExceptions", caughtExceptions);
+    }
+
+    public Timer getChunkFetchLatencyMillis() {
+      return chunkFetchLatencyMillis;
+    }
+
+    public Timer getChunkReadLatencyMillis() {
+      return chunkReadLatencyMillis;
+    }
+
+    public Timer getResponseSendLatencyMillis() {
+      return responseSendLatencyMillis;
+    }
+
+    public Counter getChunkFetchQueueDepth() {
+      return chunkFetchQueueDepth;
+    }
+
+    public ShuffleFetchMetrics toShuffleFetchMetrics() {
+      return new ShuffleFetchMetrics(
+        chunkFetchLatencyMillis,
+        chunkReadLatencyMillis,
+        responseSendLatencyMillis,
+        chunkFetchQueueDepth);
     }
 
     @Override

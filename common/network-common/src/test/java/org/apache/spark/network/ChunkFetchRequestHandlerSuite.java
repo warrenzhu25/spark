@@ -21,6 +21,8 @@ import io.netty.channel.ChannelHandlerContext;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.codahale.metrics.Counter;
+import com.codahale.metrics.Timer;
 import io.netty.channel.Channel;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -34,6 +36,7 @@ import org.apache.spark.network.server.ChunkFetchRequestHandler;
 import org.apache.spark.network.server.NoOpRpcHandler;
 import org.apache.spark.network.server.OneForOneStreamManager;
 import org.apache.spark.network.server.RpcHandler;
+import org.apache.spark.network.shuffle.ShuffleFetchMetrics;
 import org.apache.spark.util.Pair;
 
 public class ChunkFetchRequestHandlerSuite {
@@ -106,5 +109,271 @@ public class ChunkFetchRequestHandlerSuite {
     requestHandler.channelRead(context, request4);
     verify(channel, times(1)).close();
     Assertions.assertEquals(4, responseAndPromisePairs.size());
+  }
+
+  @Test
+  public void testMetricsRecordedOnSuccess() throws Exception {
+    RpcHandler rpcHandler = new NoOpRpcHandler();
+    OneForOneStreamManager streamManager = (OneForOneStreamManager) (rpcHandler.getStreamManager());
+    Channel channel = mock(Channel.class);
+    ChannelHandlerContext context = mock(ChannelHandlerContext.class);
+    when(context.channel()).thenAnswer(invocationOnMock0 -> channel);
+
+    List<Pair<Object, ExtendedChannelPromise>> responseAndPromisePairs = new ArrayList<>();
+    when(channel.writeAndFlush(any())).thenAnswer(invocationOnMock0 -> {
+      Object response = invocationOnMock0.getArguments()[0];
+      ExtendedChannelPromise channelFuture = new ExtendedChannelPromise(channel);
+      responseAndPromisePairs.add(Pair.of(response, channelFuture));
+      return channelFuture;
+    });
+
+    // Create metrics
+    Timer chunkFetchLatencyMillis = new Timer();
+    Timer chunkReadLatencyMillis = new Timer();
+    Timer responseSendLatencyMillis = new Timer();
+    Counter queueDepth = new Counter();
+    ShuffleFetchMetrics metrics = new ShuffleFetchMetrics(
+      chunkFetchLatencyMillis, chunkReadLatencyMillis, responseSendLatencyMillis, queueDepth);
+
+    // Prepare the stream with one buffer
+    List<ManagedBuffer> managedBuffers = new ArrayList<>();
+    managedBuffers.add(new TestManagedBuffer(10));
+    long streamId = streamManager.registerStream("test-app", managedBuffers.iterator(), channel);
+
+    TransportClient reverseClient = mock(TransportClient.class);
+    ChunkFetchRequestHandler requestHandler = new ChunkFetchRequestHandler(
+      reverseClient, rpcHandler.getStreamManager(), 2L, false, metrics);
+
+    // Fetch the chunk
+    RequestMessage request = new ChunkFetchRequest(new StreamChunkId(streamId, 0));
+    requestHandler.channelRead(context, request);
+
+    // Verify response
+    Assertions.assertEquals(1, responseAndPromisePairs.size());
+    Assertions.assertTrue(responseAndPromisePairs.get(0).getLeft() instanceof ChunkFetchSuccess);
+
+    // Complete the channel future to trigger metric updates
+    responseAndPromisePairs.get(0).getRight().finish(true);
+
+    // Verify all metrics were updated
+    Assertions.assertEquals(1, chunkFetchLatencyMillis.getCount(),
+      "Total fetch latency should be recorded");
+    Assertions.assertEquals(1, chunkReadLatencyMillis.getCount(),
+      "Disk read latency should be recorded");
+    Assertions.assertEquals(1, responseSendLatencyMillis.getCount(),
+      "Response send latency should be recorded");
+
+    // Verify timing values are reasonable (non-zero)
+    Assertions.assertTrue(chunkFetchLatencyMillis.getSnapshot().getMax() > 0,
+      "Total fetch time should be positive");
+    Assertions.assertTrue(chunkReadLatencyMillis.getSnapshot().getMax() >= 0,
+      "Disk read time should be non-negative");
+    Assertions.assertTrue(responseSendLatencyMillis.getSnapshot().getMax() >= 0,
+      "Response send time should be non-negative");
+  }
+
+  @Test
+  public void testMetricsRecordedOnFailure() throws Exception {
+    RpcHandler rpcHandler = new NoOpRpcHandler();
+    OneForOneStreamManager streamManager = (OneForOneStreamManager) (rpcHandler.getStreamManager());
+    Channel channel = mock(Channel.class);
+    ChannelHandlerContext context = mock(ChannelHandlerContext.class);
+    when(context.channel()).thenAnswer(invocationOnMock0 -> channel);
+
+    List<Pair<Object, ExtendedChannelPromise>> responseAndPromisePairs = new ArrayList<>();
+    when(channel.writeAndFlush(any())).thenAnswer(invocationOnMock0 -> {
+      Object response = invocationOnMock0.getArguments()[0];
+      ExtendedChannelPromise channelFuture = new ExtendedChannelPromise(channel);
+      responseAndPromisePairs.add(Pair.of(response, channelFuture));
+      return channelFuture;
+    });
+
+    // Create metrics
+    Timer chunkFetchLatencyMillis = new Timer();
+    Timer chunkReadLatencyMillis = new Timer();
+    Timer responseSendLatencyMillis = new Timer();
+    Counter queueDepth = new Counter();
+    ShuffleFetchMetrics metrics = new ShuffleFetchMetrics(
+      chunkFetchLatencyMillis, chunkReadLatencyMillis, responseSendLatencyMillis, queueDepth);
+
+    // Prepare the stream with a null buffer (will cause failure)
+    List<ManagedBuffer> managedBuffers = new ArrayList<>();
+    managedBuffers.add(null);
+    long streamId = streamManager.registerStream("test-app", managedBuffers.iterator(), channel);
+
+    TransportClient reverseClient = mock(TransportClient.class);
+    ChunkFetchRequestHandler requestHandler = new ChunkFetchRequestHandler(
+      reverseClient, rpcHandler.getStreamManager(), 2L, false, metrics);
+
+    // Fetch the chunk (should fail)
+    RequestMessage request = new ChunkFetchRequest(new StreamChunkId(streamId, 0));
+    requestHandler.channelRead(context, request);
+
+    // Verify failure response
+    Assertions.assertEquals(1, responseAndPromisePairs.size());
+    Assertions.assertTrue(responseAndPromisePairs.get(0).getLeft() instanceof ChunkFetchFailure);
+
+    // Complete the channel future to trigger metric updates
+    responseAndPromisePairs.get(0).getRight().finish(true);
+
+    // Verify metrics were updated even on failure
+    Assertions.assertEquals(1, chunkFetchLatencyMillis.getCount(),
+      "Total fetch latency should be recorded on failure");
+    Assertions.assertEquals(1, chunkReadLatencyMillis.getCount(),
+      "Disk read latency should be recorded (measures getChunk call time, even when null)");
+    Assertions.assertEquals(1, responseSendLatencyMillis.getCount(),
+      "Response send latency should be recorded on failure");
+  }
+
+  @Test
+  public void testNullMetricsHandledGracefully() throws Exception {
+    RpcHandler rpcHandler = new NoOpRpcHandler();
+    OneForOneStreamManager streamManager = (OneForOneStreamManager) (rpcHandler.getStreamManager());
+    Channel channel = mock(Channel.class);
+    ChannelHandlerContext context = mock(ChannelHandlerContext.class);
+    when(context.channel()).thenAnswer(invocationOnMock0 -> channel);
+
+    List<Pair<Object, ExtendedChannelPromise>> responseAndPromisePairs = new ArrayList<>();
+    when(channel.writeAndFlush(any())).thenAnswer(invocationOnMock0 -> {
+      Object response = invocationOnMock0.getArguments()[0];
+      ExtendedChannelPromise channelFuture = new ExtendedChannelPromise(channel);
+      responseAndPromisePairs.add(Pair.of(response, channelFuture));
+      return channelFuture;
+    });
+
+    // Prepare the stream with one buffer
+    List<ManagedBuffer> managedBuffers = new ArrayList<>();
+    managedBuffers.add(new TestManagedBuffer(10));
+    long streamId = streamManager.registerStream("test-app", managedBuffers.iterator(), channel);
+
+    TransportClient reverseClient = mock(TransportClient.class);
+    // Create handler with null metrics (no ShuffleFetchMetrics passed)
+    ChunkFetchRequestHandler requestHandler = new ChunkFetchRequestHandler(
+      reverseClient, rpcHandler.getStreamManager(), 2L, false);
+
+    // Fetch the chunk - should succeed without throwing exception
+    RequestMessage request = new ChunkFetchRequest(new StreamChunkId(streamId, 0));
+    requestHandler.channelRead(context, request);
+
+    // Verify response
+    Assertions.assertEquals(1, responseAndPromisePairs.size());
+    Assertions.assertTrue(responseAndPromisePairs.get(0).getLeft() instanceof ChunkFetchSuccess);
+
+    // Complete the channel future - should not throw exception
+    responseAndPromisePairs.get(0).getRight().finish(true);
+
+    // Test passed if no exceptions thrown
+  }
+
+  @Test
+  public void testMetricsBreakdownRelationship() throws Exception {
+    RpcHandler rpcHandler = new NoOpRpcHandler();
+    OneForOneStreamManager streamManager = (OneForOneStreamManager) (rpcHandler.getStreamManager());
+    Channel channel = mock(Channel.class);
+    ChannelHandlerContext context = mock(ChannelHandlerContext.class);
+    when(context.channel()).thenAnswer(invocationOnMock0 -> channel);
+
+    List<Pair<Object, ExtendedChannelPromise>> responseAndPromisePairs = new ArrayList<>();
+    when(channel.writeAndFlush(any())).thenAnswer(invocationOnMock0 -> {
+      Object response = invocationOnMock0.getArguments()[0];
+      ExtendedChannelPromise channelFuture = new ExtendedChannelPromise(channel);
+      responseAndPromisePairs.add(Pair.of(response, channelFuture));
+      return channelFuture;
+    });
+
+    // Create metrics
+    Timer chunkFetchLatencyMillis = new Timer();
+    Timer chunkReadLatencyMillis = new Timer();
+    Timer responseSendLatencyMillis = new Timer();
+    Counter queueDepth = new Counter();
+    ShuffleFetchMetrics metrics = new ShuffleFetchMetrics(
+      chunkFetchLatencyMillis, chunkReadLatencyMillis, responseSendLatencyMillis, queueDepth);
+
+    // Prepare the stream with one buffer
+    List<ManagedBuffer> managedBuffers = new ArrayList<>();
+    managedBuffers.add(new TestManagedBuffer(10));
+    long streamId = streamManager.registerStream("test-app", managedBuffers.iterator(), channel);
+
+    TransportClient reverseClient = mock(TransportClient.class);
+    ChunkFetchRequestHandler requestHandler = new ChunkFetchRequestHandler(
+      reverseClient, rpcHandler.getStreamManager(), 2L, false, metrics);
+
+    // Fetch the chunk
+    RequestMessage request = new ChunkFetchRequest(new StreamChunkId(streamId, 0));
+    requestHandler.channelRead(context, request);
+    responseAndPromisePairs.get(0).getRight().finish(true);
+
+    // Verify that total time >= disk read time + response send time
+    // (May not be exactly equal due to other overhead like authorization, serialization, etc.)
+    long totalTimeNanos = chunkFetchLatencyMillis.getSnapshot().getMax();
+    long diskReadTimeNanos = chunkReadLatencyMillis.getSnapshot().getMax();
+    long responseSendTimeNanos = responseSendLatencyMillis.getSnapshot().getMax();
+
+    Assertions.assertTrue(totalTimeNanos >= diskReadTimeNanos,
+      "Total time should be >= disk read time");
+    Assertions.assertTrue(totalTimeNanos >= responseSendTimeNanos,
+      "Total time should be >= response send time");
+    // Note: We don't assert total == disk + response because there's overhead
+    // (authorization, serialization, etc.) that's part of total but not in breakdown metrics
+  }
+
+  @Test
+  public void testQueueDepthTracking() throws Exception {
+    RpcHandler rpcHandler = new NoOpRpcHandler();
+    OneForOneStreamManager streamManager = (OneForOneStreamManager) (rpcHandler.getStreamManager());
+    Channel channel = mock(Channel.class);
+    ChannelHandlerContext context = mock(ChannelHandlerContext.class);
+    when(context.channel()).thenAnswer(invocationOnMock0 -> channel);
+
+    List<Pair<Object, ExtendedChannelPromise>> responseAndPromisePairs = new ArrayList<>();
+    when(channel.writeAndFlush(any())).thenAnswer(invocationOnMock0 -> {
+      Object response = invocationOnMock0.getArguments()[0];
+      ExtendedChannelPromise channelFuture = new ExtendedChannelPromise(channel);
+      responseAndPromisePairs.add(Pair.of(response, channelFuture));
+      return channelFuture;
+    });
+
+    // Create metrics with queue depth counter
+    Timer chunkFetchLatencyMillis = new Timer();
+    Timer chunkReadLatencyMillis = new Timer();
+    Timer responseSendLatencyMillis = new Timer();
+    Counter queueDepth = new Counter();
+    ShuffleFetchMetrics metrics = new ShuffleFetchMetrics(
+      chunkFetchLatencyMillis, chunkReadLatencyMillis, responseSendLatencyMillis, queueDepth);
+
+    // Prepare the stream with buffers
+    List<ManagedBuffer> managedBuffers = new ArrayList<>();
+    managedBuffers.add(new TestManagedBuffer(10));
+    managedBuffers.add(new TestManagedBuffer(20));
+    long streamId = streamManager.registerStream("test-app", managedBuffers.iterator(), channel);
+
+    TransportClient reverseClient = mock(TransportClient.class);
+    ChunkFetchRequestHandler requestHandler = new ChunkFetchRequestHandler(
+      reverseClient, rpcHandler.getStreamManager(), 2L, false, metrics);
+
+    // Initially queue depth should be 0
+    Assertions.assertEquals(0, queueDepth.getCount(), "Initial queue depth should be 0");
+
+    // Fetch first chunk - queue depth should increase to 1
+    RequestMessage request1 = new ChunkFetchRequest(new StreamChunkId(streamId, 0));
+    requestHandler.channelRead(context, request1);
+    Assertions.assertEquals(1, queueDepth.getCount(),
+      "Queue depth should be 1 while request is in flight");
+
+    // Fetch second chunk before completing first - queue depth should be 2
+    RequestMessage request2 = new ChunkFetchRequest(new StreamChunkId(streamId, 1));
+    requestHandler.channelRead(context, request2);
+    Assertions.assertEquals(2, queueDepth.getCount(),
+      "Queue depth should be 2 with two requests in flight");
+
+    // Complete first request - queue depth should decrease to 1
+    responseAndPromisePairs.get(0).getRight().finish(true);
+    Assertions.assertEquals(1, queueDepth.getCount(),
+      "Queue depth should be 1 after completing one request");
+
+    // Complete second request - queue depth should return to 0
+    responseAndPromisePairs.get(1).getRight().finish(true);
+    Assertions.assertEquals(0, queueDepth.getCount(),
+      "Queue depth should be 0 after completing all requests");
   }
 }

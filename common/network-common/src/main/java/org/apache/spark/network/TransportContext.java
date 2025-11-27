@@ -237,9 +237,19 @@ public class TransportContext implements Closeable {
         .addLast("handler", channelHandler);
       // Use a separate EventLoopGroup to handle ChunkFetchRequest messages for shuffle rpcs.
       if (chunkFetchWorkers != null) {
-        ChunkFetchRequestHandler chunkFetchHandler = new ChunkFetchRequestHandler(
-          channelHandler.getClient(), rpcHandler.getStreamManager(),
-          conf.maxChunksBeingTransferred(), true /* syncModeEnabled */);
+        ChunkFetchRequestHandler chunkFetchHandler;
+        if (rpcHandler instanceof org.apache.spark.network.shuffle.ShuffleMetricsSource) {
+          org.apache.spark.network.shuffle.ShuffleFetchMetrics metrics =
+            ((org.apache.spark.network.shuffle.ShuffleMetricsSource) rpcHandler)
+              .getShuffleFetchMetrics();
+          chunkFetchHandler = new ChunkFetchRequestHandler(
+            channelHandler.getClient(), rpcHandler.getStreamManager(),
+            conf.maxChunksBeingTransferred(), true /* syncModeEnabled */, metrics);
+        } else {
+          chunkFetchHandler = new ChunkFetchRequestHandler(
+            channelHandler.getClient(), rpcHandler.getStreamManager(),
+            conf.maxChunksBeingTransferred(), true /* syncModeEnabled */);
+        }
         pipeline.addLast(chunkFetchWorkers, "chunkFetchHandler", chunkFetchHandler);
       }
       return channelHandler;
@@ -292,9 +302,18 @@ public class TransportContext implements Closeable {
     boolean separateChunkFetchRequest = conf.separateChunkFetchRequest();
     ChunkFetchRequestHandler chunkFetchRequestHandler = null;
     if (!separateChunkFetchRequest) {
-      chunkFetchRequestHandler = new ChunkFetchRequestHandler(
-        client, rpcHandler.getStreamManager(),
-        conf.maxChunksBeingTransferred(), false /* syncModeEnabled */);
+      if (rpcHandler instanceof org.apache.spark.network.shuffle.ShuffleMetricsSource) {
+        org.apache.spark.network.shuffle.ShuffleFetchMetrics metrics =
+          ((org.apache.spark.network.shuffle.ShuffleMetricsSource) rpcHandler)
+            .getShuffleFetchMetrics();
+        chunkFetchRequestHandler = new ChunkFetchRequestHandler(
+          client, rpcHandler.getStreamManager(),
+          conf.maxChunksBeingTransferred(), false /* syncModeEnabled */, metrics);
+      } else {
+        chunkFetchRequestHandler = new ChunkFetchRequestHandler(
+          client, rpcHandler.getStreamManager(),
+          conf.maxChunksBeingTransferred(), false /* syncModeEnabled */);
+      }
     }
     TransportRequestHandler requestHandler = new TransportRequestHandler(channel, client,
       rpcHandler, conf.maxChunksBeingTransferred(), chunkFetchRequestHandler);
