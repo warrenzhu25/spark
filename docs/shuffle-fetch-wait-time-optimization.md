@@ -86,8 +86,8 @@ This optimization builds on **existing** Spark shuffle infrastructure:
 **2. Existing Metrics Infrastructure**:
 - **Location**: `ExternalBlockHandler.ShuffleMetrics` (line 315-373)
 - **Metrics library**: Codahale Metrics (Dropwizard)
-- **Existing Timer**: `openBlockRequestLatencyMillis` tracks request processing time
-- **Our enhancement**: Leverage this Timer for average processing time calculation
+- **New Timer**: `diskIOLatencyMillis` tracks ONLY disk I/O time (streamManager.getChunk())
+- **Why new metric**: Existing `openBlockRequestLatencyMillis` includes RPC parsing, authorization, and serialization overhead which inflates wait time estimates. We need isolated disk I/O timing for accurate estimation.
 
 ### Getting Real Queue Depth from Netty
 
@@ -108,12 +108,12 @@ eventLoop.scheduleAtFixedRate(() -> {
 }, 0, 100, TimeUnit.MILLISECONDS); // Check every 100ms
 ```
 
-**Real Processing Time from Existing Timer**:
+**Disk I/O Time from New Timer**:
 ```java
-// Codahale Timer already tracks request latency
-Snapshot snapshot = openBlockRequestLatencyMillis.getSnapshot();
-double meanLatencyMs = snapshot.getMean();           // Average
-double p99LatencyMs = snapshot.get99thPercentile();  // 99th percentile
+// New Timer tracks ONLY disk I/O latency (streamManager.getChunk)
+Snapshot snapshot = diskIOLatencyMillis.getSnapshot();
+double meanDiskIOMs = snapshot.getMean();           // Average disk I/O time
+double p99DiskIOMs = snapshot.get99thPercentile();  // 99th percentile (conservative)
 ```
 
 ---
@@ -181,18 +181,18 @@ before request processing begins, enabling proactive client behavior.
 ```java
 public class NettyBasedWaitTimeEstimator {
   private final EventLoopGroup chunkFetchWorkers;
-  private final Timer requestLatencyTimer;
+  private final Timer diskIOLatencyTimer;  // Changed: Use disk I/O specific timer
   private final AtomicInteger totalPendingTasks = new AtomicInteger(0);
   private final boolean useP99;
   private final long updateIntervalMs;
 
   public NettyBasedWaitTimeEstimator(
       EventLoopGroup chunkFetchWorkers,
-      Timer requestLatencyTimer,
+      Timer diskIOLatencyTimer,  // Changed: Renamed parameter
       boolean useP99,
       long updateIntervalMs) {
     this.chunkFetchWorkers = chunkFetchWorkers;
-    this.requestLatencyTimer = requestLatencyTimer;
+    this.diskIOLatencyTimer = diskIOLatencyTimer;
     this.useP99 = useP99;
     this.updateIntervalMs = updateIntervalMs;
   }
@@ -217,7 +217,7 @@ public class NettyBasedWaitTimeEstimator {
   }
 
   /**
-   * Estimate wait time based on real Netty queue depth and processing time.
+   * Estimate wait time based on real Netty queue depth and disk I/O time.
    * @return Estimated wait time in milliseconds
    */
   public long estimateWaitTimeMs() {
@@ -228,19 +228,19 @@ public class NettyBasedWaitTimeEstimator {
       return 0L; // No wait if queue is empty
     }
 
-    // Get processing time from existing Timer metric
-    Snapshot snapshot = requestLatencyTimer.getSnapshot();
-    double processingTimeMs = useP99
+    // Get disk I/O time from new Timer metric (only tracks streamManager.getChunk)
+    Snapshot snapshot = diskIOLatencyTimer.getSnapshot();
+    double diskIOTimeMs = useP99
       ? snapshot.get99thPercentile()  // Conservative estimate
       : snapshot.getMean();            // Average estimate
 
     // Handle case where no requests processed yet
-    if (Double.isNaN(processingTimeMs) || processingTimeMs <= 0) {
-      processingTimeMs = 10.0; // Default 10ms assumption
+    if (Double.isNaN(diskIOTimeMs) || diskIOTimeMs <= 0) {
+      diskIOTimeMs = 10.0; // Default 10ms assumption
     }
 
-    // Estimate: queue_depth * avg_processing_time
-    return (long) (queueDepth * processingTimeMs);
+    // Estimate: queue_depth * avg_disk_io_time
+    return (long) (queueDepth * diskIOTimeMs);
   }
 
   /**
@@ -252,23 +252,105 @@ public class NettyBasedWaitTimeEstimator {
   }
 
   /**
-   * Get average processing time for debugging/monitoring.
-   * @return Average processing time in milliseconds
+   * Get average disk I/O time for debugging/monitoring.
+   * @return Average disk I/O time in milliseconds
    */
-  public double getAvgProcessingTimeMs() {
-    Snapshot snapshot = requestLatencyTimer.getSnapshot();
+  public double getAvgDiskIOTimeMs() {
+    Snapshot snapshot = diskIOLatencyTimer.getSnapshot();
     return snapshot.getMean();
   }
 }
 ```
 
-2. **Initialize in TransportContext**:
+2. **Instrument processFetchRequest to Track Disk I/O Time**:
+```java
+// In ChunkFetchRequestHandler.processFetchRequest()
+public void processFetchRequest(final Channel channel, final ChunkFetchRequest msg) {
+  if (logger.isTraceEnabled()) {
+    logger.trace("Received req from {} to fetch block {}", getRemoteAddress(channel),
+      msg.streamChunkId);
+  }
+
+  if (chunksBeingTransferred >= maxChunksBeingTransferred) {
+    logger.warn("The number of chunks being transferred {} is above {}, close the connection.",
+      chunksBeingTransferred, maxChunksBeingTransferred);
+    channel.close();
+    return;
+  }
+
+  ManagedBuffer buf;
+  try {
+    // Authorization check (NOT included in disk I/O time)
+    streamManager.checkAuthorization(client, msg.streamChunkId.streamId());
+
+    // NEW: Time ONLY the disk I/O operation
+    long diskIOStartNanos = System.nanoTime();
+    buf = streamManager.getChunk(msg.streamChunkId.streamId(), msg.streamChunkId.chunkIndex());
+    long diskIODurationNanos = System.nanoTime() - diskIOStartNanos;
+
+    // Update new disk I/O specific metric
+    if (shuffleMetrics != null) {
+      shuffleMetrics.diskIOLatencyMillis.update(diskIODurationNanos, TimeUnit.NANOSECONDS);
+    }
+
+    if (buf == null) {
+      throw new IllegalStateException("Chunk was not found");
+    }
+  } catch (Exception e) {
+    logger.error(String.format("Error opening block %s for request from %s",
+      msg.streamChunkId, getRemoteAddress(channel)), e);
+    respond(channel, new ChunkFetchFailure(msg.streamChunkId,
+      Throwables.getStackTraceAsString(e)));
+    return;
+  }
+
+  // Track chunk being transferred
+  chunksBeingTransferred++;
+  // ... rest of existing logic
+}
+```
+
+**Why This Approach**:
+- ✅ Measures ONLY `streamManager.getChunk()` - the actual disk read operation
+- ✅ Excludes authorization overhead (checkAuthorization)
+- ✅ Excludes serialization and network overhead
+- ✅ Provides accurate estimate of disk I/O wait time for queued requests
+
+3. **Add Disk I/O Metric to ShuffleMetrics**:
+```java
+// In ExternalBlockHandler.ShuffleMetrics
+public class ShuffleMetrics implements MetricSet {
+  // Existing metric
+  private final Timer openBlockRequestLatencyMillis =
+    new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS);
+
+  // NEW: Disk I/O specific metric
+  private final Timer diskIOLatencyMillis =
+    new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS);
+
+  @Override
+  public Map<String, Metric> getMetrics() {
+    Map<String, Metric> allMetrics = new HashMap<>();
+    allMetrics.put("openBlockRequestLatencyMillis", openBlockRequestLatencyMillis);
+    allMetrics.put("diskIOLatencyMillis", diskIOLatencyMillis);  // NEW
+    // ... other metrics
+    return allMetrics;
+  }
+
+  // Getter for wait time estimator
+  public Timer getDiskIOLatencyMillis() {
+    return diskIOLatencyMillis;
+  }
+}
+```
+
+4. **Initialize in TransportContext**:
 ```java
 // In TransportContext constructor, after creating chunkFetchWorkers
 if (chunkFetchWorkers != null) {
   this.waitTimeEstimator = new NettyBasedWaitTimeEstimator(
     chunkFetchWorkers,
-    externalBlockHandler.getMetrics().openBlockRequestLatencyMillis,
+    externalBlockHandler.getMetrics().getDiskIOLatencyMillis(),  // Changed: Use disk I/O timer
     conf.waitTimeEstimationUseP99(),
     conf.waitTimeEstimationUpdateIntervalMs()
   );
@@ -276,7 +358,7 @@ if (chunkFetchWorkers != null) {
 }
 ```
 
-3. **Integrate into ChunkFetchRequestHandler**:
+5. **Integrate into ChunkFetchRequestHandler**:
 ```java
 // In ChunkFetchRequestHandler.channelRead0()
 @Override
@@ -310,13 +392,13 @@ protected void channelRead0(
 }
 ```
 
-4. **Add Server Metrics to ShuffleMetrics**:
+6. **Add Server Metrics to ShuffleMetrics**:
 ```java
 // In ExternalBlockHandler.ShuffleMetrics
 private final Counter waitTimeNotificationsSent = new Counter();
 private final Histogram estimatedWaitTimeMs = new Histogram(new UniformReservoir());
 private final Gauge<Integer> queueDepthGauge;
-private final Gauge<Double> avgProcessingTimeGauge;
+private final Gauge<Double> avgDiskIOTimeGauge;  // Changed: Track disk I/O time
 
 public ShuffleMetrics(NettyBasedWaitTimeEstimator estimator) {
   // ... existing metrics
@@ -327,12 +409,12 @@ public ShuffleMetrics(NettyBasedWaitTimeEstimator estimator) {
   queueDepthGauge = () -> estimator != null ? estimator.getQueueDepth() : 0;
   allMetrics.put("queueDepth", queueDepthGauge);
 
-  avgProcessingTimeGauge = () -> estimator != null ? estimator.getAvgProcessingTimeMs() : 0.0;
-  allMetrics.put("avgProcessingTimeMs", avgProcessingTimeGauge);
+  avgDiskIOTimeGauge = () -> estimator != null ? estimator.getAvgDiskIOTimeMs() : 0.0;
+  allMetrics.put("avgDiskIOTimeMs", avgDiskIOTimeGauge);  // Changed metric name
 }
 ```
 
-5. **Add Configuration in TransportConf**:
+7. **Add Configuration in TransportConf**:
 ```java
 public boolean waitTimeNotificationEnabled() {
   return conf.getBoolean("spark.shuffle.waitTimeNotification.enabled", false);
@@ -349,10 +431,10 @@ public boolean waitTimeEstimationUseP99() {
 
 **Key Advantages**:
 - ✅ Uses **real** Netty EventLoop queue depth via `pendingTasks()`
-- ✅ Leverages **existing** `openBlockRequestLatencyMillis` Timer
+- ✅ Tracks **only disk I/O time** via new `diskIOLatencyMillis` Timer (excludes RPC/auth overhead)
 - ✅ **Low overhead**: Queue depth checked periodically within event loop
 - ✅ **Production-ready**: Uses Codahale Metrics already in Spark
-- ✅ **Accurate**: Based on actual queue state, not estimates
+- ✅ **Accurate**: Based on actual queue state and isolated disk I/O time, not total request time
 
 **Testing**:
 - Unit tests for `NettyBasedWaitTimeEstimator` calculation logic
@@ -766,8 +848,21 @@ The adaptive fetch optimization works alongside existing shuffle configuration:
 
 When adaptive mode is enabled, `effectiveMaxReqsInFlight` may temporarily exceed `maxReqsInFlight` up to 2x to overlap waiting.
 
+#### Global Coordination (NEW)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `spark.shuffle.fetch.loadCoordination.enabled` | `false` | Enable global load coordination for shuffle fetch with driver-based coordination |
+| `spark.shuffle.fetch.loadMetrics.expirationMs` | `30000` | Time (ms) after which executor load metrics are considered stale and removed |
+| `spark.shuffle.fetch.loadBroadcast.intervalMs` | `5000` | Interval (ms) for driver to broadcast global load view to all executors |
+| `spark.shuffle.fetch.maxQueueDepth` | `100` | Max expected queue depth for capacity calculation (normalizes load metric) |
+| `spark.shuffle.fetch.maxWaitTimeMs` | `5000` | Max expected wait time (ms) for capacity calculation (normalizes load metric) |
+| `spark.shuffle.fetch.capacityWeight` | `0.7` | Weight for executor capacity in location scoring (0.0 to 1.0) |
+| `spark.shuffle.fetch.waitTimeWeight` | `0.3` | Weight for estimated wait time in location scoring (0.0 to 1.0) |
+
 ### Recommended Configuration for Shuffle-Heavy Workloads
 
+**Basic Configuration (Immediate Wait Time Notifications)**:
 ```properties
 # Server-side: Enable separate thread pool and wait time notifications
 spark.shuffle.server.chunkFetchHandlerThreadsPercent=100
@@ -779,6 +874,27 @@ spark.shuffle.waitTimeEstimation.useP99=true
 spark.reducer.adaptiveMaxReqsInFlight.enabled=true
 spark.reducer.waitTime.threshold.ms=100
 spark.reducer.parallelism.adjustment.factor=1.5
+```
+
+**Advanced Configuration (With Global Coordination)**:
+```properties
+# Server-side: Enable separate thread pool and wait time notifications
+spark.shuffle.server.chunkFetchHandlerThreadsPercent=100
+spark.shuffle.waitTimeNotification.enabled=true
+spark.shuffle.waitTimeEstimation.updateIntervalMs=100
+spark.shuffle.waitTimeEstimation.useP99=true
+
+# Client-side: Enable adaptive fetch behavior
+spark.reducer.adaptiveMaxReqsInFlight.enabled=true
+spark.reducer.waitTime.threshold.ms=100
+spark.reducer.parallelism.adjustment.factor=1.5
+
+# NEW: Global coordination (recommended for large clusters)
+spark.shuffle.fetch.loadCoordination.enabled=true
+spark.shuffle.fetch.loadBroadcast.intervalMs=5000
+spark.shuffle.fetch.loadMetrics.expirationMs=30000
+spark.shuffle.fetch.capacityWeight=0.7
+spark.shuffle.fetch.waitTimeWeight=0.3
 ```
 
 ### Configuration Dependencies
@@ -793,6 +909,12 @@ spark.reducer.parallelism.adjustment.factor=1.5
    - Clients can enable adaptive fetch without server changes (falls back to historical timing)
    - But full benefit requires server-side notifications
 
+3. **Global Coordination** (`spark.shuffle.fetch.loadCoordination.enabled=true`) has the following requirements:
+   - Requires immediate wait time notifications to be enabled (dependencies 1 and 2 above)
+   - All executors must report metrics via heartbeat (automatic when enabled)
+   - Driver must have sufficient memory to maintain global view (~100 bytes per executor)
+   - Works independently but provides maximum benefit when combined with adaptive fetch
+
 ---
 
 ## Metrics
@@ -804,7 +926,8 @@ spark.reducer.parallelism.adjustment.factor=1.5
 | `shuffle.server.waitTimeNotificationsSent` | Counter | Total number of wait time notifications sent |
 | `shuffle.server.estimatedWaitTimeMs` | Histogram | Distribution of estimated wait times sent in notifications |
 | `shuffle.server.queueDepthPerExecutor` | Gauge | Current queue depth per requesting executor |
-| `shuffle.server.avgProcessingTimeMs` | Gauge | Exponential moving average of request processing time |
+| `shuffle.server.diskIOLatencyMillis` | Timer | Disk I/O time distribution (streamManager.getChunk only) |
+| `shuffle.server.avgDiskIOTimeMs` | Gauge | Average disk I/O time from diskIOLatencyMillis Timer |
 | `shuffle.server.notificationLatencyUs` | Histogram | Time to send notification after request received |
 
 ### Client-Side Metrics
@@ -897,17 +1020,432 @@ spark.reducer.parallelism.adjustment.factor=1.5
 
 ---
 
+## Global Coordination Architecture
+
+### Overview
+
+While the immediate wait time notification provides local load awareness, a global coordination system enables cluster-wide optimization of shuffle fetch decisions. This architecture allows executors to report their load metrics to the driver, which maintains a global view and broadcasts it back to all executors.
+
+### Architecture Components
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         DRIVER                                   │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │      ShuffleFetchLoadCoordinator                           │ │
+│  │  - Receives executor metrics via heartbeat                 │ │
+│  │  - Maintains Map[ExecutorId → LoadMetrics]                 │ │
+│  │  - Broadcasts GlobalLoadView every 5 seconds               │ │
+│  └────────────────────────────────────────────────────────────┘ │
+│                 ▲                              │                 │
+│                 │ Heartbeat                    │ Broadcast       │
+│                 │ + metrics                    ▼ GlobalLoadView  │
+└─────────────────┼──────────────────────────────┼─────────────────┘
+                  │                              │
+         ┌────────┴────────┐          ┌─────────▼────────┐
+         │   EXECUTOR 1    │          │   EXECUTOR 2     │
+         │  ┌────────────┐ │          │  ┌────────────┐  │
+         │  │ Metrics    │ │          │  │ Metrics    │  │
+         │  │ Collector  │ │          │  │ Collector  │  │
+         │  │ - queue    │ │          │  │ - queue    │  │
+         │  │ - diskIO   │ │          │  │ - diskIO   │  │
+         │  └────────────┘ │          │  └────────────┘  │
+         │        │         │          │        │         │
+         │        ▼         │          │        ▼         │
+         │  ┌────────────┐ │          │  ┌────────────┐  │
+         │  │ Fetcher    │ │          │  │ Fetcher    │  │
+         │  │ - Uses     │ │          │  │ - Uses     │  │
+         │  │   global   │ │          │  │   global   │  │
+         │  │   view     │ │          │  │   view     │  │
+         │  └────────────┘ │          │  └────────────┘  │
+         └─────────────────┘          └──────────────────┘
+```
+
+### Data Structures
+
+**ExecutorLoadMetrics** (reported by each executor):
+```scala
+case class ExecutorLoadMetrics(
+  executorId: String,
+  queueDepth: Int,              // Pending fetch requests in queue
+  avgDiskIOTimeMs: Double,      // Average disk I/O time from diskIOLatencyMillis
+  p99DiskIOTimeMs: Double,      // 99th percentile for conservative estimates
+  estimatedWaitTimeMs: Long,    // queueDepth × avgDiskIOTime
+  availableCapacity: Double,    // 0.0 (full) to 1.0 (idle)
+  timestamp: Long,
+  hostPort: String
+)
+```
+
+**GlobalLoadView** (broadcast by driver):
+```scala
+case class GlobalLoadView(
+  executorLoads: Map[String, ExecutorLoadMetrics],
+  updateTime: Long,
+  epoch: Long  // Version number for cache invalidation
+)
+```
+
+### Component Implementation
+
+#### 1. Driver-Side Coordinator
+
+**File**: `core/src/main/scala/org/apache/spark/shuffle/ShuffleFetchLoadCoordinator.scala` (NEW)
+
+```scala
+private[spark] class ShuffleFetchLoadCoordinator(
+    conf: SparkConf,
+    listenerBus: LiveListenerBus) extends Logging {
+
+  private val executorLoads = new ConcurrentHashMap[String, ExecutorLoadMetrics]()
+  private val globalViewEpoch = new AtomicLong(0)
+  private var cachedGlobalView: Option[Broadcast[GlobalLoadView]] = None
+
+  // Configuration
+  private val metricsExpirationMs =
+    conf.getLong("spark.shuffle.fetch.loadMetrics.expirationMs", 30000)
+  private val broadcastIntervalMs =
+    conf.getLong("spark.shuffle.fetch.loadBroadcast.intervalMs", 5000)
+
+  private val broadcastScheduler =
+    ThreadUtils.newDaemonSingleThreadScheduledExecutor("shuffle-load-broadcaster")
+
+  def start(): Unit = {
+    broadcastScheduler.scheduleAtFixedRate(
+      () => broadcastGlobalView(),
+      broadcastIntervalMs,
+      broadcastIntervalMs,
+      TimeUnit.MILLISECONDS
+    )
+  }
+
+  def updateExecutorMetrics(executorId: String, metrics: ExecutorLoadMetrics): Unit = {
+    executorLoads.put(executorId, metrics)
+  }
+
+  def removeExecutor(executorId: String): Unit = {
+    executorLoads.remove(executorId)
+    broadcastGlobalView()  // Immediate update
+  }
+
+  private def broadcastGlobalView(): Unit = {
+    // Remove stale metrics
+    val now = System.currentTimeMillis()
+    executorLoads.entrySet().removeIf(entry =>
+      now - entry.getValue.timestamp > metricsExpirationMs
+    )
+
+    val view = GlobalLoadView(
+      executorLoads.asScala.toMap,
+      now,
+      globalViewEpoch.incrementAndGet()
+    )
+
+    val bc = SparkEnv.get.broadcastManager.newBroadcast(view, isLocal = false)
+    cachedGlobalView.foreach(_.unpersist())
+    cachedGlobalView = Some(bc)
+  }
+
+  def getGlobalView(): Option[Broadcast[GlobalLoadView]] = cachedGlobalView
+
+  def stop(): Unit = {
+    broadcastScheduler.shutdown()
+    cachedGlobalView.foreach(_.unpersist())
+  }
+}
+```
+
+#### 2. Heartbeat Integration
+
+**File**: `core/src/main/scala/org/apache/spark/HeartbeatReceiver.scala` (MODIFY)
+
+```scala
+// Extend Heartbeat case class
+private[spark] case class Heartbeat(
+    executorId: String,
+    accumUpdates: Array[(Long, Seq[AccumulatorV2[_, _]])],
+    blockManagerId: BlockManagerId,
+    executorUpdates: Map[(Int, Int), ExecutorMetrics],
+    shuffleFetchMetrics: Option[ExecutorLoadMetrics] = None  // NEW
+)
+
+// In HeartbeatReceiver class
+private var loadCoordinator: Option[ShuffleFetchLoadCoordinator] = None
+
+override def onStart(): Unit = {
+  // existing logic...
+
+  if (sc.conf.getBoolean("spark.shuffle.fetch.loadCoordination.enabled", false)) {
+    loadCoordinator = Some(new ShuffleFetchLoadCoordinator(sc.conf, sc.listenerBus))
+    loadCoordinator.foreach(_.start())
+  }
+}
+
+override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {
+  case heartbeat @ Heartbeat(executorId, accumUpdates, blockManagerId,
+                              executorUpdates, shuffleMetrics) =>
+    // existing processing...
+
+    // Process shuffle metrics
+    shuffleMetrics.foreach { metrics =>
+      loadCoordinator.foreach(_.updateExecutorMetrics(executorId, metrics))
+    }
+
+    context.reply(HeartbeatResponse(reregisterBlockManager))
+}
+```
+
+#### 3. Executor-Side Metrics Collection
+
+**File**: `core/src/main/scala/org/apache/spark/executor/ShuffleFetchMetricsCollector.scala` (NEW)
+
+```scala
+private[spark] class ShuffleFetchMetricsCollector(
+    blockManager: BlockManager,
+    conf: SparkConf) extends Logging {
+
+  def collectMetrics(): ExecutorLoadMetrics = {
+    // Access network layer metrics through BlockManager
+    val networkMetrics = blockManager.shuffleClient match {
+      case netty: NettyBlockTransferService => netty.getShuffleMetrics()
+      case _ => return ExecutorLoadMetrics.empty(blockManager.blockManagerId.executorId)
+    }
+
+    val queueDepth = networkMetrics.queueDepth.getValue
+    val diskIOSnapshot = networkMetrics.diskIOLatencyMillis.getSnapshot
+    val avgDiskIO = diskIOSnapshot.getMean()
+    val p99DiskIO = diskIOSnapshot.get99thPercentile()
+
+    val estimatedWait = if (queueDepth > 0) {
+      (queueDepth * avgDiskIO).toLong
+    } else {
+      0L
+    }
+
+    val capacity = calculateCapacity(queueDepth, estimatedWait)
+
+    ExecutorLoadMetrics(
+      executorId = blockManager.blockManagerId.executorId,
+      queueDepth = queueDepth,
+      avgDiskIOTimeMs = avgDiskIO,
+      p99DiskIOTimeMs = p99DiskIO,
+      estimatedWaitTimeMs = estimatedWait,
+      availableCapacity = capacity,
+      timestamp = System.currentTimeMillis(),
+      hostPort = blockManager.blockManagerId.hostPort
+    )
+  }
+
+  private def calculateCapacity(queueDepth: Int, waitMs: Long): Double = {
+    val maxQueue = conf.getInt("spark.shuffle.fetch.maxQueueDepth", 100)
+    val maxWait = conf.getLong("spark.shuffle.fetch.maxWaitTimeMs", 5000)
+
+    val queueLoad = Math.min(1.0, queueDepth.toDouble / maxQueue)
+    val waitLoad = Math.min(1.0, waitMs.toDouble / maxWait)
+
+    1.0 - Math.max(queueLoad, waitLoad)  // Inverse of load = capacity
+  }
+}
+```
+
+**File**: `core/src/main/scala/org/apache/spark/executor/Executor.scala` (MODIFY)
+
+```scala
+// Add field
+private val shuffleMetricsCollector =
+  new ShuffleFetchMetricsCollector(env.blockManager, conf)
+
+// In heartbeat reporting method
+private def reportHeartBeat(): Unit = {
+  val shuffleMetrics = if (conf.getBoolean("spark.shuffle.fetch.loadCoordination.enabled", false)) {
+    Some(shuffleMetricsCollector.collectMetrics())
+  } else {
+    None
+  }
+
+  val message = Heartbeat(
+    executorId,
+    accumUpdates,
+    env.blockManager.blockManagerId,
+    executorUpdates,
+    shuffleMetrics  // NEW
+  )
+
+  // Send to driver
+}
+```
+
+#### 4. Executor-Side Fetch Location Selection
+
+**File**: `core/src/main/scala/org/apache/spark/storage/ShuffleBlockFetcherIterator.scala` (MODIFY)
+
+```scala
+// Get global load view
+private def getGlobalLoadView(): Option[GlobalLoadView] = {
+  try {
+    blockManager.master.getShuffleFetchLoadView()
+  } catch {
+    case NonFatal(e) =>
+      logWarning(s"Failed to get global load view: ${e.getMessage}")
+      None
+  }
+}
+
+// Select best location using global view
+private def selectBestLocation(
+    blockId: BlockId,
+    locations: Seq[BlockManagerId]): BlockManagerId = {
+
+  if (!conf.getBoolean("spark.shuffle.fetch.loadCoordination.enabled", false)) {
+    return locations(Random.nextInt(locations.size))
+  }
+
+  getGlobalLoadView() match {
+    case Some(globalView) =>
+      selectLocationByLoad(locations, globalView)
+    case None =>
+      locations(Random.nextInt(locations.size))  // Fallback
+  }
+}
+
+private def selectLocationByLoad(
+    locations: Seq[BlockManagerId],
+    globalView: GlobalLoadView): BlockManagerId = {
+
+  val loadsForLocations = locations.flatMap { loc =>
+    globalView.executorLoads.get(loc.executorId).map(load => (loc, load))
+  }
+
+  if (loadsForLocations.isEmpty) {
+    return locations(Random.nextInt(locations.size))
+  }
+
+  // Score each location (higher = better)
+  val scored = loadsForLocations.map { case (loc, metrics) =>
+    val score = computeLocationScore(metrics)
+    (loc, score, metrics)
+  }
+
+  val (bestLoc, bestScore, bestMetrics) = scored.maxBy(_._2)
+
+  logDebug(s"Selected $bestLoc with score $bestScore " +
+           s"(queue: ${bestMetrics.queueDepth}, wait: ${bestMetrics.estimatedWaitTimeMs}ms)")
+
+  bestLoc
+}
+
+private def computeLocationScore(metrics: ExecutorLoadMetrics): Double = {
+  val capacityWeight = conf.getDouble("spark.shuffle.fetch.capacityWeight", 0.7)
+  val waitTimeWeight = conf.getDouble("spark.shuffle.fetch.waitTimeWeight", 0.3)
+
+  val capacityScore = metrics.availableCapacity * capacityWeight
+
+  val waitTimeScore = if (metrics.estimatedWaitTimeMs > 0) {
+    (1.0 / (1.0 + metrics.estimatedWaitTimeMs / 1000.0)) * waitTimeWeight
+  } else {
+    1.0 * waitTimeWeight
+  }
+
+  capacityScore + waitTimeScore
+}
+
+// Integrate into existing fetchUpToMaxBytes method
+private def fetchUpToMaxBytes(): Unit = {
+  // When grouping blocks by address, use selectBestLocation
+  val blocksByAddress = blockInfos.groupBy { case (blockId, _, _) =>
+    val locations = getLocationsFromMapOutputTracker(blockId)
+    selectBestLocation(blockId, locations)  // NEW: Global load aware selection
+  }
+  // ... rest of existing logic
+}
+```
+
+**File**: `core/src/main/scala/org/apache/spark/storage/BlockManagerMaster.scala` (MODIFY)
+
+```scala
+def getShuffleFetchLoadView(): Option[GlobalLoadView] = {
+  if (driverEndpoint == null) return None
+  driverEndpoint.askSync[Option[GlobalLoadView]](GetShuffleFetchLoadView)
+}
+```
+
+### Data Flow
+
+#### Metric Reporting (Every 10 seconds via heartbeat):
+1. Executor serves shuffle fetch → tracks disk I/O time in `diskIOLatencyMillis`
+2. `ShuffleFetchMetricsCollector` reads queue depth + disk I/O metrics
+3. Executor sends `Heartbeat` + `ExecutorLoadMetrics` to driver
+4. Driver's `HeartbeatReceiver` forwards to `ShuffleFetchLoadCoordinator`
+5. Coordinator updates `Map[ExecutorId → LoadMetrics]`
+
+#### Global View Broadcast (Every 5 seconds):
+1. `ShuffleFetchLoadCoordinator` removes stale metrics (> 30s old)
+2. Creates `GlobalLoadView` with all executor metrics
+3. Broadcasts view using Spark's broadcast mechanism
+4. Executors cache broadcast reference
+
+#### Fetch Decision (Per block fetch):
+1. `ShuffleBlockFetcherIterator` needs to fetch block with locations [E1, E2, E3]
+2. Fetches `GlobalLoadView` from broadcast
+3. Looks up metrics for E1, E2, E3
+4. Scores each location: `score = 0.7 × capacity + 0.3 × (1 / waitTime)`
+5. Selects highest scoring executor
+6. Fetches block from best executor
+
+### Configuration Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `spark.shuffle.fetch.loadCoordination.enabled` | `false` | Enable global load coordination for shuffle fetch |
+| `spark.shuffle.fetch.loadMetrics.expirationMs` | `30000` | Time in ms after which executor load metrics are stale |
+| `spark.shuffle.fetch.loadBroadcast.intervalMs` | `5000` | Interval in ms for broadcasting global load view |
+| `spark.shuffle.fetch.maxQueueDepth` | `100` | Max expected queue depth for capacity calculation |
+| `spark.shuffle.fetch.maxWaitTimeMs` | `5000` | Max expected wait time in ms for capacity calculation |
+| `spark.shuffle.fetch.capacityWeight` | `0.7` | Weight for executor capacity in location scoring |
+| `spark.shuffle.fetch.waitTimeWeight` | `0.3` | Weight for wait time in location scoring |
+
+### Performance Analysis
+
+**Overhead**:
+- **Heartbeat**: +100 bytes per executor per 10s = negligible
+- **Broadcast**: ~100 bytes × N executors every 5s
+  - For 1000 executors: 100 KB broadcast every 5s = 20 KB/s
+  - Uses BitTorrent-like distribution, shared among executors
+- **Computation**: O(1) per executor, O(N) aggregation driver-side
+- **Total**: < 1% of shuffle network traffic
+
+**Scalability**:
+- **Up to 1,000 executors**: Works well with defaults
+- **Up to 10,000 executors**: Increase broadcast interval to 10-15s
+- **Memory**: ~100 bytes per executor on driver
+
+**Fault Tolerance**:
+- Stale metrics removed automatically (3 missed heartbeats)
+- Falls back to random selection if global view unavailable
+- No correctness impact, only performance degradation
+- Fast recovery on network partition resolution
+
+### Files to Modify
+
+1. `core/src/main/scala/org/apache/spark/shuffle/ShuffleFetchLoadCoordinator.scala` (NEW)
+2. `core/src/main/scala/org/apache/spark/HeartbeatReceiver.scala`
+3. `core/src/main/scala/org/apache/spark/executor/ShuffleFetchMetricsCollector.scala` (NEW)
+4. `core/src/main/scala/org/apache/spark/executor/Executor.scala`
+5. `core/src/main/scala/org/apache/spark/storage/ShuffleBlockFetcherIterator.scala`
+6. `core/src/main/scala/org/apache/spark/storage/BlockManagerMaster.scala`
+7. `core/src/main/scala/org/apache/spark/internal/config/package.scala`
+
+---
+
 ## Future Enhancements
 
 1. **External Shuffle Service Support**: Extend to external shuffle service (more complex due to separate process)
 
 2. **Machine Learning-Based Estimation**: Use ML model to predict wait time based on block size, server load, time of day, etc.
 
-3. **Global Shuffle Coordination**: Share wait time information across all executors for cluster-wide optimization
+3. **Adaptive Timeout**: Adjust request timeout based on estimated wait time
 
-4. **Adaptive Timeout**: Adjust request timeout based on estimated wait time
-
-5. **Push-Based Shuffle Integration**: Combine with push-based shuffle for hybrid approach
+4. **Push-Based Shuffle Integration**: Combine with push-based shuffle for hybrid approach
 
 ---
 
