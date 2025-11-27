@@ -326,6 +326,15 @@ public class ExternalBlockHandler extends RpcHandler
     // Time latency for processing finalize shuffle merge request latency in ms
     private final Timer finalizeShuffleMergeLatencyMillis =
         new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS);
+    // NEW: Total processFetchRequest latency (used for wait time estimation)
+    private final Timer processFetchRequestLatencyMillis =
+        new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS);
+    // NEW: Time spent in streamManager.getChunk() (disk I/O breakdown)
+    private final Timer getChunkLatencyMillis =
+        new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS);
+    // NEW: Time spent sending response over network (network breakdown)
+    private final Timer respondLatencyMillis =
+        new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS);
     // Block transfer rate in blocks per second
     private final Meter blockTransferRate = new Meter();
     // Block fetch message rate per second. When using non-batch fetches
@@ -347,6 +356,9 @@ public class ExternalBlockHandler extends RpcHandler
       allMetrics.put("registerExecutorRequestLatencyMillis", registerExecutorRequestLatencyMillis);
       allMetrics.put("fetchMergedBlocksMetaLatencyMillis", fetchMergedBlocksMetaLatencyMillis);
       allMetrics.put("finalizeShuffleMergeLatencyMillis", finalizeShuffleMergeLatencyMillis);
+      allMetrics.put("processFetchRequestLatencyMillis", processFetchRequestLatencyMillis);
+      allMetrics.put("getChunkLatencyMillis", getChunkLatencyMillis);
+      allMetrics.put("respondLatencyMillis", respondLatencyMillis);
       allMetrics.put("blockTransferRate", blockTransferRate);
       allMetrics.put("blockTransferMessageRate", blockTransferMessageRate);
       allMetrics.put("blockTransferRateBytes", blockTransferRateBytes);
@@ -365,6 +377,18 @@ public class ExternalBlockHandler extends RpcHandler
                      (Gauge<Integer>) () -> blockManager.getRegisteredExecutorsSize());
       allMetrics.put("numActiveConnections", activeConnections);
       allMetrics.put("numCaughtExceptions", caughtExceptions);
+    }
+
+    public Timer getProcessFetchRequestLatencyMillis() {
+      return processFetchRequestLatencyMillis;
+    }
+
+    public Timer getGetChunkLatencyMillis() {
+      return getChunkLatencyMillis;
+    }
+
+    public Timer getRespondLatencyMillis() {
+      return respondLatencyMillis;
     }
 
     @Override

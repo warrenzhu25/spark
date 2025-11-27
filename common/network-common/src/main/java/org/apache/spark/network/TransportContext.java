@@ -26,6 +26,7 @@ import java.util.List;
 import javax.annotation.Nullable;
 
 import com.codahale.metrics.Counter;
+import com.codahale.metrics.MetricSet;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.EventLoopGroup;
@@ -237,9 +238,38 @@ public class TransportContext implements Closeable {
         .addLast("handler", channelHandler);
       // Use a separate EventLoopGroup to handle ChunkFetchRequest messages for shuffle rpcs.
       if (chunkFetchWorkers != null) {
-        ChunkFetchRequestHandler chunkFetchHandler = new ChunkFetchRequestHandler(
-          channelHandler.getClient(), rpcHandler.getStreamManager(),
-          conf.maxChunksBeingTransferred(), true /* syncModeEnabled */);
+        ChunkFetchRequestHandler chunkFetchHandler;
+        // Pass metrics to handler if available (for ExternalBlockHandler)
+        try {
+          // Use reflection to get metrics since getAllMetrics() is not in RpcHandler interface
+          java.lang.reflect.Method getAllMetricsMethod =
+            rpcHandler.getClass().getMethod("getAllMetrics");
+          MetricSet metrics = (MetricSet) getAllMetricsMethod.invoke(rpcHandler);
+          if (metrics != null &&
+              metrics.getClass().getName().contains("ExternalBlockHandler$ShuffleMetrics")) {
+            com.codahale.metrics.Timer processFetchRequestLatency =
+              (com.codahale.metrics.Timer) metrics.getMetrics().get(
+                "processFetchRequestLatencyMillis");
+            com.codahale.metrics.Timer getChunkLatency =
+              (com.codahale.metrics.Timer) metrics.getMetrics().get("getChunkLatencyMillis");
+            com.codahale.metrics.Timer respondLatency =
+              (com.codahale.metrics.Timer) metrics.getMetrics().get("respondLatencyMillis");
+            chunkFetchHandler = new ChunkFetchRequestHandler(
+              channelHandler.getClient(), rpcHandler.getStreamManager(),
+              conf.maxChunksBeingTransferred(), true /* syncModeEnabled */,
+              processFetchRequestLatency, getChunkLatency, respondLatency);
+          } else {
+            chunkFetchHandler = new ChunkFetchRequestHandler(
+              channelHandler.getClient(), rpcHandler.getStreamManager(),
+              conf.maxChunksBeingTransferred(), true /* syncModeEnabled */);
+          }
+        } catch (Exception e) {
+          logger.debug("Metrics not available for ChunkFetchRequestHandler, " +
+            "using handler without metrics", e);
+          chunkFetchHandler = new ChunkFetchRequestHandler(
+            channelHandler.getClient(), rpcHandler.getStreamManager(),
+            conf.maxChunksBeingTransferred(), true /* syncModeEnabled */);
+        }
         pipeline.addLast(chunkFetchWorkers, "chunkFetchHandler", chunkFetchHandler);
       }
       return channelHandler;
@@ -292,9 +322,37 @@ public class TransportContext implements Closeable {
     boolean separateChunkFetchRequest = conf.separateChunkFetchRequest();
     ChunkFetchRequestHandler chunkFetchRequestHandler = null;
     if (!separateChunkFetchRequest) {
-      chunkFetchRequestHandler = new ChunkFetchRequestHandler(
-        client, rpcHandler.getStreamManager(),
-        conf.maxChunksBeingTransferred(), false /* syncModeEnabled */);
+      // Pass metrics to handler if available (for ExternalBlockHandler)
+      try {
+        // Use reflection to get metrics since getAllMetrics() is not in RpcHandler interface
+        java.lang.reflect.Method getAllMetricsMethod =
+          rpcHandler.getClass().getMethod("getAllMetrics");
+        MetricSet metrics = (MetricSet) getAllMetricsMethod.invoke(rpcHandler);
+        if (metrics != null &&
+            metrics.getClass().getName().contains("ExternalBlockHandler$ShuffleMetrics")) {
+          com.codahale.metrics.Timer processFetchRequestLatency =
+            (com.codahale.metrics.Timer) metrics.getMetrics().get(
+              "processFetchRequestLatencyMillis");
+          com.codahale.metrics.Timer getChunkLatency =
+            (com.codahale.metrics.Timer) metrics.getMetrics().get("getChunkLatencyMillis");
+          com.codahale.metrics.Timer respondLatency =
+            (com.codahale.metrics.Timer) metrics.getMetrics().get("respondLatencyMillis");
+          chunkFetchRequestHandler = new ChunkFetchRequestHandler(
+            client, rpcHandler.getStreamManager(),
+            conf.maxChunksBeingTransferred(), false /* syncModeEnabled */,
+            processFetchRequestLatency, getChunkLatency, respondLatency);
+        } else {
+          chunkFetchRequestHandler = new ChunkFetchRequestHandler(
+            client, rpcHandler.getStreamManager(),
+            conf.maxChunksBeingTransferred(), false /* syncModeEnabled */);
+        }
+      } catch (Exception e) {
+        logger.debug("Metrics not available for ChunkFetchRequestHandler, " +
+          "using handler without metrics", e);
+        chunkFetchRequestHandler = new ChunkFetchRequestHandler(
+          client, rpcHandler.getStreamManager(),
+          conf.maxChunksBeingTransferred(), false /* syncModeEnabled */);
+      }
     }
     TransportRequestHandler requestHandler = new TransportRequestHandler(channel, client,
       rpcHandler, conf.maxChunksBeingTransferred(), chunkFetchRequestHandler);
