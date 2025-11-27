@@ -27,7 +27,7 @@ import scala.concurrent.duration._
 import scala.language.reflectiveCalls
 
 import org.mockito.ArgumentMatchers.{any, anyInt, anyString, eq => meq}
-import org.mockito.Mockito.{atLeast, atMost, never, spy, times, verify, when}
+import org.mockito.Mockito.{atLeast, atLeastOnce, atMost, never, spy, times, verify, when}
 import org.scalatest.concurrent.Eventually
 import org.scalatestplus.mockito.MockitoSugar
 
@@ -227,6 +227,25 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext
     assert(numTasks === taskDescriptions.length)
     assert(taskDescriptions.forall(t => t.executorId == "exe0"))
     assert(!failedTaskSet)
+  }
+
+  test("Scheduler passes total executor count to skew detection") {
+    val taskScheduler = setupSchedulerWithMockTaskSetShuffleSkewExecutors()
+    // Register two executors, but only offer one when scheduling tasks
+    val registrationOffers = IndexedSeq(
+      WorkerOffer("exe0", "host0", 0),
+      WorkerOffer("exe1", "host1", 0))
+    taskScheduler.resourceOffers(registrationOffers)
+
+    val taskSet = FakeTask.createTaskSet(1)
+    taskScheduler.submitTasks(taskSet)
+
+    // Only exe0 is free in this scheduling round
+    val workerOffers = IndexedSeq(WorkerOffer("exe0", "host0", 4))
+    taskScheduler.resourceOffers(workerOffers)
+
+    val mockManager = stageToMockTaskSetManager(taskSet.stageId)
+    verify(mockManager, atLeastOnce()).getSkewedExecutors(2)
   }
 
   test("Scheduler correctly accounts for multiple CPUs per task") {

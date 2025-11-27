@@ -396,7 +396,8 @@ private[spark] class TaskSchedulerImpl(
     var minLaunchedLocality: Option[TaskLocality] = None
     // nodes and executors that are excluded for the entire application have already been
     // filtered out by this point
-    val filteredOffers = filterShuffleSkewExecutors(taskSet, shuffledOffers)
+    val totalExecutors = executorIdToRunningTaskIds.size
+    val filteredOffers = filterShuffleSkewExecutors(taskSet, shuffledOffers, totalExecutors)
     // Map filteredOffers indices to shuffledOffers indices
     // This allows us to correctly access the tasks array which is sized for shuffledOffers
     val offerIndexMap = filteredOffers.map(offer => shuffledOffers.indexOf(offer))
@@ -458,8 +459,9 @@ private[spark] class TaskSchedulerImpl(
   }
 
   private def filterShuffleSkewExecutors(taskSet: TaskSetManager,
-    shuffledOffers: Seq[WorkerOffer]): Seq[WorkerOffer] = {
-    taskSet.filterShuffleSkewExecutors(shuffledOffers)
+      shuffledOffers: Seq[WorkerOffer],
+      totalExecutors: Int): Seq[WorkerOffer] = {
+    taskSet.filterShuffleSkewExecutors(shuffledOffers, totalExecutors)
   }
 
   /**

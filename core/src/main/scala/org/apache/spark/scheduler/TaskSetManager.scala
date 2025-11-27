@@ -1305,12 +1305,12 @@ private[spark] class TaskSetManager(
   }
 
   def getSkewedExecutors(totalExecutors: Int): Set[String] = {
-    if (!excludeShuffleSkewExecutors) {
+    if (!excludeShuffleSkewExecutors || totalExecutors <= 0) {
       return Set.empty
     }
     val averageTaskNum = getAverageTaskNum(totalExecutors)
     val maxSkewedNum = math.min(math.ceil(
-      finishedTasksByExecutorId.size * shuffleSkewMaxExecutorsRatio).toInt,
+      totalExecutors * shuffleSkewMaxExecutorsRatio).toInt,
       shuffleSkewMaxExecutorsNum)
     // Filter for executors exceeding the skew threshold
     val skewedExecutors = finishedTasksByExecutorId.filter { case (_, numOutputs) =>
@@ -1327,11 +1327,12 @@ private[spark] class TaskSetManager(
   }
 
   def filterShuffleSkewExecutors(
-    shuffledOffers: Seq[WorkerOffer]): Seq[WorkerOffer] = {
-    val skewedExecutors = getSkewedExecutors(shuffledOffers.length)
+      shuffledOffers: Seq[WorkerOffer],
+      totalExecutors: Int): Seq[WorkerOffer] = {
     if (!isShuffleMapTasks()) {
       return shuffledOffers
     }
+    val skewedExecutors = getSkewedExecutors(totalExecutors)
     skewedExecutors.foreach(e => filteredSkewExecutors(e) += 1)
     shuffledOffers.filterNot(e => skewedExecutors.contains(e.executorId))
   }

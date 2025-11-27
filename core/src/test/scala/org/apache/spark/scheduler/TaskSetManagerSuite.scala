@@ -2410,6 +2410,57 @@ class TaskSetManagerSuite
     }
   }
 
+  test("getSkewedExecutors uses total executor count for averages") {
+    val manager = testExcludeShuffleSkewSetup(
+      numTasks = 20,
+      Some(true),
+      Some(2),
+      Some(5),
+      Some(1.5))
+    val directTaskResult = createTaskResult(0)
+    val execHost = Map("exec1" -> "host1", "exec2" -> "host2")
+
+    // exec1 handles the majority of tasks while exec2 stays mostly idle
+    for (i <- 0 until 20) {
+      val execId = if (i < 18) "exec1" else "exec2"
+      val task = manager.resourceOffer(execId, execHost(execId), NO_PREF)._1.get
+      manager.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    // Pretending that only one executor offered resources should not detect skew
+    assert(manager.getSkewedExecutors(1).isEmpty)
+    // Using the real executor count (2) identifies exec1 as skewed
+    assert(manager.getSkewedExecutors(2) === Set("exec1"))
+  }
+
+  test("getSkewedExecutors applies ratio cap based on total executors") {
+    val manager = testExcludeShuffleSkewSetup(
+      numTasks = 20,
+      Some(true),
+      Some(1),
+      Some(10),
+      Some(1.0))
+
+    sched.sc.conf.set(config.SHUFFLE_SKEW_MAX_EXECUTORS_RATIO, 0.2)
+    val taskSet = FakeTask.createTaskSet(20)
+    val manager2 = new TaskSetManager(sched, taskSet, MAX_TASK_FAILURES)
+    // Simulate a 10-executor cluster even though only two executors finish tasks
+    for (i <- 3 to 10) {
+      sched.addExecutor(s"exec$i", s"host$i")
+    }
+    val directTaskResult = createTaskResult(0)
+    for (i <- 0 until 20) {
+      val execId = if (i % 2 == 0) "exec1" else "exec2"
+      val host = if (i % 2 == 0) "host1" else "host2"
+      val task = manager2.resourceOffer(execId, host, NO_PREF)._1.get
+      manager2.handleSuccessfulTask(task.taskId, directTaskResult)
+    }
+
+    val skewed = manager2.getSkewedExecutors(10)
+    assert(skewed === Set("exec1", "exec2"),
+      s"Ratio cap should consider all executors. Expected 2 executors, got ${skewed.size}")
+  }
+
   test("getSkewedExecutors respects maxExecutorsNum absolute limit") {
     val manager = testExcludeShuffleSkewSetup(
       30,
