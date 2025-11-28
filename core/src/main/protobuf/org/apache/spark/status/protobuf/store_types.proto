@@ -628,6 +628,7 @@ message TaskMetrics {
   OutputMetrics output_metrics = 12;
   ShuffleReadMetrics shuffle_read_metrics = 13;
   ShuffleWriteMetrics shuffle_write_metrics = 14;
+  repeated ShuffleFetchWaitStat shuffle_fetch_wait_stats = 15;
 }
 
 message InputMetrics {
@@ -668,6 +669,14 @@ message ShuffleWriteMetrics {
   int64 bytes_written = 1;
   int64 write_time = 2;
   int64 records_written = 3;
+}
+
+message ShuffleFetchWaitStat {
+  optional string remote_executor_id = 1;
+  int64 total_wait_ms = 2;
+  int32 count = 3;
+  repeated double quantiles = 4;
+  repeated int64 values = 5;
 }
 
 message TaskMetricDistributions {

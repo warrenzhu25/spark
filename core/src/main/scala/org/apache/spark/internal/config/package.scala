@@ -1493,6 +1493,29 @@ package object config {
         "maxRemoteBlockSizeFetchToMem cannot be larger than (Int.MaxValue - 512) bytes.")
       .createWithDefaultString("200m")
 
+  private[spark] val SHUFFLE_FETCH_WAIT_STATS_ENABLED =
+    ConfigBuilder("spark.shuffle.fetchWaitStats.enabled")
+      .doc("Enable reporting top-K shuffle fetch wait contributors per executor.")
+      .version("3.5.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  private[spark] val SHUFFLE_FETCH_WAIT_STATS_TOP_K =
+    ConfigBuilder("spark.shuffle.fetchWaitStats.topK")
+      .doc("Number of remote executors to include in top-K shuffle fetch wait reporting.")
+      .version("3.5.0")
+      .intConf
+      .checkValue(_ > 0, "topK must be positive")
+      .createWithDefault(3)
+
+  private[spark] val SHUFFLE_FETCH_WAIT_STATS_LOG_INTERVAL =
+    ConfigBuilder("spark.shuffle.fetchWaitStats.logInterval")
+      .doc("How often (time interval) the driver logs global top-K shuffle fetch wait stats. " +
+        "If unset, logging occurs only on stage completion.")
+      .version("3.5.0")
+      .timeConf(TimeUnit.SECONDS)
+      .createOptional
+
   private[spark] val TASK_METRICS_TRACK_UPDATED_BLOCK_STATUSES =
     ConfigBuilder("spark.taskMetrics.trackUpdatedBlockStatuses")
       .doc("Enable tracking of updatedBlockStatuses in the TaskMetrics. Off by default since " +

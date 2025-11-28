@@ -1302,6 +1302,43 @@ class ShuffleBlockFetcherIteratorSuite extends SparkFunSuite {
     assert(shuffleMetrics.mergedFetchFallbackCount === 1)
   }
 
+  test("FetchWaitTimeTracker summarizes wait distribution per executor") {
+    val tracker = new FetchWaitTimeTracker(localExecutorId = "localExec")
+
+    tracker.record(10L, Some(BlockManagerId("execA", "host", 1)))
+    tracker.record(30L, Some(BlockManagerId("execA", "host", 1)))
+    tracker.record(20L, Some(BlockManagerId("execB", "host2", 2)))
+    tracker.record(5L, Some(BlockManagerId("localExec", "host3", 3))) // ignored for per-exec
+    tracker.record(7L, Some(FallbackStorage.FALLBACK_BLOCK_MANAGER_ID)) // ignored for per-exec
+    tracker.record(40L, None) // no executor ID
+
+    val total = tracker.summary
+    assert(total.count === 6)
+    assert(total.min === 5L)
+    assert(total.max === 40L)
+    assert(total.p50 === 10L)
+    assert(total.p75 === 30L)
+
+    val top = tracker.topExecutors(3)
+    assert(top.length === 2)
+
+    val (execA, waitA, summaryA) = top.head
+    assert(execA === "execA")
+    assert(waitA === 40L)
+    assert(summaryA.count === 2)
+    assert(summaryA.p50 === 10L)
+    assert(summaryA.p75 === 30L)
+    assert(summaryA.max === 30L)
+
+    val (execB, waitB, summaryB) = top(1)
+    assert(execB === "execB")
+    assert(waitB === 20L)
+    assert(summaryB.count === 1)
+    assert(summaryB.p50 === 20L)
+    assert(summaryB.p75 === 20L)
+    assert(summaryB.max === 20L)
+  }
+
   private def createMockPushMergedBlockMeta(
       numChunks: Int,
       bitmaps: Array[RoaringBitmap]): MergedBlockMeta = {

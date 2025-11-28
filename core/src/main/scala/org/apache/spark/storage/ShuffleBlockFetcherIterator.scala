@@ -35,13 +35,13 @@ import org.roaringbitmap.RoaringBitmap
 import org.apache.spark.{MapOutputTracker, SparkException, TaskContext}
 import org.apache.spark.MapOutputTracker.SHUFFLE_PUSH_MAP_ID
 import org.apache.spark.errors.SparkCoreErrors
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.internal.LogKeys._
 import org.apache.spark.network.buffer.{FileSegmentManagedBuffer, ManagedBuffer}
 import org.apache.spark.network.shuffle._
 import org.apache.spark.network.shuffle.checksum.{Cause, ShuffleChecksumHelper}
 import org.apache.spark.network.util.{NettyUtils, TransportConf}
-import org.apache.spark.shuffle.ShuffleReadMetricsReporter
+import org.apache.spark.shuffle.{ExecutorShuffleFetchWaitStats, ShuffleFetchWaitAggregate, ShuffleFetchWaitDistribution, ShuffleFetchWaitStat, ShuffleReadMetricsReporter}
 import org.apache.spark.util.{Clock, CompletionIterator, SystemClock, TaskCompletionListener, Utils}
 
 /**
@@ -123,6 +123,10 @@ final class ShuffleBlockFetcherIterator(
   private[this] var numBlocksProcessed = 0
 
   private[this] val startTimeNs = System.nanoTime()
+
+  private[this] val fetchWaitTimeTracker =
+    new FetchWaitTimeTracker(blockManager.blockManagerId.executorId)
+  private[this] var loggedFetchWaitTimeStats = false
 
   /** Host local blocks to fetch, excluding zero-sized blocks. */
   private[this] val hostLocalBlocks = scala.collection.mutable.LinkedHashSet[(BlockId, Int)]()
@@ -224,6 +228,7 @@ final class ShuffleBlockFetcherIterator(
    * Mark the iterator as zombie, and release all buffers that haven't been deserialized yet.
    */
   private[storage] def cleanup(): Unit = {
+    logFetchWaitTimeStats()
     synchronized {
       isZombie = true
     }
@@ -251,6 +256,47 @@ final class ShuffleBlockFetcherIterator(
         logWarning(log"Failed to cleanup shuffle fetch temp file ${MDC(PATH, file.path())}")
       }
     }
+  }
+
+  private[this] def logFetchWaitTimeStats(): Unit = {
+    if (!loggedFetchWaitTimeStats && fetchWaitTimeTracker.hasData) {
+      loggedFetchWaitTimeStats = true
+      val fetchWaitStatsEnabled =
+        blockManager.conf.get(config.SHUFFLE_FETCH_WAIT_STATS_ENABLED) ||
+          context.getLocalProperty("spark.shuffle.fetchWaitStats.enabled") == "true"
+      if (fetchWaitStatsEnabled) {
+        val topK = blockManager.conf.get(config.SHUFFLE_FETCH_WAIT_STATS_TOP_K)
+        context.taskMetrics().setShuffleFetchWaitStats(
+          Some(fetchWaitTimeTracker.toShuffleFetchWaitStats(topK)))
+      }
+      val summary = fetchWaitTimeTracker.summary
+      logInfo(
+        s"Shuffle fetch wait time distribution (ms): " +
+          s"count=${summary.count}, min=${summary.min}, p25=${summary.p25}, " +
+          s"p50=${summary.p50}, p75=${summary.p75}, max=${summary.max}")
+      val topExecutors = fetchWaitTimeTracker.topExecutors(3)
+      if (topExecutors.nonEmpty) {
+        val execStr = topExecutors.map { case (execId, waitMs, execSummary) =>
+          s"$execId total=${Utils.msDurationToString(waitMs)} " +
+            s"(count=${execSummary.count}, min=${execSummary.min}, p25=${execSummary.p25}, " +
+            s"p50=${execSummary.p50}, p75=${execSummary.p75}, max=${execSummary.max})"
+        }.mkString(", ")
+        logInfo(s"Top shuffle wait executors (total wait time): $execStr")
+      }
+    }
+  }
+
+  private[this] def recordFetchWaitTime(fetchWaitTime: Long, result: FetchResult): Unit = {
+    val addressOpt = result match {
+      case SuccessFetchResult(_, _, address, _, _, _) => Some(address)
+      case FailureFetchResult(_, _, address, _) => Some(address)
+      case DeferFetchRequestResult(FetchRequest(address, _, _)) => Some(address)
+      case FallbackOnPushMergedFailureResult(_, address, _, _) => Some(address)
+      case PushMergedRemoteMetaFetchResult(_, _, _, _, _, address) => Some(address)
+      case PushMergedRemoteMetaFailedFetchResult(_, _, _, address) => Some(address)
+      case _ => None
+    }
+    fetchWaitTimeTracker.record(fetchWaitTime, addressOpt)
   }
 
   private[this] def sendRequest(req: FetchRequest): Unit = {
@@ -817,6 +863,7 @@ final class ShuffleBlockFetcherIterator(
       result = results.take()
       val fetchWaitTime = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startFetchWait)
       shuffleMetrics.incFetchWaitTime(fetchWaitTime)
+      recordFetchWaitTime(fetchWaitTime, result)
 
       result match {
         case SuccessFetchResult(blockId, mapIndex, address, size, buf, isNetworkReqDone) =>
@@ -1339,6 +1386,78 @@ final class ShuffleBlockFetcherIterator(
     removedChunkIds
   }
 }
+
+private case class FetchWaitTimeSummary(
+    count: Int,
+    min: Long,
+    p25: Long,
+    p50: Long,
+    p75: Long,
+    max: Long)
+
+private class FetchWaitTimeTracker(localExecutorId: String) {
+  private[this] val waits = new ArrayBuffer[Long]()
+  private[this] val waitsByExecutor =
+    new mutable.HashMap[String, ExecutorWaitData]()
+  private val fallbackExecId = FallbackStorage.FALLBACK_BLOCK_MANAGER_ID.executorId
+
+  def hasData: Boolean = waits.nonEmpty
+
+  def record(waitMs: Long, addressOpt: Option[BlockManagerId]): Unit = {
+    waits += waitMs
+    addressOpt
+      .filterNot(_.executorId == localExecutorId)
+      .filterNot(_.executorId == fallbackExecId)
+      .foreach { address =>
+        val data = waitsByExecutor.getOrElseUpdate(
+          address.executorId, ExecutorWaitData(0L, new ArrayBuffer[Long]()))
+        data.totalWait += waitMs
+        data.waits += waitMs
+      }
+  }
+
+  def summary: FetchWaitTimeSummary = {
+    createSummary(waits)
+  }
+
+  def topExecutors(limit: Int): Seq[(String, Long, FetchWaitTimeSummary)] = {
+    waitsByExecutor.toSeq
+      .sortBy { case (_, data) => -data.totalWait }
+      .take(limit)
+      .map { case (execId, data) => (execId, data.totalWait, createSummary(data.waits)) }
+  }
+
+  def toShuffleFetchWaitStats(limit: Int = 3): ExecutorShuffleFetchWaitStats = {
+    val top = topExecutors(limit).map { case (execId, total, summary) =>
+      val aggregate = ShuffleFetchWaitAggregate(execId, total, summary.count)
+      val distribution = ShuffleFetchWaitDistribution(
+        execId,
+        ExecutorShuffleFetchWaitStats.STANDARD_QUANTILES,
+        IndexedSeq(summary.min, summary.p25, summary.p50, summary.p75, summary.max))
+      ShuffleFetchWaitStat(aggregate, distribution)
+    }
+    ExecutorShuffleFetchWaitStats(top)
+  }
+
+  private def createSummary(values: ArrayBuffer[Long]): FetchWaitTimeSummary = {
+    val sorted = values.sorted
+    def percentile(fraction: Double): Long = {
+      val idx = math.min(
+        math.max(math.ceil(fraction * sorted.length).toInt - 1, 0),
+        sorted.length - 1)
+      sorted(idx)
+    }
+    FetchWaitTimeSummary(
+      count = sorted.length,
+      min = sorted.head,
+      p25 = percentile(0.25),
+      p50 = percentile(0.5),
+      p75 = percentile(0.75),
+      max = sorted.last)
+  }
+}
+
+private case class ExecutorWaitData(var totalWait: Long, waits: ArrayBuffer[Long])
 
 /**
  * Helper class that ensures a ManagedBuffer is released upon InputStream.close() and

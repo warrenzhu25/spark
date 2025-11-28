@@ -39,7 +39,7 @@ import org.apache.spark.resource._
 import org.apache.spark.resource.ResourceProfile.DEFAULT_RESOURCE_PROFILE_ID
 import org.apache.spark.scheduler._
 import org.apache.spark.scheduler.cluster.ExecutorInfo
-import org.apache.spark.shuffle.MetadataFetchFailedException
+import org.apache.spark.shuffle.{ExecutorShuffleFetchWaitStats, MetadataFetchFailedException, ShuffleFetchWaitAggregate, ShuffleFetchWaitDistribution, ShuffleFetchWaitStat}
 import org.apache.spark.storage._
 
 class JsonProtocolSuite extends SparkFunSuite {
@@ -358,6 +358,30 @@ class JsonProtocolSuite extends SparkFunSuite {
       JsonProtocol.taskMetricsToJson(foundTaskMetrics, _))
     assert(expectedTaskMetricsJson.equals(foundTaskMetricsJson),
       s"Expected: $expectedTaskMetricsJson, Found: $foundTaskMetricsJson")
+  }
+
+  test("TaskMetrics includes top shuffle wait stats") {
+    val metrics = makeTaskMetrics(1L, 2L, 3L, 4L, 5, 6, 0,
+      hasHadoopInput = false, hasOutput = true)
+
+    val stat1 = ShuffleFetchWaitStat(
+      ShuffleFetchWaitAggregate("exec-1", 1000L, 10),
+      ShuffleFetchWaitDistribution("exec-1",
+        ExecutorShuffleFetchWaitStats.STANDARD_QUANTILES,
+        IndexedSeq(0L, 30L, 50L, 80L, 120L)))
+    val stat2 = ShuffleFetchWaitStat(
+      ShuffleFetchWaitAggregate("exec-2", 500L, 5),
+      ShuffleFetchWaitDistribution("exec-2",
+        ExecutorShuffleFetchWaitStats.STANDARD_QUANTILES,
+        IndexedSeq(0L, 10L, 20L, 30L, 50L)))
+
+    metrics.setShuffleFetchWaitStats(Some(ExecutorShuffleFetchWaitStats(Seq(stat1, stat2))))
+
+    val json = toJsonString(JsonProtocol.taskMetricsToJson(metrics, _))
+    val parsed = JsonProtocol.taskMetricsFromJson(json)
+    assert(parsed.shuffleFetchWaitStats.nonEmpty)
+    assert(parsed.shuffleFetchWaitStats.get.stats.size === 2)
+    assertEquals(metrics, parsed)
   }
 
   test("OutputMetrics backward compatibility") {
@@ -1296,6 +1320,7 @@ private[spark] object JsonProtocolSuite extends Assertions {
     assert(metrics1.resultSerializationTime === metrics2.resultSerializationTime)
     assert(metrics1.memoryBytesSpilled === metrics2.memoryBytesSpilled)
     assert(metrics1.diskBytesSpilled === metrics2.diskBytesSpilled)
+    assert(metrics1.shuffleFetchWaitStats === metrics2.shuffleFetchWaitStats)
     assertEquals(metrics1.shuffleReadMetrics, metrics2.shuffleReadMetrics)
     assertEquals(metrics1.shuffleWriteMetrics, metrics2.shuffleWriteMetrics)
     assertEquals(metrics1.inputMetrics, metrics2.inputMetrics)

@@ -27,6 +27,7 @@ import org.apache.spark.annotation.DeveloperApi
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.Tests.IS_TESTING
 import org.apache.spark.scheduler.AccumulableInfo
+import org.apache.spark.shuffle.ExecutorShuffleFetchWaitStats
 import org.apache.spark.storage.{BlockId, BlockStatus}
 import org.apache.spark.util._
 
@@ -197,6 +198,11 @@ class TaskMetrics private[spark] () extends Serializable {
   val shuffleWriteMetrics: ShuffleWriteMetrics = new ShuffleWriteMetrics()
 
   /**
+   * Optional: top-K remote executors contributing to shuffle fetch wait time for this task.
+   */
+  private[this] var _shuffleFetchWaitStats: Option[ExecutorShuffleFetchWaitStats] = None
+
+  /**
    * A list of [[TempShuffleReadMetrics]], one per shuffle dependency.
    *
    * A task may have multiple shuffle readers for multiple dependencies. To avoid synchronization
@@ -226,6 +232,12 @@ class TaskMetrics private[spark] () extends Serializable {
     if (tempShuffleReadMetrics.nonEmpty) {
       shuffleReadMetrics.setMergeValues(tempShuffleReadMetrics.toSeq)
     }
+  }
+
+  def shuffleFetchWaitStats: Option[ExecutorShuffleFetchWaitStats] = _shuffleFetchWaitStats
+
+  private[spark] def setShuffleFetchWaitStats(v: Option[ExecutorShuffleFetchWaitStats]): Unit = {
+    _shuffleFetchWaitStats = v
   }
 
   // Only used for test

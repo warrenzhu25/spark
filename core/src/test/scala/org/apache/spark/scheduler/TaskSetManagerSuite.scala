@@ -2448,13 +2448,13 @@ class TaskSetManagerSuite
       val task3Metrics: TaskMetrics =
         ser.deserialize(ByteBuffer.wrap(ser.serialize(taskMetricsByTask(3)).array()))
       sched.executorHeartbeatReceived("exec1", Array((3, task3Metrics.internalAccums)),
-        blockManagerId, mutable.Map.empty[(Int, Int), ExecutorMetrics])
+        blockManagerId, mutable.Map.empty[(Int, Int), ExecutorMetrics], None)
 
       updateAndGetTaskMetrics(taskMetricsByTask(4), efficientMultiplier = 5)
       val task4Metrics: TaskMetrics =
         ser.deserialize(ByteBuffer.wrap(ser.serialize(taskMetricsByTask(4)).array()))
       sched.executorHeartbeatReceived("exec1", Array((4, task4Metrics.internalAccums)),
-        blockManagerId, mutable.Map.empty[(Int, Int), ExecutorMetrics])
+        blockManagerId, mutable.Map.empty[(Int, Int), ExecutorMetrics], None)
       for (id <- Set(0, 1, 2)) {
         val resultBytes = ser.serialize(createTaskResult(id, taskMetricsByTask(id).internalAccums))
         sched.statusUpdate(tid = id, state = TaskState.FINISHED, serializedData = resultBytes)
@@ -2514,7 +2514,7 @@ class TaskSetManagerSuite
       val taskMetrics: TaskMetrics =
         ser.deserialize(ByteBuffer.wrap(ser.serialize(taskMetricsByTask(3)).array()))
       sched.executorHeartbeatReceived("exec1", Array((3, taskMetrics.internalAccums)),
-        blockManagerId, mutable.Map.empty[(Int, Int), ExecutorMetrics])
+        blockManagerId, mutable.Map.empty[(Int, Int), ExecutorMetrics], None)
       for (id <- Set(0, 1, 2)) {
         val resultBytes = ser.serialize(createTaskResult(id, taskMetricsByTask(id).internalAccums))
         sched.statusUpdate(tid = id, state = TaskState.FINISHED, serializedData = resultBytes)
@@ -2567,7 +2567,7 @@ class TaskSetManagerSuite
       val taskMetrics: TaskMetrics =
         ser.deserialize(ByteBuffer.wrap(ser.serialize(taskMetricsByTask(3)).array()))
       sched.executorHeartbeatReceived("exec1", Array((3, taskMetrics.internalAccums)),
-        blockManagerId, mutable.Map.empty[(Int, Int), ExecutorMetrics])
+        blockManagerId, mutable.Map.empty[(Int, Int), ExecutorMetrics], None)
       for (id <- Set(0, 1, 2)) {
         val resultBytes = ser.serialize(createTaskResult(id, taskMetricsByTask(id).internalAccums))
         sched.statusUpdate(tid = id, state = TaskState.FINISHED, serializedData = resultBytes)

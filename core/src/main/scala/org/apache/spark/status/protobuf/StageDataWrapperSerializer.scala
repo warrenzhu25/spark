@@ -21,6 +21,7 @@ import java.util.Date
 
 import scala.jdk.CollectionConverters._
 
+import org.apache.spark.shuffle.{ExecutorShuffleFetchWaitStats, ShuffleFetchWaitAggregate, ShuffleFetchWaitDistribution, ShuffleFetchWaitStat}
 import org.apache.spark.status.StageDataWrapper
 import org.apache.spark.status.api.v1.{ExecutorMetricsDistributions, ExecutorPeakMetricsDistributions, InputMetricDistributions, InputMetrics, OutputMetricDistributions, OutputMetrics, ShufflePushReadMetricDistributions, ShufflePushReadMetrics, ShuffleReadMetricDistributions, ShuffleReadMetrics, ShuffleWriteMetricDistributions, ShuffleWriteMetrics, SpeculationStageSummary, StageData, TaskData, TaskMetricDistributions, TaskMetrics}
 import org.apache.spark.status.protobuf.Utils._
@@ -195,6 +196,17 @@ private[protobuf] class StageDataWrapperSerializer extends ProtobufSerDe[StageDa
       .setOutputMetrics(serializeOutputMetrics(tm.outputMetrics))
       .setShuffleReadMetrics(serializeShuffleReadMetrics(tm.shuffleReadMetrics))
       .setShuffleWriteMetrics(serializeShuffleWriteMetrics(tm.shuffleWriteMetrics))
+    tm.shuffleFetchWaitStats.foreach { stats =>
+      stats.stats.foreach { stat =>
+        val builder = StoreTypes.ShuffleFetchWaitStat.newBuilder()
+          .setRemoteExecutorId(stat.remoteExecutorId)
+          .setTotalWaitMs(stat.aggregate.totalWaitMs)
+          .setCount(stat.aggregate.count)
+        stat.distribution.quantiles.foreach(q => builder.addQuantiles(q))
+        stat.distribution.values.foreach(v => builder.addValues(v))
+        taskMetricsBuilder.addShuffleFetchWaitStats(builder.build())
+      }
+    }
     taskMetricsBuilder.build()
   }
 
@@ -652,6 +664,14 @@ private[protobuf] class StageDataWrapperSerializer extends ProtobufSerDe[StageDa
   }
 
   private def deserializeTaskMetrics(binary: StoreTypes.TaskMetrics): TaskMetrics = {
+    val shuffleFetchWaitStats =
+      if (binary.getShuffleFetchWaitStatsCount > 0) {
+        val stats = binary.getShuffleFetchWaitStatsList.asScala.map(
+          deserializeShuffleFetchWaitStat).toSeq
+        Some(ExecutorShuffleFetchWaitStats(stats))
+      } else {
+        None
+      }
     new TaskMetrics(
       binary.getExecutorDeserializeTime,
       binary.getExecutorDeserializeCpuTime,
@@ -666,7 +686,21 @@ private[protobuf] class StageDataWrapperSerializer extends ProtobufSerDe[StageDa
       deserializeInputMetrics(binary.getInputMetrics),
       deserializeOutputMetrics(binary.getOutputMetrics),
       deserializeShuffleReadMetrics(binary.getShuffleReadMetrics),
-      deserializeShuffleWriteMetrics(binary.getShuffleWriteMetrics))
+      deserializeShuffleWriteMetrics(binary.getShuffleWriteMetrics),
+      shuffleFetchWaitStats)
+  }
+
+  private def deserializeShuffleFetchWaitStat(
+      binary: StoreTypes.ShuffleFetchWaitStat): ShuffleFetchWaitStat = {
+    val aggregate = ShuffleFetchWaitAggregate(
+      binary.getRemoteExecutorId,
+      binary.getTotalWaitMs,
+      binary.getCount)
+    val distribution = ShuffleFetchWaitDistribution(
+      binary.getRemoteExecutorId,
+      binary.getQuantilesList.asScala.map(_.toDouble).toIndexedSeq,
+      binary.getValuesList.asScala.map(_.toLong).toIndexedSeq)
+    ShuffleFetchWaitStat(aggregate, distribution)
   }
 
   private def deserializeInputMetrics(binary: StoreTypes.InputMetrics): InputMetrics = {

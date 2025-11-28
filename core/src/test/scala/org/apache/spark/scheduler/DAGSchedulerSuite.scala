@@ -46,7 +46,7 @@ import org.apache.spark.resource.{ExecutorResourceRequests, ResourceProfile, Res
 import org.apache.spark.resource.ResourceUtils.{FPGA, GPU}
 import org.apache.spark.scheduler.SchedulingMode.SchedulingMode
 import org.apache.spark.scheduler.local.LocalSchedulerBackend
-import org.apache.spark.shuffle.{FetchFailedException, MetadataFetchFailedException}
+import org.apache.spark.shuffle.{ExecutorShuffleFetchWaitStats, FetchFailedException, MetadataFetchFailedException}
 import org.apache.spark.storage.{BlockId, BlockManager, BlockManagerId, BlockManagerMaster}
 import org.apache.spark.util.{AccumulatorContext, AccumulatorV2, CallSite, Clock, LongAccumulator, SystemClock, ThreadUtils, Utils}
 import org.apache.spark.util.ArrayImplicits._
@@ -207,7 +207,8 @@ class DAGSchedulerSuite extends SparkFunSuite with TempLocalSparkContext with Ti
         execId: String,
         accumUpdates: Array[(Long, Seq[AccumulatorV2[_, _]])],
         blockManagerId: BlockManagerId,
-        executorUpdates: Map[(Int, Int), ExecutorMetrics]): Boolean = true
+        executorUpdates: Map[(Int, Int), ExecutorMetrics],
+        shuffleFetchWaitStats: Option[ExecutorShuffleFetchWaitStats]): Boolean = true
     override def submitTasks(taskSet: TaskSet) = {
       // normally done by TaskSetManager
       taskSet.tasks.foreach(_.epoch = mapOutputTracker.getEpoch)
@@ -955,7 +956,8 @@ class DAGSchedulerSuite extends SparkFunSuite with TempLocalSparkContext with Ti
           execId: String,
           accumUpdates: Array[(Long, Seq[AccumulatorV2[_, _]])],
           blockManagerId: BlockManagerId,
-          executorUpdates: Map[(Int, Int), ExecutorMetrics]): Boolean = true
+          executorUpdates: Map[(Int, Int), ExecutorMetrics],
+          shuffleFetchWaitStats: Option[ExecutorShuffleFetchWaitStats]): Boolean = true
       override def executorLost(executorId: String, reason: ExecutorLossReason): Unit = {}
       override def workerRemoved(workerId: String, host: String, message: String): Unit = {}
       override def applicationAttemptId(): Option[String] = None

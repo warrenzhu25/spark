@@ -31,8 +31,8 @@ import org.apache.spark.scheduler._
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.RemoveExecutor
 import org.apache.spark.scheduler.cluster.CoarseGrainedSchedulerBackend
 import org.apache.spark.scheduler.local.LocalSchedulerBackend
-import org.apache.spark.shuffle.{ServerShuffleFetchAggregate, ServerShuffleFetchStats,
-  ServerShuffleFetchStatsAggregator}
+import org.apache.spark.shuffle.{ExecutorShuffleFetchWaitStats, ServerShuffleFetchAggregate,
+  ServerShuffleFetchStats, ServerShuffleFetchStatsAggregator}
 import org.apache.spark.storage.BlockManagerId
 import org.apache.spark.util._
 
@@ -50,7 +50,8 @@ private[spark] case class Heartbeat(
     // (stageId, stageAttemptId) -> executor metric peaks
     executorUpdates: Map[(Int, Int), ExecutorMetrics],
     // Server-side shuffle fetch statistics (optional)
-    serverShuffleStats: Option[ServerShuffleFetchStats] = None)
+    serverShuffleStats: Option[ServerShuffleFetchStats] = None,
+    shuffleFetchWaitStats: Option[ExecutorShuffleFetchWaitStats] = None)
 
 /**
  * An event that SparkContext uses to notify HeartbeatReceiver that SparkContext.taskScheduler is
@@ -158,7 +159,12 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
 
     // Messages received from executors
     case heartbeat @ Heartbeat(
-        executorId, accumUpdates, blockManagerId, executorUpdates, serverShuffleStats) =>
+        executorId,
+        accumUpdates,
+        blockManagerId,
+        executorUpdates,
+        serverShuffleStats,
+        _) =>
       var reregisterBlockManager = !sc.isStopped
       if (scheduler != null) {
         if (executorLastSeen.contains(executorId)) {
@@ -172,7 +178,11 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
           eventLoopThread.submit(new Runnable {
             override def run(): Unit = Utils.tryLogNonFatalError {
               val unknownExecutor = !scheduler.executorHeartbeatReceived(
-                executorId, accumUpdates, blockManagerId, executorUpdates)
+                executorId,
+                accumUpdates,
+                blockManagerId,
+                executorUpdates,
+                heartbeat.shuffleFetchWaitStats)
               reregisterBlockManager &= unknownExecutor
               val response = HeartbeatResponse(reregisterBlockManager)
               context.reply(response)
