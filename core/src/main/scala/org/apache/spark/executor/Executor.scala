@@ -51,7 +51,7 @@ import org.apache.spark.resource.ResourceInformation
 import org.apache.spark.rpc.RpcTimeout
 import org.apache.spark.scheduler._
 import org.apache.spark.serializer.SerializerHelper
-import org.apache.spark.shuffle.{FetchFailedException, ShuffleBlockPusher}
+import org.apache.spark.shuffle.{ExecutorShuffleFetchWaitStats, FetchFailedException, ShuffleBlockPusher, ShuffleFetchWaitStatsAggregator}
 import org.apache.spark.status.api.v1.ThreadStackTrace
 import org.apache.spark.storage.{StorageLevel, TaskResultBlockId}
 import org.apache.spark.util._
@@ -302,6 +302,13 @@ private[spark] class Executor(
     METRICS_POLLING_INTERVAL_MS,
     executorMetricsSource)
 
+  private val fetchWaitStatsEnabled = conf.get(SHUFFLE_FETCH_WAIT_STATS_ENABLED)
+  private val fetchWaitStatsTopK = conf.get(SHUFFLE_FETCH_WAIT_STATS_TOP_K)
+  private val fetchWaitStatsAggregator =
+    if (fetchWaitStatsEnabled) Some(new ShuffleFetchWaitStatsAggregator) else None
+  private val reportedShuffleFetchWaitTasks =
+    if (fetchWaitStatsEnabled) Some(ConcurrentHashMap.newKeySet[Long]()) else None
+
   // Executor for the heartbeat task.
   private val heartbeater = new Heartbeater(
     () => Executor.this.reportHeartBeat(),
@@ -548,6 +555,7 @@ private[spark] class Executor(
           if (taskStartTimeNs > 0) (System.nanoTime() - taskStartTimeNs) * taskDescription.cpus
           else 0))
         t.metrics.setJvmGCTime(computeTotalGcTime() - startGCTime)
+        recordShuffleFetchWaitStatsFromTask(taskId, t.metrics)
       })
 
       // Collect latest accumulator values to report back to the driver
@@ -732,6 +740,8 @@ private[spark] class Executor(
         executorSource.METRIC_DISK_BYTES_SPILLED.inc(task.metrics.diskBytesSpilled)
         executorSource.METRIC_MEMORY_BYTES_SPILLED.inc(task.metrics.memoryBytesSpilled)
         incrementShuffleMetrics(executorSource, task.metrics)
+
+        recordShuffleFetchWaitStatsFromTask(taskId, task.metrics)
 
         // Note: accumulator updates must be collected after TaskMetrics is updated
         val accumUpdates = task.collectAccumulatorUpdates()
@@ -1282,8 +1292,14 @@ private[spark] class Executor(
       }
     }
 
-    val message = Heartbeat(executorId, accumUpdates.toArray, env.blockManager.blockManagerId,
-      executorUpdates)
+    val shuffleFetchWaitStats = collectShuffleFetchWaitStats()
+
+    val message = Heartbeat(
+      executorId,
+      accumUpdates.toArray,
+      env.blockManager.blockManagerId,
+      executorUpdates,
+      shuffleFetchWaitStats)
     try {
       val response = heartbeatReceiverRef.askSync[HeartbeatResponse](
         message, new RpcTimeout(HEARTBEAT_INTERVAL_MS.millis, EXECUTOR_HEARTBEAT_INTERVAL.key))
@@ -1301,6 +1317,23 @@ private[spark] class Executor(
             log"more than ${MDC(MAX_ATTEMPTS, HEARTBEAT_MAX_FAILURES)} times")
           System.exit(ExecutorExitCode.HEARTBEAT_FAILURE)
         }
+    }
+  }
+
+  private def recordShuffleFetchWaitStatsFromTask(taskId: Long, metrics: TaskMetrics): Unit = {
+    (reportedShuffleFetchWaitTasks, fetchWaitStatsAggregator) match {
+      case (Some(seen), Some(agg)) if seen.add(taskId) =>
+        metrics.shuffleFetchWaitStats.foreach { stats =>
+          agg.update(stats.stats)
+        }
+      case _ =>
+    }
+  }
+
+  private def collectShuffleFetchWaitStats(): Option[ExecutorShuffleFetchWaitStats] = {
+    fetchWaitStatsAggregator.flatMap { agg =>
+      val top = agg.topStats(fetchWaitStatsTopK)
+      if (top.nonEmpty) Some(ExecutorShuffleFetchWaitStats(top)) else None
     }
   }
 

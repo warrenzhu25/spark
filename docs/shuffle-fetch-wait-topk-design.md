@@ -5,7 +5,7 @@ Surface shuffle fetch wait hotspots. Each executor reports its top 3 remote exec
 
 ## Scope and Phasing
 1) **Data model & configs**
-   - Add `TopShuffleWaitStat(executorId, totalWaitMs, count, p50, p90, p95, p99, max)`.
+   - Add `ShuffleFetchWaitStat` with aggregate totals/counts plus distribution values over standard quantiles.
    - Configs:
      - `spark.shuffle.fetchWaitStats.enabled` (default: false).
      - `spark.shuffle.fetchWaitStats.topK` (default: 3).
@@ -13,13 +13,13 @@ Surface shuffle fetch wait hotspots. Each executor reports its top 3 remote exec
 2) **Executor-side collection & reporting**
    - `ShuffleBlockFetcherIterator` already tracks per-fetch waits. Export top-K per task.
    - Plumb top-K into `TaskMetrics` (new optional field).
-   - Executor-level aggregator merges per-task stats into executor top-K using bounded percentile sketches (e.g., `QuantileSummaries` or reservoir) to avoid unbounded samples.
+   - Executor-level aggregator merges per-task stats into executor top-K using weighted buckets over the standard quantiles to avoid unbounded samples.
    - Extend executor heartbeat payload to carry executor top-K when enabled.
 3) **Driver-side aggregation & logging**
    - Extend heartbeat handling to accept executor top-K stats.
-   - Maintain `remoteExecId -> AggregatedWait { totalWait, count, percentileSketch }`.
+   - Maintain `remoteExecId -> AggregatedWait { totalWait, count, quantileBuckets }`.
    - Periodically (logInterval) and/or on stage completion compute global top-K by total wait and log:
-     - `Global shuffle wait top3: exec-5 total=XXs (count=…, p50=…, p90=…, p95=…, p99=…, max=…)`.
+     - `Global shuffle wait top3: exec-5 total=XXs (count=…, min=…, p25=…, p50=…, p75=…, max=…)`.
    - Exclude local executor IDs and fallback IDs.
 4) **Tests**
    - Serialization/deserialization of new payloads (JSON/protobuf/task metrics).
@@ -29,22 +29,22 @@ Surface shuffle fetch wait hotspots. Each executor reports its top 3 remote exec
 
 ## Design Details
 ### Data Structures
-- `TopShuffleWaitStat`: per-remote-executor summary.
-- `ExecutorTopShuffleWaitStats`: `Seq[TopShuffleWaitStat]`, bounded by `topK`.
-- Aggregator sketch: bounded percentile structure (prefer `QuantileSummaries`; fallback reservoir + sort).
+- `ShuffleFetchWaitStat`: per-remote-executor summary combining aggregates and a distribution over standard quantiles `[0.0, 0.25, 0.5, 0.75, 1.0]`.
+- `ExecutorShuffleFetchWaitStats`: `Seq[ShuffleFetchWaitStat]`, bounded by `topK`.
+- Aggregator sketch: weighted buckets per quantile point (no unbounded sample storage).
 
 ### Executor Side
 - Source: `ShuffleBlockFetcherIterator`’s wait tracker; expose top-K per task when enabled.
-- Task metrics: new optional field in `TaskMetrics` carrying `ExecutorTopShuffleWaitStats`.
+- Task metrics: new optional field in `TaskMetrics` carrying `ExecutorShuffleFetchWaitStats`.
 - Executor aggregator:
   - On task completion, ingest task top-K into a per-executor map.
-  - Maintain per remote exec `{totalWait, count, sketch}`.
-  - On heartbeat, emit executor top-K by `totalWait` with percentiles computed from the sketch.
+  - Maintain per remote exec `{totalWait, count, weighted quantile buckets}`.
+  - On heartbeat, emit executor top-K by `totalWait` with quantiles reconstructed from the buckets.
 - Heartbeat payload: optional field for executor top-K when config enabled. Backward compatible (older drivers ignore).
 
 ### Driver Side
 - Heartbeat handling: parse optional executor top-K and update global aggregator.
-- Aggregator: merges totals/counts and sketches for each remote executor; computes percentiles on demand.
+- Aggregator: merges totals/counts and weighted buckets for each remote executor; reconstructs quantiles on demand.
 - Logging: on a schedule (logInterval) and/or stage completion, log global top-K by total wait with distributions. Include stage/app context; exclude local/fallback executors.
 
 ### Configs
@@ -60,7 +60,7 @@ Surface shuffle fetch wait hotspots. Each executor reports its top 3 remote exec
 
 ## Work Breakdown
 1) Data model & configs:
-   - Add `TopShuffleWaitStat`, `ExecutorTopShuffleWaitStats`.
+   - Add `ShuffleFetchWaitStat`, `ExecutorShuffleFetchWaitStats`.
    - Add configs to `SparkConf`/`config`.
 2) Executor task metrics:
    - Extend `TaskMetrics` with optional top-K; update JSON/protobuf serializers.

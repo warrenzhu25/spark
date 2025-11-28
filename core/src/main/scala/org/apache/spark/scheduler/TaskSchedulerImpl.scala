@@ -40,6 +40,7 @@ import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.rpc.RpcEndpoint
 import org.apache.spark.scheduler.SchedulingMode.SchedulingMode
 import org.apache.spark.scheduler.TaskLocality.TaskLocality
+import org.apache.spark.shuffle.ExecutorShuffleFetchWaitStats
 import org.apache.spark.storage.BlockManagerId
 import org.apache.spark.util.{AccumulatorV2, Clock, SystemClock, ThreadUtils, Utils}
 
@@ -810,7 +811,8 @@ private[spark] class TaskSchedulerImpl(
       execId: String,
       accumUpdates: Array[(Long, Seq[AccumulatorV2[_, _]])],
       blockManagerId: BlockManagerId,
-      executorUpdates: mutable.Map[(Int, Int), ExecutorMetrics]): Boolean = {
+      executorUpdates: mutable.Map[(Int, Int), ExecutorMetrics],
+      shuffleFetchWaitStats: Option[ExecutorShuffleFetchWaitStats]): Boolean = {
     // (taskId, stageId, stageAttemptId, accumUpdates)
     val accumUpdatesWithTaskIds: Array[(Long, Int, Int, Seq[AccumulableInfo])] = {
       accumUpdates.flatMap { case (id, updates) =>
@@ -826,7 +828,7 @@ private[spark] class TaskSchedulerImpl(
       }
     }
     dagScheduler.executorHeartbeatReceived(execId, accumUpdatesWithTaskIds, blockManagerId,
-      executorUpdates)
+      executorUpdates, shuffleFetchWaitStats)
   }
 
  private def getTaskAccumulableInfosAndProcessRate(

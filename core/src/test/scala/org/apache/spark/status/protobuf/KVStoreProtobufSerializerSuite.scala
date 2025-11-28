@@ -27,6 +27,7 @@ import org.apache.spark.executor.ExecutorMetrics
 import org.apache.spark.metrics.ExecutorMetricType
 import org.apache.spark.rdd.DeterministicLevel
 import org.apache.spark.resource.{ExecutorResourceRequest, ResourceInformation, TaskResourceRequest}
+import org.apache.spark.shuffle.{ExecutorShuffleFetchWaitStats, ShuffleFetchWaitAggregate, ShuffleFetchWaitDistribution, ShuffleFetchWaitStat}
 import org.apache.spark.status._
 import org.apache.spark.status.api.v1._
 import org.apache.spark.ui.scope.{RDDOperationEdge, RDDOperationNode}
@@ -1067,7 +1068,16 @@ class KVStoreProtobufSerializerSuite extends SparkFunSuite {
       inputMetrics = inputMetrics,
       outputMetrics = outputMetrics,
       shuffleReadMetrics = shuffleReadMetrics,
-      shuffleWriteMetrics = shuffleWriteMetrics
+      shuffleWriteMetrics = shuffleWriteMetrics,
+      shuffleFetchWaitStats = Some(ExecutorShuffleFetchWaitStats(Seq(
+        ShuffleFetchWaitStat(
+          ShuffleFetchWaitAggregate("e1", 10L, 2),
+          ShuffleFetchWaitDistribution("e1", IndexedSeq(0.0, 0.25, 0.5, 0.75, 1.0),
+            IndexedSeq(0L, 1L, 2L, 3L, 5L))),
+        ShuffleFetchWaitStat(
+          ShuffleFetchWaitAggregate("e2", 5L, 1),
+          ShuffleFetchWaitDistribution("e2", IndexedSeq(0.0, 0.25, 0.5, 0.75, 1.0),
+            IndexedSeq(1L, 2L, 3L, 4L, 6L))))))
     )
     val taskData1 = new TaskData(
       taskId = 1L,
@@ -1465,6 +1475,19 @@ class KVStoreProtobufSerializerSuite extends SparkFunSuite {
     checkAnswer(result.outputMetrics, expected.outputMetrics)
     checkAnswer(result.shuffleReadMetrics, expected.shuffleReadMetrics)
     checkAnswer(result.shuffleWriteMetrics, expected.shuffleWriteMetrics)
+    (result.shuffleFetchWaitStats, expected.shuffleFetchWaitStats) match {
+      case (Some(res), Some(exp)) =>
+        assert(res.stats.size == exp.stats.size)
+        res.stats.zip(exp.stats).foreach { case (r, e) =>
+          assert(r.remoteExecutorId == e.remoteExecutorId)
+          assert(r.aggregate.totalWaitMs == e.aggregate.totalWaitMs)
+          assert(r.aggregate.count == e.aggregate.count)
+          assert(r.distribution.quantiles == e.distribution.quantiles)
+          assert(r.distribution.values == e.distribution.values)
+        }
+      case _ =>
+        assert(result.shuffleFetchWaitStats == expected.shuffleFetchWaitStats)
+    }
   }
 
   private def checkAnswer(result: InputMetrics, expected: InputMetrics): Unit = {

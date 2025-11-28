@@ -662,6 +662,26 @@ private[spark] object JsonProtocol extends JsonUtils {
     g.writeNumberField("Result Serialization Time", taskMetrics.resultSerializationTime)
     g.writeNumberField("Memory Bytes Spilled", taskMetrics.memoryBytesSpilled)
     g.writeNumberField("Disk Bytes Spilled", taskMetrics.diskBytesSpilled)
+    taskMetrics.shuffleFetchWaitStats.foreach { stats =>
+      g.writeFieldName("Shuffle Fetch Wait Stats")
+      g.writeStartArray()
+      stats.stats.foreach { stat =>
+        g.writeStartObject()
+        g.writeStringField("Remote Executor Id", stat.remoteExecutorId)
+        g.writeNumberField("Total Wait Ms", stat.aggregate.totalWaitMs)
+        g.writeNumberField("Count", stat.aggregate.count)
+        g.writeFieldName("Quantiles")
+        g.writeStartArray()
+        stat.distribution.quantiles.foreach(q => g.writeNumber(q))
+        g.writeEndArray()
+        g.writeFieldName("Values")
+        g.writeStartArray()
+        stat.distribution.values.foreach(v => g.writeNumber(v))
+        g.writeEndArray()
+        g.writeEndObject()
+      }
+      g.writeEndArray()
+    }
     g.writeFieldName("Shuffle Read Metrics")
     writeShuffleReadMetrics()
     g.writeFieldName("Shuffle Write Metrics")
@@ -1326,6 +1346,24 @@ private[spark] object JsonProtocol extends JsonUtils {
     metrics.setResultSerializationTime(json.get("Result Serialization Time").extractLong)
     metrics.incMemoryBytesSpilled(json.get("Memory Bytes Spilled").extractLong)
     metrics.incDiskBytesSpilled(json.get("Disk Bytes Spilled").extractLong)
+
+    jsonOption(json.get("Shuffle Fetch Wait Stats")).foreach { statsArray =>
+      val stats = statsArray.extractElements.map { statJson =>
+        val execId = statJson.get("Remote Executor Id").extractString
+        val totalWaitMs = statJson.get("Total Wait Ms").extractLong
+        val count = statJson.get("Count").extractInt
+        val quantiles = statJson.get("Quantiles").extractElements.map(_.extractDouble).toIndexedSeq
+        val values = statJson.get("Values").extractElements.map(_.extractLong).toIndexedSeq
+
+        val aggregate = org.apache.spark.shuffle.ShuffleFetchWaitAggregate(
+          execId, totalWaitMs, count)
+        val distribution = org.apache.spark.shuffle.ShuffleFetchWaitDistribution(
+          execId, quantiles, values)
+        org.apache.spark.shuffle.ShuffleFetchWaitStat(aggregate, distribution)
+      }.toSeq
+      metrics.setShuffleFetchWaitStats(
+        Some(org.apache.spark.shuffle.ExecutorShuffleFetchWaitStats(stats)))
+    }
 
     // Shuffle read metrics
     jsonOption(json.get("Shuffle Read Metrics")).foreach { readJson =>

@@ -23,6 +23,7 @@ import org.apache.spark.{LocalSparkContext, SparkConf, SparkContext, SparkFunSui
 import org.apache.spark.executor.ExecutorMetrics
 import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.scheduler.SchedulingMode.SchedulingMode
+import org.apache.spark.shuffle.ExecutorShuffleFetchWaitStats
 import org.apache.spark.status.api.v1.ThreadStackTrace
 import org.apache.spark.storage.BlockManagerId
 import org.apache.spark.util.AccumulatorV2
@@ -95,11 +96,12 @@ private class DummyTaskScheduler extends TaskScheduler {
   override def executorLost(executorId: String, reason: ExecutorLossReason): Unit = {}
   override def workerRemoved(workerId: String, host: String, message: String): Unit = {}
   override def applicationAttemptId(): Option[String] = None
-  def executorHeartbeatReceived(
+  override def executorHeartbeatReceived(
       execId: String,
       accumUpdates: Array[(Long, Seq[AccumulatorV2[_, _]])],
       blockManagerId: BlockManagerId,
-      executorMetrics: Map[(Int, Int), ExecutorMetrics]): Boolean = true
+      executorMetrics: Map[(Int, Int), ExecutorMetrics],
+      shuffleFetchWaitStats: Option[ExecutorShuffleFetchWaitStats]): Boolean = true
   override def executorDecommission(
     executorId: String,
     decommissionInfo: ExecutorDecommissionInfo): Unit = {}

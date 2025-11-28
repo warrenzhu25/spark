@@ -31,6 +31,7 @@ import org.apache.spark.JobExecutionStatus
 import org.apache.spark.executor.ExecutorMetrics
 import org.apache.spark.metrics.ExecutorMetricType
 import org.apache.spark.resource.{ExecutorResourceRequest, ResourceInformation, TaskResourceRequest}
+import org.apache.spark.shuffle.ExecutorShuffleFetchWaitStats
 import org.apache.spark.status.AppStatusUtils.getQuantilesValue
 
 case class ApplicationInfo private[spark](
@@ -353,7 +354,8 @@ class TaskMetrics private[spark](
     val inputMetrics: InputMetrics,
     val outputMetrics: OutputMetrics,
     val shuffleReadMetrics: ShuffleReadMetrics,
-    val shuffleWriteMetrics: ShuffleWriteMetrics)
+    val shuffleWriteMetrics: ShuffleWriteMetrics,
+    val shuffleFetchWaitStats: Option[ExecutorShuffleFetchWaitStats] = None)
 
 class InputMetrics private[spark](
     val bytesRead: Long,

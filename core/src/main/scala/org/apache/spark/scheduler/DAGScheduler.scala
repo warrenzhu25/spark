@@ -49,6 +49,7 @@ import org.apache.spark.rdd.{RDD, RDDCheckpointData}
 import org.apache.spark.resource.{ResourceProfile, TaskResourceProfile}
 import org.apache.spark.resource.ResourceProfile.{DEFAULT_RESOURCE_PROFILE_ID, EXECUTOR_CORES_LOCAL_PROPERTY, PYSPARK_MEMORY_LOCAL_PROPERTY}
 import org.apache.spark.rpc.RpcTimeout
+import org.apache.spark.shuffle.{ExecutorShuffleFetchWaitStats, ShuffleFetchWaitStat, ShuffleFetchWaitStatsAggregator}
 import org.apache.spark.storage._
 import org.apache.spark.storage.BlockManagerMessages.BlockManagerHeartbeat
 import org.apache.spark.util._
@@ -169,6 +170,14 @@ private[spark] class DAGScheduler(
   private[scheduler] val failedStages = new HashSet[Stage]
 
   private[scheduler] val activeJobs = new HashSet[ActiveJob]
+
+  private val fetchWaitStatsEnabled = sc.conf.get(config.SHUFFLE_FETCH_WAIT_STATS_ENABLED)
+  private val fetchWaitStatsTopK = sc.conf.get(config.SHUFFLE_FETCH_WAIT_STATS_TOP_K)
+  private val fetchWaitStatsLogIntervalMs =
+    sc.conf.get(config.SHUFFLE_FETCH_WAIT_STATS_LOG_INTERVAL)
+  private val executorFetchWaitStats = new HashMap[String, ExecutorShuffleFetchWaitStats]
+  private var lastFetchWaitLogTimestamp = 0L
+  private val fetchWaitStatsLock = new Object
 
   // Job groups that are cancelled with `cancelFutureJobs` as true, with at most
   // `NUM_CANCELLED_JOB_GROUPS_TO_TRACK` stored. On a new job submission, if its job group is in
@@ -373,12 +382,73 @@ private[spark] class DAGScheduler(
       accumUpdates: Array[(Long, Int, Int, Seq[AccumulableInfo])],
       blockManagerId: BlockManagerId,
       // (stageId, stageAttemptId) -> metrics
-      executorUpdates: mutable.Map[(Int, Int), ExecutorMetrics]): Boolean = {
+      executorUpdates: mutable.Map[(Int, Int), ExecutorMetrics],
+      shuffleFetchWaitStats: Option[ExecutorShuffleFetchWaitStats]):
+    Boolean = {
     listenerBus.post(SparkListenerExecutorMetricsUpdate(execId, accumUpdates.toImmutableArraySeq,
       executorUpdates))
+    if (fetchWaitStatsEnabled) {
+      updateShuffleFetchWaitStats(execId, shuffleFetchWaitStats)
+    }
     blockManagerMaster.driverHeartbeatEndPoint.askSync[Boolean](
       BlockManagerHeartbeat(blockManagerId),
       new RpcTimeout(blockManagerMasterDriverHeartbeatTimeout, "BlockManagerHeartbeat"))
+  }
+
+  private def updateShuffleFetchWaitStats(
+      executorId: String,
+      statsOpt: Option[ExecutorShuffleFetchWaitStats]): Unit = {
+    fetchWaitStatsLock.synchronized {
+      statsOpt.foreach { stats =>
+        executorFetchWaitStats.update(executorId, stats)
+      }
+      fetchWaitStatsLogIntervalMs.foreach { interval =>
+        val now = clock.getTimeMillis()
+        if (now - lastFetchWaitLogTimestamp >= interval) {
+          logTopShuffleWaitExecutorsLocked(now, "periodic heartbeat logging")
+        }
+      }
+    }
+  }
+
+  private def clearShuffleFetchWaitStats(executorId: String): Unit =
+    fetchWaitStatsLock.synchronized {
+      executorFetchWaitStats.remove(executorId)
+    }
+
+  private def logTopShuffleWaitExecutorsLocked(now: Long, reason: String): Unit = {
+    val topExecutors = computeTopShuffleWaitExecutorsLocked()
+    if (topExecutors.nonEmpty) {
+      lastFetchWaitLogTimestamp = now
+      val execStr = topExecutors.map(formatShuffleWaitStat).mkString(", ")
+      logInfo(s"Top shuffle fetch wait contributors ($reason): $execStr")
+    }
+  }
+
+  private def logTopShuffleWaitExecutors(
+      now: Long,
+      reason: String): Unit = fetchWaitStatsLock.synchronized {
+    logTopShuffleWaitExecutorsLocked(now, reason)
+  }
+
+  private def computeTopShuffleWaitExecutorsLocked(): Seq[ShuffleFetchWaitStat] = {
+    val aggregator = new ShuffleFetchWaitStatsAggregator
+    executorFetchWaitStats.values.foreach { stats =>
+      aggregator.update(stats.stats)
+    }
+    aggregator.topStats(fetchWaitStatsTopK)
+  }
+
+  private def formatShuffleWaitStat(stat: ShuffleFetchWaitStat): String = {
+    val quantileStr = stat.distribution.quantiles.zip(stat.distribution.values).map {
+      case (0.0, value) => s"min=$value"
+      case (1.0, value) => s"max=$value"
+      case (q, value) => s"p${(q * 100).toInt}=$value"
+    }.mkString(", ")
+
+    s"${stat.remoteExecutorId} total=" +
+      s"${Utils.msDurationToString(stat.aggregate.totalWaitMs)} " +
+      s"(count=${stat.aggregate.count}, $quantileStr)"
   }
 
   /**
@@ -2711,6 +2781,9 @@ private[spark] class DAGScheduler(
   private[scheduler] def handleExecutorLost(
       execId: String,
       workerHost: Option[String]): Unit = {
+    if (fetchWaitStatsEnabled) {
+      clearShuffleFetchWaitStats(execId)
+    }
     // if the cluster manager explicitly tells us that the entire worker was lost, then
     // we know to unregister shuffle output.  (Note that "worker" specifically refers to the process
     // from a Standalone cluster, where the shuffle service lives in the Worker.)
@@ -2888,6 +2961,9 @@ private[spark] class DAGScheduler(
       // re-used many times in a long-running job, unrelated failures don't eventually cause the
       // stage to be aborted.
       stage.clearFailures()
+      if (fetchWaitStatsEnabled) {
+        logTopShuffleWaitExecutors(clock.getTimeMillis(), s"after stage ${stage.id}")
+      }
     } else {
       stage.latestInfo.stageFailed(errorMessage.get)
       logInfo(log"${MDC(STAGE, stage)} (${MDC(STAGE_NAME, stage.name)}) failed in " +
