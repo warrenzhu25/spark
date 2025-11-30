@@ -51,7 +51,9 @@ private[spark] object ExecutorDecommissionReason {
       timeoutConfigSuffix: Option[String] = None): String = {
     val idleStr = Utils.msDurationToString(idleMs)
     val timeoutStr = Utils.msDurationToString(timeoutMs)
-    val configPart = timeoutConfigSuffix.map(k => s", timeoutConf=$k").getOrElse("")
+    val configPart = timeoutConfigSuffix
+      .map(k => s", timeoutConf=$k=$timeoutMs")
+      .getOrElse("")
     s"$reason: idle=$idleStr, timeout=$timeoutStr, rp=$rpId, shuffles=$shuffles, cachedBlocks=$cachedBlocks$configPart"
   }
 
@@ -78,7 +80,7 @@ private[spark] object ExecutorDecommissionReason {
         "cachedBlocksCount" -> cachedBlocksCount.toString,
         "hasShuffleData" -> hasShuffleData.toString,
         "hasCachedBlocks" -> hasCachedBlocks.toString) ++
-        timeoutConfigSuffix.map(suffix => Map("timeoutConfig" -> suffix)).getOrElse(Map.empty))
+        timeoutConfigSuffix.map(suffix => Map("timeoutConfig" -> s"$suffix=$timeoutMs")).getOrElse(Map.empty))
   }
 
   def shuffleTimeout(
@@ -100,7 +102,7 @@ private[spark] object ExecutorDecommissionReason {
         "resourceProfileId" -> resourceProfileId.toString,
         "shuffleIds" -> shuffleIds.toString,
         "cachedBlocksCount" -> cachedBlocksCount.toString) ++
-        timeoutConfigSuffix.map(suffix => Map("timeoutConfig" -> suffix)).getOrElse(Map.empty))
+        timeoutConfigSuffix.map(suffix => Map("timeoutConfig" -> s"$suffix=$timeoutMs")).getOrElse(Map.empty))
   }
 
   def storageTimeout(
@@ -121,7 +123,7 @@ private[spark] object ExecutorDecommissionReason {
         "resourceProfileId" -> resourceProfileId.toString,
         "cachedBlocksCount" -> cachedBlocksCount.toString,
         "hasCachedBlocks" -> "true") ++
-        timeoutConfigSuffix.map(suffix => Map("timeoutConfig" -> suffix)).getOrElse(Map.empty))
+        timeoutConfigSuffix.map(suffix => Map("timeoutConfig" -> s"$suffix=$timeoutMs")).getOrElse(Map.empty))
   }
 }
 
