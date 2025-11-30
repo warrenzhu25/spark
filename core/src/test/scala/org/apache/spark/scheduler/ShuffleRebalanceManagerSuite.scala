@@ -130,7 +130,7 @@ class ShuffleRebalanceManagerSuite extends SparkFunSuite {
     val shuffleId = 1
 
     // Mock the MapOutputTracker to return test data
-    // val stats = shuffleMoveManager.getShuffleDistributionStats(shuffleId)
+    // val stats = shuffleMoveManager.getShuffleDistributionStats(shuffleId, 10)
 
     // Verify statistics are calculated correctly
     // assert(stats.totalSize >= 0)
@@ -145,9 +145,12 @@ class ShuffleRebalanceManagerSuite extends SparkFunSuite {
     val callSite = CallSite("test", "test")
     val shuffleDep = mock(classOf[ShuffleDependency[_, _, _]])
     val mapOutputTracker = mock(classOf[MapOutputTrackerMaster])
+    val partitioner = mock(classOf[org.apache.spark.Partitioner])
 
     // Mock required methods for ShuffleDependency
     when(shuffleDep.shuffleId).thenReturn(shuffleId)
+    when(shuffleDep.partitioner).thenReturn(partitioner)
+    when(partitioner.numPartitions).thenReturn(10)
 
     new ShuffleMapStage(
       id = 1,

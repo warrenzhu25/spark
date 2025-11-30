@@ -70,10 +70,11 @@ private[spark] class ShuffleRebalanceManager(
     if (completionRatio < 0.25 || completionRatio >= 1.0) return
 
     val shuffleId = stage.shuffleDep.shuffleId
-    val executorSizes = getExecutorShuffleSizes(shuffleId)
+    val numPartitions = stage.shuffleDep.partitioner.numPartitions
+    val executorSizes = getExecutorShuffleSizes(shuffleId, numPartitions)
 
     if (isShuffleRebalanceNeeded(executorSizes)) {
-      val rebalanceOperations = planShuffleRebalancing(shuffleId, executorSizes)
+      val rebalanceOperations = planShuffleRebalancing(shuffleId, executorSizes, numPartitions)
       rebalanceOperations.foreach(executeShuffleRebalance)
     }
   }
@@ -81,7 +82,7 @@ private[spark] class ShuffleRebalanceManager(
   /**
    * Get shuffle sizes per executor for a given shuffle.
    */
-  private def getExecutorShuffleSizes(shuffleId: Int): Map[String, Long] = {
+  private def getExecutorShuffleSizes(shuffleId: Int, numPartitions: Int): Map[String, Long] = {
     // Calculate total shuffle size per executor
     val executorSizes = mutable.Map[String, Long]()
 
@@ -90,18 +91,10 @@ private[spark] class ShuffleRebalanceManager(
       statuses.filter(_ != null).foreach { status =>
         val executorId = status.location.executorId
         // Sum up all partition sizes for this map output
-        // Use iteration approach to determine number of partitions
         var totalSize = 0L
-        var partitionId = 0
-        try {
-          // Keep summing until we get an exception (reached the end)
-          while (true) {
-            val size = status.getSizeForBlock(partitionId)
-            if (size > 0) totalSize += size
-            partitionId += 1
-          }
-        } catch {
-          case _: Exception => // Expected when we've gone past the last partition
+        (0 until numPartitions).foreach { partitionId =>
+          val size = status.getSizeForBlock(partitionId)
+          if (size > 0) totalSize += size
         }
         executorSizes(executorId) = executorSizes.getOrElse(executorId, 0L) + totalSize
       }
@@ -133,7 +126,8 @@ private[spark] class ShuffleRebalanceManager(
    */
   private def planShuffleRebalancing(
       shuffleId: Int,
-      executorSizes: Map[String, Long]): Seq[ShuffleRebalanceOperation] = {
+      executorSizes: Map[String, Long],
+      numPartitions: Int): Seq[ShuffleRebalanceOperation] = {
 
     val sorted = executorSizes.toSeq.sortBy(_._2)
     val avgSize = executorSizes.values.sum.toDouble / executorSizes.size
@@ -158,7 +152,7 @@ private[spark] class ShuffleRebalanceManager(
 
       if (moveSize > shuffleRebalanceMinSizeMB * 1024 * 1024) {
         // Find specific shuffle blocks to move
-        val blocksToMove = selectBlocksToMove(shuffleId, sourceExec, moveSize)
+        val blocksToMove = selectBlocksToMove(shuffleId, sourceExec, moveSize, numPartitions)
 
         if (blocksToMove.nonEmpty) {
           operations += ShuffleRebalanceOperation(
@@ -188,7 +182,8 @@ private[spark] class ShuffleRebalanceManager(
   private def selectBlocksToMove(
       shuffleId: Int,
       sourceExecutor: String,
-      targetSize: Long): Seq[(BlockId, Long)] = {
+      targetSize: Long,
+      numPartitions: Int): Seq[(BlockId, Long)] = {
 
     val blocks = mutable.ArrayBuffer[(BlockId, Long)]()
     var currentSize = 0L
@@ -201,19 +196,12 @@ private[spark] class ShuffleRebalanceManager(
         .flatMap { case (status, mapIndex) =>
           // Build list of blocks for this map output
           val blocks = mutable.ArrayBuffer[(BlockId, Long)]()
-          var partitionId = 0
-          try {
-            // Keep adding blocks until we get an exception (reached the end)
-            while (true) {
-              val blockSize = status.getSizeForBlock(partitionId)
-              if (blockSize > 0) {
-                val blockId = ShuffleBlockId(shuffleId, status.mapId, partitionId)
-                blocks += ((blockId, blockSize))
-              }
-              partitionId += 1
+          (0 until numPartitions).foreach { partitionId =>
+            val blockSize = status.getSizeForBlock(partitionId)
+            if (blockSize > 0) {
+              val blockId = ShuffleBlockId(shuffleId, status.mapId, partitionId)
+              blocks += ((blockId, blockSize))
             }
-          } catch {
-            case _: Exception => // Expected when we've gone past the last partition
           }
           blocks.toSeq
         }
@@ -303,8 +291,8 @@ private[spark] class ShuffleRebalanceManager(
   /**
    * Get statistics about current shuffle distribution.
    */
-  def getShuffleDistributionStats(shuffleId: Int): ShuffleDistributionStats = {
-    val executorSizes = getExecutorShuffleSizes(shuffleId)
+  def getShuffleDistributionStats(shuffleId: Int, numPartitions: Int): ShuffleDistributionStats = {
+    val executorSizes = getExecutorShuffleSizes(shuffleId, numPartitions)
     val sizes = executorSizes.values.toSeq
 
     if (sizes.nonEmpty) {
