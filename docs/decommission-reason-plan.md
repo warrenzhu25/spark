@@ -18,9 +18,9 @@ Goal: replace the generic `spark scale down` decommission reason with structured
   - `reasonCode: String` (e.g., `idle_timeout`, `shuffle_timeout`, `manual`, `host_lost`, `preemption`).
   - `details: Map[String, String]` for parameters: `idleDurationMs`, `idleThresholdMs`, `shuffleBytes`, `shuffleMigratedBytes`, `shuffleTimeoutMs`, `stageId`, `rpId`, `trigger`.
   - `timestampMs` to record when the decision was made.
-- Keep `message: String` as a rendered template for legacy consumers; generate it from code + details via a small catalog:
-  - `idle_timeout`: `Idle after {idleDurationMs} ms (threshold {idleThresholdMs} ms)`
-  - `shuffle_timeout`: `Shuffle {shuffleBytes} bytes could not migrate before {shuffleTimeoutMs} ms (migrated {shuffleMigratedBytes} bytes)`
+- Keep `message: String` as a rendered template for legacy consumers; generate it from code + details via a small catalog (examples with current format):
+  - `idle_timeout`: `Idle timeout: idle=2.0 min, rp=0, shuffles=3, cachedBlocks=42, executorIdleTimeout=2.0 min`
+  - `shuffle_timeout`: `Shuffle timeout: idle=2.0 min, rp=0, shuffles=3, cachedBlocks=42, shuffleTracking.timeout=2.0 min`
   - `manual` / `admin`: `Manually decommissioned ({trigger})`
   - `host_lost`: `Host {workerHost} decommissioned; shuffle may be lost`
 - Add a helper to produce both the structured payload and the formatted message to avoid hand-built strings across call sites.
