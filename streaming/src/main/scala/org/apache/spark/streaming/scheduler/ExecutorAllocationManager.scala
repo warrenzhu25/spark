@@ -137,7 +137,11 @@ private[streaming] class ExecutorAllocationManager(
         val execIdToRemove = removableExecIds(Random.nextInt(removableExecIds.size))
         if (conf.get(DECOMMISSION_ENABLED)) {
           client.decommissionExecutor(execIdToRemove,
-            ExecutorDecommissionInfo("spark scale down", None),
+            ExecutorDecommissionInfo(
+              message = "Streaming scale down (idle, no receivers)",
+              reason = Some(ExecutorDecommissionInfo.IDLE_TIMEOUT_REASON),
+              details = Map("mode" -> "streaming", "trigger" -> "scale_down"),
+              timestamp = clock.getTimeMillis()),
             adjustTargetNumExecutors = true)
         } else {
           client.killExecutor(execIdToRemove)

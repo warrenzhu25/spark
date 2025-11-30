@@ -88,6 +88,19 @@ class ExecutorMonitorSuite extends SparkFunSuite {
     assert(monitor.getResourceProfileId("1") === DEFAULT_RESOURCE_PROFILE_ID)
   }
 
+  test("timed out executor details include cause and timings") {
+    knownExecs += "1"
+    monitor.onExecutorAdded(SparkListenerExecutorAdded(clock.getTimeMillis(), "1", execInfo))
+    clock.advance(idleTimeoutNs + 1)
+
+    val details = monitor.timedOutExecutorDetails()
+    assert(details.map(_.executorId) === Seq("1"))
+    val detail = details.head
+    assert(detail.timeoutCause === IdleTimeoutCause)
+    assert(detail.timeoutWindowNs === idleTimeoutNs)
+    assert(detail.idleDurationNs >= idleTimeoutNs)
+  }
+
   test("SPARK-4951, SPARK-26927: handle out of order task start events") {
     knownExecs ++= Set("1", "2")
 

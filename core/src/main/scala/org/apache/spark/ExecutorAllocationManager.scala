@@ -33,7 +33,8 @@ import org.apache.spark.metrics.source.Source
 import org.apache.spark.resource.ResourceProfile.UNKNOWN_RESOURCE_PROFILE_ID
 import org.apache.spark.resource.ResourceProfileManager
 import org.apache.spark.scheduler._
-import org.apache.spark.scheduler.dynalloc.ExecutorMonitor
+import org.apache.spark.scheduler.dynalloc.{ExecutorMonitor, ShuffleTimeoutCause,
+  StorageTimeoutCause, TimedOutExecutor}
 import org.apache.spark.util.{Clock, SystemClock, ThreadUtils, Utils}
 
 /**
@@ -334,7 +335,10 @@ private[spark] class ExecutorAllocationManager(
    * This is factored out into its own method for testing.
    */
   private def schedule(): Unit = synchronized {
-    val executorIdsToBeRemoved = executorMonitor.timedOutExecutors()
+    val timedOutExecutors = executorMonitor.timedOutExecutorDetails()
+    val executorIdsToBeRemoved = timedOutExecutors.map { exec =>
+      (exec.executorId, exec.resourceProfileId)
+    }
     if (executorIdsToBeRemoved.nonEmpty) {
       initializing = false
     }
@@ -342,7 +346,8 @@ private[spark] class ExecutorAllocationManager(
     // Update executor target number only after initializing flag is unset
     updateAndSyncNumExecutorsTarget(clock.nanoTime())
     if (executorIdsToBeRemoved.nonEmpty) {
-      removeExecutors(executorIdsToBeRemoved)
+      val timeoutDetails = timedOutExecutors.map(exec => exec.executorId -> exec).toMap
+      removeExecutors(executorIdsToBeRemoved, timeoutDetails)
     }
   }
 
@@ -531,8 +536,10 @@ private[spark] class ExecutorAllocationManager(
    * Request the cluster manager to remove the given executors.
    * Returns the list of executors which are removed.
    */
-  private def removeExecutors(executors: Seq[(String, Int)]): Seq[String] = synchronized {
-    val executorIdsToBeRemoved = new ArrayBuffer[String]
+  private def removeExecutors(
+      executors: Seq[(String, Int)],
+      timeoutDetails: Map[String, TimedOutExecutor] = Map.empty): Seq[String] = synchronized {
+    val executorIdsToBeRemoved = new ArrayBuffer[(String, Int)]
     logDebug(s"Request to remove executorIds: ${executors.mkString(", ")}")
     val numExecutorsTotalPerRpId = mutable.Map[Int, Int]()
     executors.foreach { case (executorIdToBeRemoved, rpId) =>
@@ -558,7 +565,7 @@ private[spark] class ExecutorAllocationManager(
             s"are only $newExecutorTotal executor(s) left (number of executor " +
             s"target ${numExecutorsTargetPerResourceProfileId(rpId)})")
         } else {
-          executorIdsToBeRemoved += executorIdToBeRemoved
+          executorIdsToBeRemoved += ((executorIdToBeRemoved, rpId))
           numExecutorsTotalPerRpId(rpId) -= 1
         }
       }
@@ -567,22 +574,31 @@ private[spark] class ExecutorAllocationManager(
     if (executorIdsToBeRemoved.isEmpty) {
       return Seq.empty[String]
     }
+    val executorIdsOnly = executorIdsToBeRemoved.map(_._1)
 
     // Send a request to the backend to kill this executor(s)
-    val executorsRemoved = if (testing) {
-      executorIdsToBeRemoved
+    val executorsRemoved: Seq[String] = if (testing) {
+      executorIdsToBeRemoved.map(_._1)
     } else {
       // We don't want to change our target number of executors, because we already did that
       // when the task backlog decreased.
       if (decommissionEnabled) {
-        val executorIdsWithoutHostLoss = executorIdsToBeRemoved.map(
-          id => (id, ExecutorDecommissionInfo("spark scale down"))).toArray
+        val executorIdsWithoutHostLoss = executorIdsToBeRemoved.map { case (id, rpId) =>
+          val info = timeoutDetails.get(id)
+            .map(detail => buildDecommissionInfo(detail, rpId))
+            .getOrElse(ExecutorDecommissionInfo(
+              "spark scale down",
+              reason = Some(ExecutorDecommissionInfo.IDLE_TIMEOUT_REASON),
+              details = Map("resourceProfileId" -> rpId.toString)))
+          (id, info)
+        }.toArray
         client.decommissionExecutors(
           executorIdsWithoutHostLoss,
           adjustTargetNumExecutors = false,
           triggeredByExecutor = false)
       } else {
-        client.killExecutors(executorIdsToBeRemoved.toSeq, adjustTargetNumExecutors = false,
+        client.killExecutors(executorIdsOnly.toSeq,
+          adjustTargetNumExecutors = false,
           countFailures = false, force = false)
       }
     }
@@ -605,8 +621,28 @@ private[spark] class ExecutorAllocationManager(
       executorsRemoved.toSeq
     } else {
       logWarning(s"Unable to reach the cluster manager to kill executor/s " +
-        s"${executorIdsToBeRemoved.mkString(",")} or no executor eligible to kill!")
+        s"${executorIdsOnly.mkString(",")} or no executor eligible to kill!")
       Seq.empty[String]
+    }
+  }
+
+  private def buildDecommissionInfo(
+      detail: TimedOutExecutor,
+      rpId: Int): ExecutorDecommissionInfo = {
+    val idleMs = TimeUnit.NANOSECONDS.toMillis(detail.idleDurationNs)
+    val timeoutMs = TimeUnit.NANOSECONDS.toMillis(detail.timeoutWindowNs)
+    detail.timeoutCause match {
+      case ShuffleTimeoutCause =>
+        ExecutorDecommissionInfo.shuffleTimeout(idleMs, timeoutMs, rpId, detail.shuffleIds)
+      case StorageTimeoutCause =>
+        ExecutorDecommissionInfo.storageTimeout(idleMs, timeoutMs, rpId)
+      case _ =>
+        ExecutorDecommissionInfo.idleTimeout(
+          idleMs,
+          timeoutMs,
+          rpId,
+          hasShuffleData = detail.shuffleIds > 0,
+          hasCachedBlocks = detail.hasCachedBlocks)
     }
   }
 

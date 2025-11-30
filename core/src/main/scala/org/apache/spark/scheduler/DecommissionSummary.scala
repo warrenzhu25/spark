@@ -29,6 +29,8 @@ import org.apache.spark.util.Utils
  * @param startTime Timestamp when decommissioning began (epoch millis)
  * @param endTime Optional timestamp when decommissioning completed (epoch millis)
  * @param migrationInfo Optional detailed migration statistics from BlockManagerDecommissioner
+ * @param reason Optional structured reason code for the decommission.
+ * @param details Optional structured parameters associated with the reason.
  */
 private[spark]
 case class DecommissionSummary(
@@ -36,7 +38,9 @@ case class DecommissionSummary(
     workerHost: Option[String] = None,
     startTime: Long = System.currentTimeMillis(),
     endTime: Option[Long] = None,
-    migrationInfo: Option[MigrationInfo] = None
+    migrationInfo: Option[MigrationInfo] = None,
+    reason: Option[String] = None,
+    details: Map[String, String] = Map.empty
 ) {
   /**
    * Duration of decommissioning in milliseconds, if completed
@@ -82,9 +86,8 @@ case class DecommissionSummary(
   /**
    * Convert to basic ExecutorDecommissionInfo for backward compatibility
    */
-  def toExecutorDecommissionInfo: ExecutorDecommissionInfo = {
-    ExecutorDecommissionInfo(message, workerHost)
-  }
+  def toExecutorDecommissionInfo: ExecutorDecommissionInfo =
+    ExecutorDecommissionInfo(message, workerHost, reason, details, startTime)
 }
 
 /**
@@ -98,20 +101,28 @@ private[spark] object DecommissionSummary {
   def createCompleted(message: String,
                      startTime: Long,
                      migrationInfo: Option[MigrationInfo] = None,
-                     workerHost: Option[String] = None): DecommissionSummary = {
+                     workerHost: Option[String] = None,
+                     reason: Option[String] = None,
+                     details: Map[String, String] = Map.empty): DecommissionSummary = {
     DecommissionSummary(
       message = message,
       workerHost = workerHost,
       startTime = startTime,
       endTime = Some(System.currentTimeMillis()),
-      migrationInfo = migrationInfo
+      migrationInfo = migrationInfo,
+      reason = reason,
+      details = details
     )
   }
 
   /**
    * Create from existing ExecutorDecommissionInfo
    */
-  def fromExecutorDecommissionInfo(info: ExecutorDecommissionInfo): DecommissionSummary = {
-    DecommissionSummary(info.message, info.workerHost)
-  }
+  def fromExecutorDecommissionInfo(info: ExecutorDecommissionInfo): DecommissionSummary =
+    DecommissionSummary(
+      message = info.message,
+      workerHost = info.workerHost,
+      startTime = info.timestamp,
+      reason = info.reason,
+      details = info.details)
 }

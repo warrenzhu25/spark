@@ -32,6 +32,27 @@ import org.apache.spark.scheduler._
 import org.apache.spark.storage.{RDDBlockId, ShuffleDataBlockId}
 import org.apache.spark.util.Clock
 
+private[spark] sealed trait ExecutorTimeoutCause {
+  def reasonCode: String
+}
+private[spark] case object IdleTimeoutCause extends ExecutorTimeoutCause {
+  override val reasonCode: String = ExecutorDecommissionInfo.IDLE_TIMEOUT_REASON
+}
+private[spark] case object StorageTimeoutCause extends ExecutorTimeoutCause {
+  override val reasonCode: String = ExecutorDecommissionInfo.STORAGE_TIMEOUT_REASON
+}
+private[spark] case object ShuffleTimeoutCause extends ExecutorTimeoutCause {
+  override val reasonCode: String = ExecutorDecommissionInfo.SHUFFLE_TIMEOUT_REASON
+}
+private[spark] case class TimedOutExecutor(
+    executorId: String,
+    resourceProfileId: Int,
+    idleDurationNs: Long,
+    timeoutWindowNs: Long,
+    timeoutCause: ExecutorTimeoutCause,
+    hasCachedBlocks: Boolean,
+    shuffleIds: Int)
+
 /**
  * A monitor for executor activity, used by ExecutorAllocationManager to detect idle executors.
  */
@@ -74,6 +95,7 @@ private[spark] class ExecutorMonitor(
   // from being removed.
   private val nextTimeout = new AtomicLong(Long.MaxValue)
   private var timedOutExecs = Seq.empty[(String, Int)]
+  private var timedOutExecDetails = Seq.empty[TimedOutExecutor]
 
   // Active job tracking.
   //
@@ -116,6 +138,7 @@ private[spark] class ExecutorMonitor(
       nextTimeout.set(Long.MaxValue)
 
       var newNextTimeout = Long.MaxValue
+      val detailsBuffer = new mutable.ArrayBuffer[TimedOutExecutor]()
       timedOutExecs = executors.asScala
         .filter { case (_, exec) =>
           !exec.pendingRemoval && !exec.hasActiveShuffle && !exec.decommissioning}
@@ -130,11 +153,33 @@ private[spark] class ExecutorMonitor(
             true
           }
         }
-        .map { case (name, exec) => (name, exec.resourceProfileId)}
+        .map { case (name, exec) =>
+          val idleDurationNs = math.max(0L, now - exec.idleStartNs)
+          val timeoutWindowNs = exec.timeoutWindowNs
+          detailsBuffer += TimedOutExecutor(
+            executorId = name,
+            resourceProfileId = exec.resourceProfileId,
+            idleDurationNs = idleDurationNs,
+            timeoutWindowNs = timeoutWindowNs,
+            timeoutCause = exec.timeoutCause,
+            hasCachedBlocks = exec.cachedBlocks.nonEmpty,
+            shuffleIds = exec.shuffleIdsCount)
+          (name, exec.resourceProfileId)
+        }
         .toSeq
+      timedOutExecDetails = detailsBuffer.toSeq
       updateNextTimeout(newNextTimeout)
     }
+    timedOutExecDetails = timedOutExecDetails.sortBy(_.executorId)
     timedOutExecs.sortBy(_._1)
+  }
+
+  /**
+   * Returns timed out executors with reason metadata.
+   */
+  def timedOutExecutorDetails(): Seq[TimedOutExecutor] = {
+    timedOutExecutors()
+    timedOutExecDetails
   }
 
   /**
@@ -533,6 +578,8 @@ private[spark] class ExecutorMonitor(
 
   private[scheduler] class Tracker(var resourceProfileId: Int) {
     @volatile var timeoutAt: Long = Long.MaxValue
+    @volatile var timeoutCause: ExecutorTimeoutCause = IdleTimeoutCause
+    @volatile var timeoutWindowNs: Long = idleTimeoutNs
 
     // Tracks whether this executor is thought to be timed out. It's used to detect when the list
     // of timed out executors needs to be updated due to the executor's state changing.
@@ -554,6 +601,9 @@ private[spark] class ExecutorMonitor(
     private val shuffleIds = if (shuffleTrackingEnabled) new mutable.HashSet[Int]() else null
 
     def isIdle: Boolean = idleStart >= 0 && !hasActiveShuffle
+    def idleStartNs: Long = idleStart
+    def shuffleIdsCount: Int = if (shuffleIds != null) shuffleIds.size else 0
+    def hasShuffleData: Boolean = shuffleIds != null && shuffleIds.nonEmpty
 
     def updateRunningTasks(delta: Int): Unit = {
       runningTasks = math.max(0, runningTasks + delta)
@@ -564,14 +614,13 @@ private[spark] class ExecutorMonitor(
     def updateTimeout(): Unit = {
       val oldDeadline = timeoutAt
       val newDeadline = if (idleStart >= 0) {
-        val _cacheTimeout = if (cachedBlocks.nonEmpty) storageTimeoutNs else 0
-        val _shuffleTimeout = if (shuffleIds != null && shuffleIds.nonEmpty) {
-          shuffleTimeoutNs
-        } else {
-          0
-        }
-        // timeout should be max of idleTimeout, storageTimeout and shuffleTimeout
-        val timeout = Seq(_cacheTimeout, _shuffleTimeout, idleTimeoutNs).max
+        val timeoutCandidates = Seq(
+          (ShuffleTimeoutCause, if (hasShuffleData) shuffleTimeoutNs else 0L),
+          (StorageTimeoutCause, if (cachedBlocks.nonEmpty) storageTimeoutNs else 0L),
+          (IdleTimeoutCause, idleTimeoutNs))
+        val (cause, timeout) = timeoutCandidates.maxBy(_._2)
+        timeoutCause = cause
+        timeoutWindowNs = timeout
         val deadline = idleStart + timeout
         if (deadline >= 0) deadline else Long.MaxValue
       } else {

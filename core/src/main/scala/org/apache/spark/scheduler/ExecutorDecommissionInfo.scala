@@ -17,15 +17,94 @@
 
 package org.apache.spark.scheduler
 
+import org.apache.spark.util.Utils
+
 /**
  * Message providing more detail when an executor is being decommissioned.
  * @param message Human readable reason for why the decommissioning is happening.
  * @param workerHost When workerHost is defined, it means the host (aka the `node` or `worker`
  *                in other places) has been decommissioned too. Used to infer if the
  *                shuffle data might be lost even if the external shuffle service is enabled.
+ * @param reason Optional structured reason code (e.g. idle timeout, shuffle timeout, manual).
+ * @param details Optional structured parameters relevant to the reason (e.g. idle duration).
+ * @param timestamp Epoch millis when the decision to decommission was made.
  */
 private[spark]
-case class ExecutorDecommissionInfo(message: String, workerHost: Option[String] = None)
+case class ExecutorDecommissionInfo(
+    message: String,
+    workerHost: Option[String] = None,
+    reason: Option[String] = None,
+    details: Map[String, String] = Map.empty,
+    timestamp: Long = System.currentTimeMillis())
+
+private[spark] object ExecutorDecommissionInfo {
+  val IDLE_TIMEOUT_REASON = "idle_timeout"
+  val SHUFFLE_TIMEOUT_REASON = "shuffle_timeout"
+  val STORAGE_TIMEOUT_REASON = "storage_timeout"
+
+  def idleTimeout(
+      idleMs: Long,
+      timeoutMs: Long,
+      resourceProfileId: Int,
+      hasShuffleData: Boolean,
+      hasCachedBlocks: Boolean): ExecutorDecommissionInfo = {
+    val shuffleInfo = if (hasShuffleData) " with shuffle data" else ""
+    val cacheInfo = if (hasCachedBlocks) " with cached blocks" else ""
+    val idleStr = Utils.msDurationToString(idleMs)
+    val timeoutStr = Utils.msDurationToString(timeoutMs)
+    val msg = s"Idle after $idleStr (timeout $timeoutStr, rp $resourceProfileId" +
+      s"$shuffleInfo$cacheInfo)"
+    ExecutorDecommissionInfo(
+      message = msg,
+      workerHost = None,
+      reason = Some(IDLE_TIMEOUT_REASON),
+      details = Map(
+        "idleDurationMs" -> idleMs.toString,
+        "timeoutMs" -> timeoutMs.toString,
+        "resourceProfileId" -> resourceProfileId.toString,
+        "hasShuffleData" -> hasShuffleData.toString,
+        "hasCachedBlocks" -> hasCachedBlocks.toString))
+  }
+
+  def shuffleTimeout(
+      idleMs: Long,
+      timeoutMs: Long,
+      resourceProfileId: Int,
+      shuffleIds: Int): ExecutorDecommissionInfo = {
+    val idleStr = Utils.msDurationToString(idleMs)
+    val timeoutStr = Utils.msDurationToString(timeoutMs)
+    val msg = s"Shuffle data idle for $idleStr; shuffle timeout $timeoutStr reached " +
+      s"(shuffles=$shuffleIds, rp $resourceProfileId)"
+    ExecutorDecommissionInfo(
+      message = msg,
+      workerHost = None,
+      reason = Some(SHUFFLE_TIMEOUT_REASON),
+      details = Map(
+        "idleDurationMs" -> idleMs.toString,
+        "timeoutMs" -> timeoutMs.toString,
+        "resourceProfileId" -> resourceProfileId.toString,
+        "shuffleIds" -> shuffleIds.toString))
+  }
+
+  def storageTimeout(
+      idleMs: Long,
+      timeoutMs: Long,
+      resourceProfileId: Int): ExecutorDecommissionInfo = {
+    val idleStr = Utils.msDurationToString(idleMs)
+    val timeoutStr = Utils.msDurationToString(timeoutMs)
+    val msg = s"Cached blocks idle for $idleStr; storage timeout $timeoutStr reached " +
+      s"(rp $resourceProfileId)"
+    ExecutorDecommissionInfo(
+      message = msg,
+      workerHost = None,
+      reason = Some(STORAGE_TIMEOUT_REASON),
+      details = Map(
+        "idleDurationMs" -> idleMs.toString,
+        "timeoutMs" -> timeoutMs.toString,
+        "resourceProfileId" -> resourceProfileId.toString,
+        "hasCachedBlocks" -> "true"))
+  }
+}
 
 /**
  * State related to decommissioning that is kept by the TaskSchedulerImpl. This state is derived

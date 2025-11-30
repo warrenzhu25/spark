@@ -119,6 +119,24 @@ class DecommissionSummarySuite extends SparkFunSuite with LocalSparkContext {
     assert(execInfo.workerHost === Some("worker1"))
   }
 
+  test("DecommissionSummary carries structured reason fields") {
+    val summary = DecommissionSummary.createCompleted(
+      message = "Idle scale down",
+      startTime = 123L,
+      workerHost = None,
+      reason = Some(ExecutorDecommissionInfo.IDLE_TIMEOUT_REASON),
+      details = Map("idleDurationMs" -> "120000"))
+
+    val execInfo = summary.toExecutorDecommissionInfo
+    assert(execInfo.reason.contains(ExecutorDecommissionInfo.IDLE_TIMEOUT_REASON))
+    assert(execInfo.details.get("idleDurationMs").contains("120000"))
+
+    val roundTrip = DecommissionSummary.fromExecutorDecommissionInfo(execInfo)
+    assert(roundTrip.reason === execInfo.reason)
+    assert(roundTrip.details === execInfo.details)
+    assert(roundTrip.startTime === execInfo.timestamp)
+  }
+
   test("DecommissionSummary.fromExecutorDecommissionInfo") {
     val execInfo = ExecutorDecommissionInfo("Original message", Some("host2"))
     val summary = DecommissionSummary.fromExecutorDecommissionInfo(execInfo)
