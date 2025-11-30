@@ -577,7 +577,7 @@ class HealthTrackerSuite extends SparkFunSuite with MockitoSugar with LocalSpark
       " (actually decommissioning)"
 
     verify(allocationClientMock).decommissionExecutor(
-      "1", ExecutorDecommissionInfo(msg1), false)
+      "1", ExecutorDecommissionReason(msg1), false)
 
     val taskSetExclude3 = createTaskSetExcludelist(stageId = 1)
     // Fail 4 tasks in one task set on executor 2, so that executor gets excluded for the whole
@@ -593,7 +593,7 @@ class HealthTrackerSuite extends SparkFunSuite with MockitoSugar with LocalSpark
       "Killing excluded executor id 2 since spark.excludeOnFailure.killExcludedExecutors is set." +
       " (actually decommissioning)"
     verify(allocationClientMock).decommissionExecutor(
-      "2", ExecutorDecommissionInfo(msg2), false, false)
+      "2", ExecutorDecommissionReason(msg2), false, false)
     verify(allocationClientMock).decommissionExecutorsOnHost("hostA")
   }
 

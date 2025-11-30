@@ -36,13 +36,13 @@ private[spark] sealed trait ExecutorTimeoutCause {
   def reasonCode: String
 }
 private[spark] case object IdleTimeoutCause extends ExecutorTimeoutCause {
-  override val reasonCode: String = ExecutorDecommissionInfo.IDLE_TIMEOUT_REASON
+  override val reasonCode: String = ExecutorDecommissionReason.IDLE_TIMEOUT_REASON
 }
 private[spark] case object StorageTimeoutCause extends ExecutorTimeoutCause {
-  override val reasonCode: String = ExecutorDecommissionInfo.STORAGE_TIMEOUT_REASON
+  override val reasonCode: String = ExecutorDecommissionReason.STORAGE_TIMEOUT_REASON
 }
 private[spark] case object ShuffleTimeoutCause extends ExecutorTimeoutCause {
-  override val reasonCode: String = ExecutorDecommissionInfo.SHUFFLE_TIMEOUT_REASON
+  override val reasonCode: String = ExecutorDecommissionReason.SHUFFLE_TIMEOUT_REASON
 }
 private[spark] case class TimedOutExecutor(
     executorId: String,

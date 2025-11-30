@@ -586,9 +586,9 @@ private[spark] class ExecutorAllocationManager(
         val executorIdsWithoutHostLoss = executorIdsToBeRemoved.map { case (id, rpId) =>
           val info = timeoutDetails.get(id)
             .map(detail => buildDecommissionInfo(detail, rpId))
-            .getOrElse(ExecutorDecommissionInfo(
+            .getOrElse(ExecutorDecommissionReason(
               "spark scale down",
-              reason = Some(ExecutorDecommissionInfo.IDLE_TIMEOUT_REASON),
+              reason = Some(ExecutorDecommissionReason.IDLE_TIMEOUT_REASON),
               details = Map("resourceProfileId" -> rpId.toString)))
           (id, info)
         }.toArray
@@ -628,16 +628,16 @@ private[spark] class ExecutorAllocationManager(
 
   private def buildDecommissionInfo(
       detail: TimedOutExecutor,
-      rpId: Int): ExecutorDecommissionInfo = {
+      rpId: Int): ExecutorDecommissionReason = {
     val idleMs = TimeUnit.NANOSECONDS.toMillis(detail.idleDurationNs)
     val timeoutMs = TimeUnit.NANOSECONDS.toMillis(detail.timeoutWindowNs)
     detail.timeoutCause match {
       case ShuffleTimeoutCause =>
-        ExecutorDecommissionInfo.shuffleTimeout(idleMs, timeoutMs, rpId, detail.shuffleIds)
+        ExecutorDecommissionReason.shuffleTimeout(idleMs, timeoutMs, rpId, detail.shuffleIds)
       case StorageTimeoutCause =>
-        ExecutorDecommissionInfo.storageTimeout(idleMs, timeoutMs, rpId)
+        ExecutorDecommissionReason.storageTimeout(idleMs, timeoutMs, rpId)
       case _ =>
-        ExecutorDecommissionInfo.idleTimeout(
+        ExecutorDecommissionReason.idleTimeout(
           idleMs,
           timeoutMs,
           rpId,

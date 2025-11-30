@@ -230,7 +230,7 @@ class DAGSchedulerSuite extends SparkFunSuite with TempLocalSparkContext with Ti
     override def applicationAttemptId(): Option[String] = None
     override def executorDecommission(
       executorId: String,
-      decommissionInfo: ExecutorDecommissionInfo): Unit = {
+      decommissionInfo: ExecutorDecommissionReason): Unit = {
       executorsPendingDecommission(executorId) =
         ExecutorDecommissionState(0, decommissionInfo.workerHost)
     }
@@ -940,7 +940,7 @@ class DAGSchedulerSuite extends SparkFunSuite with TempLocalSparkContext with Ti
       override def applicationAttemptId(): Option[String] = None
       override def executorDecommission(
         executorId: String,
-        decommissionInfo: ExecutorDecommissionInfo): Unit = {}
+        decommissionInfo: ExecutorDecommissionReason): Unit = {}
       override def getExecutorDecommissionState(
         executorId: String): Option[ExecutorDecommissionState] = None
     }
@@ -1257,7 +1257,7 @@ class DAGSchedulerSuite extends SparkFunSuite with TempLocalSparkContext with Ti
 
       // Only make first attempt fail due to executor decommission
       if (attempt == 0) {
-        taskScheduler.executorDecommission("hostA-exec", ExecutorDecommissionInfo(""))
+        taskScheduler.executorDecommission("hostA-exec", ExecutorDecommissionReason(""))
       } else {
         taskScheduler.executorsPendingDecommission.clear()
       }

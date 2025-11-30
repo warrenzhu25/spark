@@ -28,7 +28,7 @@ import org.apache.spark.{ExecutorAllocationClient, SparkConf}
 import org.apache.spark.internal.config.{DECOMMISSION_ENABLED, DYN_ALLOCATION_ENABLED, DYN_ALLOCATION_TESTING}
 import org.apache.spark.internal.config.Streaming._
 import org.apache.spark.resource.ResourceProfile
-import org.apache.spark.scheduler.ExecutorDecommissionInfo
+import org.apache.spark.scheduler.ExecutorDecommissionReason
 import org.apache.spark.streaming.{DummyInputDStream, Seconds, StreamingContext, TestSuiteBase}
 import org.apache.spark.util.{ManualClock, Utils}
 
@@ -101,8 +101,8 @@ class ExecutorAllocationManagerSuite extends TestSuiteBase
           if (decommissioning) {
             verify(allocationClient, times(1)).decommissionExecutor(
               meq(expectedExec.get),
-              argThat((info: ExecutorDecommissionInfo) =>
-                info.reason.contains(ExecutorDecommissionInfo.IDLE_TIMEOUT_REASON) &&
+              argThat((info: ExecutorDecommissionReason) =>
+                info.reason.contains(ExecutorDecommissionReason.IDLE_TIMEOUT_REASON) &&
                   info.message.contains("Streaming scale down")),
               meq(true),
               any())
@@ -111,8 +111,8 @@ class ExecutorAllocationManagerSuite extends TestSuiteBase
             verify(allocationClient, times(1)).killExecutor(meq(expectedExec.get))
             verify(allocationClient, never).decommissionExecutor(
               meq(expectedExec.get),
-              argThat((info: ExecutorDecommissionInfo) =>
-                info.reason.contains(ExecutorDecommissionInfo.IDLE_TIMEOUT_REASON)),
+              argThat((info: ExecutorDecommissionReason) =>
+                info.reason.contains(ExecutorDecommissionReason.IDLE_TIMEOUT_REASON)),
               meq(true),
               any())
           }

@@ -100,17 +100,17 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
   // Executors that have been lost, but for which we don't yet know the real exit reason.
   protected val executorsPendingLossReason = new HashSet[String]
 
-  // Executors which are being decommissioned. Maps from executorId to ExecutorDecommissionInfo.
-  protected val executorsPendingDecommission = new HashMap[String, ExecutorDecommissionInfo]
+  // Executors which are being decommissioned. Maps from executorId to ExecutorDecommissionReason.
+  protected val executorsPendingDecommission = new HashMap[String, ExecutorDecommissionReason]
 
   // Unknown Executors which are being decommissioned. This could be caused by unregistered executor
   // This executor should be decommissioned after registration.
-  // Maps from executorId to (ExecutorDecommissionInfo, adjustTargetNumExecutors,
+  // Maps from executorId to (ExecutorDecommissionReason, adjustTargetNumExecutors,
   // triggeredByExecutor).
   protected val unknownExecutorsPendingDecommission =
     CacheBuilder.newBuilder()
       .maximumSize(conf.get(SCHEDULER_MAX_RETAINED_UNKNOWN_EXECUTORS))
-      .build[String, (ExecutorDecommissionInfo, Boolean, Boolean)]()
+      .build[String, (ExecutorDecommissionReason, Boolean, Boolean)]()
 
   // A map of ResourceProfile id to map of hostname with its possible task number running on it
   @GuardedBy("CoarseGrainedSchedulerBackend.this")
@@ -204,7 +204,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
         }
 
       case DecommissionExecutorsOnHost(host) =>
-        val reason = ExecutorDecommissionInfo(s"Decommissioning all executors on $host.")
+        val reason = ExecutorDecommissionReason(s"Decommissioning all executors on $host.")
         scheduler.getExecutorsAliveOnHost(host).foreach { execs =>
           val execsWithReasons = execs.map(exec => (exec, reason)).toArray
 
@@ -335,7 +335,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
         context.reply(
           decommissionExecutor(
             executorId,
-            ExecutorDecommissionInfo(s"Executor $executorId is decommissioned."),
+            ExecutorDecommissionReason(s"Executor $executorId is decommissioned."),
             adjustTargetNumExecutors = false,
             triggeredByExecutor = true))
 
@@ -551,7 +551,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
    * @return the ids of the executors acknowledged by the cluster manager to be removed.
    */
   override def decommissionExecutors(
-      executorsAndDecomInfo: Array[(String, ExecutorDecommissionInfo)],
+      executorsAndDecomInfo: Array[(String, ExecutorDecommissionReason)],
       adjustTargetNumExecutors: Boolean,
       triggeredByExecutor: Boolean): Seq[String] = withLock {
     // Do not change this code without running the K8s integration suites

@@ -34,7 +34,7 @@ import org.apache.spark.internal.config._
 import org.apache.spark.launcher.SparkLauncher.{EXECUTOR_MEMORY, SPARK_MASTER}
 import org.apache.spark.network.BlockTransferService
 import org.apache.spark.network.buffer.ManagedBuffer
-import org.apache.spark.scheduler.ExecutorDecommissionInfo
+import org.apache.spark.scheduler.ExecutorDecommissionReason
 import org.apache.spark.scheduler.cluster.StandaloneSchedulerBackend
 import org.apache.spark.shuffle.{IndexShuffleBlockResolver, ShuffleBlockInfo}
 import org.apache.spark.shuffle.IndexShuffleBlockResolver.NOOP_REDUCE_ID
@@ -241,7 +241,7 @@ class FallbackStorageSuite extends SparkFunSuite with LocalSparkContext {
       // Decommission all
       val sched = sc.schedulerBackend.asInstanceOf[StandaloneSchedulerBackend]
       sc.getExecutorIds().foreach {
-        sched.decommissionExecutor(_, ExecutorDecommissionInfo(""), false)
+        sched.decommissionExecutor(_, ExecutorDecommissionReason(""), false)
       }
 
       val files = Seq("shuffle_0_0_0.index", "shuffle_0_0_0.data")
@@ -282,7 +282,7 @@ class FallbackStorageSuite extends SparkFunSuite with LocalSparkContext {
       // Decommission all
       val sched = sc.schedulerBackend.asInstanceOf[StandaloneSchedulerBackend]
       sc.getExecutorIds().foreach {
-        sched.decommissionExecutor(_, ExecutorDecommissionInfo(""), false)
+        sched.decommissionExecutor(_, ExecutorDecommissionReason(""), false)
       }
 
       eventually(timeout(20.seconds), interval(1.seconds)) {
@@ -305,7 +305,7 @@ class FallbackStorageSuite extends SparkFunSuite with LocalSparkContext {
         // Decommission all
         val sched = sc.schedulerBackend.asInstanceOf[StandaloneSchedulerBackend]
         sc.getExecutorIds().foreach {
-          sched.decommissionExecutor(_, ExecutorDecommissionInfo(""), false)
+          sched.decommissionExecutor(_, ExecutorDecommissionReason(""), false)
         }
 
         // Make it sure that fallback storage are ready

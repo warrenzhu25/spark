@@ -30,14 +30,14 @@ import org.apache.spark.util.Utils
  * @param timestamp Epoch millis when the decision to decommission was made.
  */
 private[spark]
-case class ExecutorDecommissionInfo(
+case class ExecutorDecommissionReason(
     message: String,
     workerHost: Option[String] = None,
     reason: Option[String] = None,
     details: Map[String, String] = Map.empty,
     timestamp: Long = System.currentTimeMillis())
 
-private[spark] object ExecutorDecommissionInfo {
+private[spark] object ExecutorDecommissionReason {
   val IDLE_TIMEOUT_REASON = "idle_timeout"
   val SHUFFLE_TIMEOUT_REASON = "shuffle_timeout"
   val STORAGE_TIMEOUT_REASON = "storage_timeout"
@@ -47,14 +47,14 @@ private[spark] object ExecutorDecommissionInfo {
       timeoutMs: Long,
       resourceProfileId: Int,
       hasShuffleData: Boolean,
-      hasCachedBlocks: Boolean): ExecutorDecommissionInfo = {
+      hasCachedBlocks: Boolean): ExecutorDecommissionReason = {
     val shuffleInfo = if (hasShuffleData) " with shuffle data" else ""
     val cacheInfo = if (hasCachedBlocks) " with cached blocks" else ""
     val idleStr = Utils.msDurationToString(idleMs)
     val timeoutStr = Utils.msDurationToString(timeoutMs)
     val msg = s"Idle after $idleStr (timeout $timeoutStr, rp $resourceProfileId" +
       s"$shuffleInfo$cacheInfo)"
-    ExecutorDecommissionInfo(
+    ExecutorDecommissionReason(
       message = msg,
       workerHost = None,
       reason = Some(IDLE_TIMEOUT_REASON),
@@ -70,12 +70,12 @@ private[spark] object ExecutorDecommissionInfo {
       idleMs: Long,
       timeoutMs: Long,
       resourceProfileId: Int,
-      shuffleIds: Int): ExecutorDecommissionInfo = {
+      shuffleIds: Int): ExecutorDecommissionReason = {
     val idleStr = Utils.msDurationToString(idleMs)
     val timeoutStr = Utils.msDurationToString(timeoutMs)
     val msg = s"Shuffle data idle for $idleStr; shuffle timeout $timeoutStr reached " +
       s"(shuffles=$shuffleIds, rp $resourceProfileId)"
-    ExecutorDecommissionInfo(
+    ExecutorDecommissionReason(
       message = msg,
       workerHost = None,
       reason = Some(SHUFFLE_TIMEOUT_REASON),
@@ -89,12 +89,12 @@ private[spark] object ExecutorDecommissionInfo {
   def storageTimeout(
       idleMs: Long,
       timeoutMs: Long,
-      resourceProfileId: Int): ExecutorDecommissionInfo = {
+      resourceProfileId: Int): ExecutorDecommissionReason = {
     val idleStr = Utils.msDurationToString(idleMs)
     val timeoutStr = Utils.msDurationToString(timeoutMs)
     val msg = s"Cached blocks idle for $idleStr; storage timeout $timeoutStr reached " +
       s"(rp $resourceProfileId)"
-    ExecutorDecommissionInfo(
+    ExecutorDecommissionReason(
       message = msg,
       workerHost = None,
       reason = Some(STORAGE_TIMEOUT_REASON),

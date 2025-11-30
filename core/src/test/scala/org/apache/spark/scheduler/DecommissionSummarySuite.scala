@@ -111,9 +111,9 @@ class DecommissionSummarySuite extends SparkFunSuite with LocalSparkContext {
     assert(detailedMessage.contains("3 deleted"))
   }
 
-  test("DecommissionSummary conversion to ExecutorDecommissionInfo") {
+  test("DecommissionSummary conversion to ExecutorDecommissionReason") {
     val summary = DecommissionSummary.create("Test conversion", Some("worker1"))
-    val execInfo = summary.toExecutorDecommissionInfo
+    val execInfo = summary.toExecutorDecommissionReason
 
     assert(execInfo.message === "Test conversion")
     assert(execInfo.workerHost === Some("worker1"))
@@ -124,22 +124,22 @@ class DecommissionSummarySuite extends SparkFunSuite with LocalSparkContext {
       message = "Idle scale down",
       startTime = 123L,
       workerHost = None,
-      reason = Some(ExecutorDecommissionInfo.IDLE_TIMEOUT_REASON),
+      reason = Some(ExecutorDecommissionReason.IDLE_TIMEOUT_REASON),
       details = Map("idleDurationMs" -> "120000"))
 
-    val execInfo = summary.toExecutorDecommissionInfo
-    assert(execInfo.reason.contains(ExecutorDecommissionInfo.IDLE_TIMEOUT_REASON))
+    val execInfo = summary.toExecutorDecommissionReason
+    assert(execInfo.reason.contains(ExecutorDecommissionReason.IDLE_TIMEOUT_REASON))
     assert(execInfo.details.get("idleDurationMs").contains("120000"))
 
-    val roundTrip = DecommissionSummary.fromExecutorDecommissionInfo(execInfo)
+    val roundTrip = DecommissionSummary.fromExecutorDecommissionReason(execInfo)
     assert(roundTrip.reason === execInfo.reason)
     assert(roundTrip.details === execInfo.details)
     assert(roundTrip.startTime === execInfo.timestamp)
   }
 
-  test("DecommissionSummary.fromExecutorDecommissionInfo") {
-    val execInfo = ExecutorDecommissionInfo("Original message", Some("host2"))
-    val summary = DecommissionSummary.fromExecutorDecommissionInfo(execInfo)
+  test("DecommissionSummary.fromExecutorDecommissionReason") {
+    val execInfo = ExecutorDecommissionReason("Original message", Some("host2"))
+    val summary = DecommissionSummary.fromExecutorDecommissionReason(execInfo)
 
     assert(summary.message === "Original message")
     assert(summary.workerHost === Some("host2"))

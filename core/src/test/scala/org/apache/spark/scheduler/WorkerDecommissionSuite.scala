@@ -75,7 +75,7 @@ class WorkerDecommissionSuite extends SparkFunSuite with LocalSparkContext {
     val sched = sc.schedulerBackend.asInstanceOf[StandaloneSchedulerBackend]
     val execs = sched.getExecutorIds()
     // Make the executors decommission, finish, exit, and not be replaced.
-    val execsAndDecomInfo = execs.map((_, ExecutorDecommissionInfo("", None))).toArray
+    val execsAndDecomInfo = execs.map((_, ExecutorDecommissionReason("", None))).toArray
     sched.decommissionExecutors(
       execsAndDecomInfo,
       adjustTargetNumExecutors = true,

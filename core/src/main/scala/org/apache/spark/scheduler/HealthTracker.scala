@@ -166,7 +166,7 @@ private[scheduler] class HealthTracker (
       case Some(a) =>
         logInfo(fullMsg)
         if (EXCLUDE_ON_FAILURE_DECOMMISSION_ENABLED) {
-          a.decommissionExecutor(exec, ExecutorDecommissionInfo(fullMsg),
+          a.decommissionExecutor(exec, ExecutorDecommissionReason(fullMsg),
             adjustTargetNumExecutors = false)
         } else {
           a.killExecutors(Seq(exec), adjustTargetNumExecutors = false, countFailures = false,

@@ -60,7 +60,7 @@ class BlockManagerDecommissionIntegrationSuite extends SparkFunSuite with LocalS
           Thread.sleep(3000)
           sc.schedulerBackend.asInstanceOf[StandaloneSchedulerBackend]
             .decommissionExecutors(
-              executors.map { id => (id, ExecutorDecommissionInfo("test")) },
+              executors.map { id => (id, ExecutorDecommissionReason("test")) },
               true,
               false)
         }
@@ -257,7 +257,7 @@ class BlockManagerDecommissionIntegrationSuite extends SparkFunSuite with LocalS
     // Decommission executor and ensure it is not relaunched by setting adjustTargetNumExecutors
     sched.decommissionExecutor(
       execToDecommission,
-      ExecutorDecommissionInfo("test msg 0", None),
+      ExecutorDecommissionReason("test msg 0", None),
       adjustTargetNumExecutors = true)
     val decomTime = new SystemClock().getTimeMillis()
 
@@ -405,7 +405,7 @@ class BlockManagerDecommissionIntegrationSuite extends SparkFunSuite with LocalS
       .asInstanceOf[StandaloneSchedulerBackend]
       .decommissionExecutor(
         execToDecommission,
-        ExecutorDecommissionInfo("test", None),
+        ExecutorDecommissionReason("test", None),
         adjustTargetNumExecutors = true
       )
 

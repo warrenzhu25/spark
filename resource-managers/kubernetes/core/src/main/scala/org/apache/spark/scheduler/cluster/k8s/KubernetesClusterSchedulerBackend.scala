@@ -35,7 +35,7 @@ import org.apache.spark.deploy.security.HadoopDelegationTokenManager
 import org.apache.spark.internal.config.SCHEDULER_MIN_REGISTERED_RESOURCES_RATIO
 import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.rpc.{RpcAddress, RpcCallContext}
-import org.apache.spark.scheduler.{ExecutorDecommission, ExecutorDecommissionInfo, ExecutorKilled, ExecutorLossReason,
+import org.apache.spark.scheduler.{ExecutorDecommission, ExecutorDecommissionReason, ExecutorKilled, ExecutorLossReason,
   TaskSchedulerImpl}
 import org.apache.spark.scheduler.cluster.{CoarseGrainedSchedulerBackend, SchedulerBackendUtils}
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.RegisterExecutor
@@ -219,7 +219,7 @@ private[spark] class KubernetesClusterSchedulerBackend(
   }
 
   override def decommissionExecutors(
-      executorsAndDecomInfo: Array[(String, ExecutorDecommissionInfo)],
+      executorsAndDecomInfo: Array[(String, ExecutorDecommissionReason)],
       adjustTargetNumExecutors: Boolean,
       triggeredByExecutor: Boolean): Seq[String] = {
     // If decommissioning is triggered by the executor the K8s cluster manager has already

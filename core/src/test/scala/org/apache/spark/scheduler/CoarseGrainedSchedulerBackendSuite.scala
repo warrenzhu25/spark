@@ -502,7 +502,7 @@ class CoarseGrainedSchedulerBackendSuite extends SparkFunSuite with LocalSparkCo
     val mockEndpointRef = new MockExecutorRpcEndpointRef(conf)
     val mockAddress = mock[RpcAddress]
     val executorId = "1"
-    val executorDecommissionInfo = ExecutorDecommissionInfo(
+    val executorDecommissionInfo = ExecutorDecommissionReason(
       s"Executor $executorId is decommissioned")
 
     backend.decommissionExecutor(executorId, executorDecommissionInfo, false)
@@ -532,7 +532,7 @@ class CoarseGrainedSchedulerBackendSuite extends SparkFunSuite with LocalSparkCo
         Map.empty, ResourceProfile.DEFAULT_RESOURCE_PROFILE_ID))
 
     // Decommission the executor so it's in the pendingDecommission map
-    val decommissionInfo = ExecutorDecommissionInfo("Test decommission")
+    val decommissionInfo = ExecutorDecommissionReason("Test decommission")
     backend.decommissionExecutor("1", decommissionInfo, adjustTargetNumExecutors = false,
       triggeredByExecutor = false)
 

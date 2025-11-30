@@ -25,7 +25,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.DECOMMISSION_ENABLED
 import org.apache.spark.internal.config.Streaming._
 import org.apache.spark.resource.ResourceProfile
-import org.apache.spark.scheduler.ExecutorDecommissionInfo
+import org.apache.spark.scheduler.ExecutorDecommissionReason
 import org.apache.spark.streaming.util.RecurringTimer
 import org.apache.spark.util.{Clock, Utils}
 
@@ -137,9 +137,9 @@ private[streaming] class ExecutorAllocationManager(
         val execIdToRemove = removableExecIds(Random.nextInt(removableExecIds.size))
         if (conf.get(DECOMMISSION_ENABLED)) {
           client.decommissionExecutor(execIdToRemove,
-            ExecutorDecommissionInfo(
+            ExecutorDecommissionReason(
               message = "Streaming scale down (idle, no receivers)",
-              reason = Some(ExecutorDecommissionInfo.IDLE_TIMEOUT_REASON),
+              reason = Some(ExecutorDecommissionReason.IDLE_TIMEOUT_REASON),
               details = Map("mode" -> "streaming", "trigger" -> "scale_down"),
               timestamp = clock.getTimeMillis()),
             adjustTargetNumExecutors = true)

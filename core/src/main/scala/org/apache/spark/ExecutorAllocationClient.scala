@@ -17,7 +17,7 @@
 
 package org.apache.spark
 
-import org.apache.spark.scheduler.ExecutorDecommissionInfo
+import org.apache.spark.scheduler.ExecutorDecommissionReason
 
 /**
  * A client that communicates with the cluster manager to request or kill executors.
@@ -95,7 +95,7 @@ private[spark] trait ExecutorAllocationClient {
    * @return the ids of the executors acknowledged by the cluster manager to be removed.
    */
   def decommissionExecutors(
-      executorsAndDecomInfo: Array[(String, ExecutorDecommissionInfo)],
+      executorsAndDecomInfo: Array[(String, ExecutorDecommissionReason)],
       adjustTargetNumExecutors: Boolean,
       triggeredByExecutor: Boolean): Seq[String] = {
     killExecutors(executorsAndDecomInfo.map(_._1),
@@ -112,14 +112,14 @@ private[spark] trait ExecutorAllocationClient {
    * @param decommissionInfo information about the decommission (reason, host loss)
    * @param adjustTargetNumExecutors if we should adjust the target number of executors.
    * @param triggeredByExecutor whether the decommission is triggered at executor.
-   *                            (TODO: add a new type like `ExecutorDecommissionInfo` for the
+   *                            (TODO: add a new type like `ExecutorDecommissionReason` for the
    *                            case where executor is decommissioned at executor first, so we
    *                            don't need this extra parameter.)
    * @return whether the request is acknowledged by the cluster manager.
    */
   final def decommissionExecutor(
       executorId: String,
-      decommissionInfo: ExecutorDecommissionInfo,
+      decommissionInfo: ExecutorDecommissionReason,
       adjustTargetNumExecutors: Boolean,
       triggeredByExecutor: Boolean = false): Boolean = {
     val decommissionedExecutors = decommissionExecutors(

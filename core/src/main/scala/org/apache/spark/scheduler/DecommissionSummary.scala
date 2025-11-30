@@ -84,10 +84,10 @@ case class DecommissionSummary(
   }
 
   /**
-   * Convert to basic ExecutorDecommissionInfo for backward compatibility
+   * Convert to basic ExecutorDecommissionReason for backward compatibility
    */
-  def toExecutorDecommissionInfo: ExecutorDecommissionInfo =
-    ExecutorDecommissionInfo(message, workerHost, reason, details, startTime)
+  def toExecutorDecommissionReason: ExecutorDecommissionReason =
+    ExecutorDecommissionReason(message, workerHost, reason, details, startTime)
 }
 
 /**
@@ -116,9 +116,9 @@ private[spark] object DecommissionSummary {
   }
 
   /**
-   * Create from existing ExecutorDecommissionInfo
+   * Create from existing ExecutorDecommissionReason
    */
-  def fromExecutorDecommissionInfo(info: ExecutorDecommissionInfo): DecommissionSummary =
+  def fromExecutorDecommissionReason(info: ExecutorDecommissionReason): DecommissionSummary =
     DecommissionSummary(
       message = info.message,
       workerHost = info.workerHost,

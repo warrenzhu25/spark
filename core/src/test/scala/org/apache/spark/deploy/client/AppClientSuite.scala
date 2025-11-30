@@ -34,7 +34,7 @@ import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.resource.{ExecutorResourceRequests, ResourceProfileBuilder}
 import org.apache.spark.resource.ResourceProfile.DEFAULT_RESOURCE_PROFILE_ID
 import org.apache.spark.rpc.RpcEnv
-import org.apache.spark.scheduler.ExecutorDecommissionInfo
+import org.apache.spark.scheduler.ExecutorDecommissionReason
 import org.apache.spark.util.Utils
 
 /**
@@ -276,7 +276,7 @@ class AppClientSuite
     val deadReasonList = new ConcurrentLinkedQueue[String]()
     val execAddedList = new ConcurrentLinkedQueue[String]()
     val execRemovedList = new ConcurrentLinkedQueue[String]()
-    val execDecommissionedMap = new ConcurrentHashMap[String, ExecutorDecommissionInfo]()
+    val execDecommissionedMap = new ConcurrentHashMap[String, ExecutorDecommissionReason]()
 
     def connected(id: String): Unit = {
       connectedIdList.add(id)
@@ -306,7 +306,7 @@ class AppClientSuite
       execRemovedList.add(id)
     }
 
-    def executorDecommissioned(id: String, decommissionInfo: ExecutorDecommissionInfo): Unit = {
+    def executorDecommissioned(id: String, decommissionInfo: ExecutorDecommissionReason): Unit = {
       val previousDecommissionInfo = execDecommissionedMap.putIfAbsent(id, decommissionInfo)
       assert(previousDecommissionInfo === null, s"Expected no previous decommission info for $id")
     }

@@ -1020,7 +1020,7 @@ private[spark] class TaskSchedulerImpl(
   }
 
   override def executorDecommission(
-      executorId: String, decommissionInfo: ExecutorDecommissionInfo): Unit = {
+      executorId: String, decommissionInfo: ExecutorDecommissionReason): Unit = {
     synchronized {
       // Don't bother noting decommissioning for executors that we don't know about
       if (executorIdToHost.contains(executorId)) {

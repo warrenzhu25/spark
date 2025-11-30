@@ -28,7 +28,7 @@ import org.apache.spark.deploy.k8s.Config.{EXECUTOR_ROLL_INTERVAL, EXECUTOR_ROLL
 import org.apache.spark.executor.ExecutorMetrics
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.DECOMMISSION_ENABLED
-import org.apache.spark.scheduler.ExecutorDecommissionInfo
+import org.apache.spark.scheduler.ExecutorDecommissionReason
 import org.apache.spark.status.api.v1
 import org.apache.spark.util.ThreadUtils
 
@@ -83,7 +83,7 @@ class ExecutorRollDriverPlugin extends DriverPlugin with Logging {
                   val now = System.currentTimeMillis()
                   scheduler.decommissionExecutor(
                     id,
-                    ExecutorDecommissionInfo(s"Rolling via $policy at $now"),
+                    ExecutorDecommissionReason(s"Rolling via $policy at $now"),
                     adjustTargetNumExecutors = false)
                 case _ =>
                   logInfo("There is nothing to roll.")
