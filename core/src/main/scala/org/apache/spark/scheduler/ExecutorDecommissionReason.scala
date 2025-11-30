@@ -54,7 +54,8 @@ private[spark] object ExecutorDecommissionReason {
     val configPart = timeoutConfigSuffix
       .map(k => s", $k=$timeoutStr")
       .getOrElse("")
-    s"$reason: idle=$idleStr, timeout=$timeoutStr, rp=$rpId, shuffles=$shuffles, cachedBlocks=$cachedBlocks$configPart"
+    val timeoutLabel = timeoutConfigSuffix.map(_ => "").getOrElse(s", timeout=$timeoutStr")
+    s"$reason: idle=$idleStr$timeoutLabel, rp=$rpId, shuffles=$shuffles, cachedBlocks=$cachedBlocks$configPart"
   }
 
   def idleTimeout(
