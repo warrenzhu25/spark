@@ -18,12 +18,14 @@
 package org.apache.spark.scheduler
 
 import java.util.concurrent.{ConcurrentHashMap, TimeUnit}
+import java.util.concurrent.atomic.AtomicLong
 
 import scala.collection.mutable
 
 import org.apache.spark.{MapOutputTrackerMaster, SparkConf}
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config._
+import org.apache.spark.metrics.source.Source
 import org.apache.spark.storage.{BlockId, BlockManagerId, BlockManagerMaster, ShuffleBlockId}
 import org.apache.spark.storage.ShuffleRebalanceMessages._
 import org.apache.spark.util.{ThreadUtils, Utils}
@@ -48,6 +50,17 @@ private[spark] class ShuffleRebalanceManager(
   // Multi-location configuration
   private val enableMultiLocation = conf.get(SHUFFLE_REBALANCE_ENABLE_MULTI_LOCATION)
   private val maxLocationsPerBlock = conf.get(SHUFFLE_REBALANCE_MAX_LOCATIONS_PER_BLOCK)
+
+  // Metrics
+  private val _rebalanceBytesMoved = new AtomicLong(0)
+  private val _rebalanceOpsCount = new AtomicLong(0)
+  private val _rebalanceErrors = new AtomicLong(0)
+
+  def rebalanceBytesMoved: Long = _rebalanceBytesMoved.get()
+  def rebalanceOpsCount: Long = _rebalanceOpsCount.get()
+  def rebalanceErrors: Long = _rebalanceErrors.get()
+
+  val metricsSource: Source = new ShuffleRebalanceManagerSource(this)
 
   // Track shuffle sizes per executor
   private val executorShuffleSizes = new ConcurrentHashMap[String, Long]()
@@ -240,10 +253,14 @@ private[spark] class ShuffleRebalanceManager(
           // Send message to source executor to transfer blocks
           sendShuffleBlockTransferMessage(operation)
 
+          _rebalanceOpsCount.incrementAndGet()
+          _rebalanceBytesMoved.addAndGet(operation.totalSize)
+
           logInfo(s"Completed shuffle rebalancing: $moveKey")
 
         } catch {
           case e: Exception =>
+            _rebalanceErrors.incrementAndGet()
             logError(s"Failed shuffle rebalancing: $moveKey", e)
         } finally {
           ongoingMoves.remove(moveKey)

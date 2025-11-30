@@ -138,6 +138,27 @@ class ShuffleRebalanceManagerSuite extends SparkFunSuite {
     // assert(stats.imbalanceRatio >= 0)
   }
 
+  test("metrics are updated on success and failure") {
+    val conf = new SparkConf()
+      .set(SHUFFLE_REBALANCE_ENABLED, true)
+
+    val mapOutputTracker = mock(classOf[MapOutputTrackerMaster])
+    val blockManagerMaster = mock(classOf[BlockManagerMaster])
+
+    val shuffleMoveManager = new ShuffleRebalanceManager(conf, mapOutputTracker, blockManagerMaster)
+
+    // Initial state
+    assert(shuffleMoveManager.rebalanceOpsCount === 0)
+    assert(shuffleMoveManager.rebalanceBytesMoved === 0)
+    assert(shuffleMoveManager.rebalanceErrors === 0)
+
+    val source = shuffleMoveManager.metricsSource
+    assert(source.sourceName === "ShuffleRebalance")
+    assert(source.metricRegistry.getGauges.containsKey("rebalanceOpsCount"))
+    assert(source.metricRegistry.getGauges.containsKey("rebalanceBytesMoved"))
+    assert(source.metricRegistry.getGauges.containsKey("rebalanceErrors"))
+  }
+
   private def createMockShuffleMapStage(shuffleId: Int): ShuffleMapStage = {
     // Create a minimal mock ShuffleMapStage for testing
     val rdd = mock(classOf[RDD[_]])

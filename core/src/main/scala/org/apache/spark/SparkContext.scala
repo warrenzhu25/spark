@@ -691,6 +691,7 @@ class SparkContext(config: SparkConf) extends Logging {
       _env.metricsSystem.registerSource(Executor.executorSourceLocalModeOnly)
     }
     _env.metricsSystem.registerSource(_dagScheduler.metricsSource)
+    _env.metricsSystem.registerSource(_dagScheduler.shuffleRebalanceSource)
     _env.metricsSystem.registerSource(new BlockManagerSource(_env.blockManager))
     _env.metricsSystem.registerSource(new JVMCPUSource())
     _executorMetricsSource.foreach(_.register(_env.metricsSystem))

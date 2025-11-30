@@ -146,6 +146,8 @@ private[spark] class DAGScheduler(
   private[scheduler] val shuffleRebalanceManager = new ShuffleRebalanceManager(
     sc.conf, mapOutputTracker, blockManagerMaster)
 
+  private[spark] val shuffleRebalanceSource = shuffleRebalanceManager.metricsSource
+
   private[scheduler] val nextJobId = new AtomicInteger(0)
   private[scheduler] def numTotalJobs: Int = nextJobId.get()
   private val nextStageId = new AtomicInteger(0)
