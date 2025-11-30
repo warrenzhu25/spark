@@ -633,14 +633,18 @@ private[spark] class ExecutorAllocationManager(
     val timeoutMs = TimeUnit.NANOSECONDS.toMillis(detail.timeoutWindowNs)
     detail.timeoutCause match {
       case ShuffleTimeoutCause =>
-        ExecutorDecommissionReason.shuffleTimeout(idleMs, timeoutMs, rpId, detail.shuffleIds)
+        ExecutorDecommissionReason.shuffleTimeout(
+          idleMs, timeoutMs, rpId, detail.shuffleIds, detail.cachedBlocksCount)
       case StorageTimeoutCause =>
-        ExecutorDecommissionReason.storageTimeout(idleMs, timeoutMs, rpId)
+        ExecutorDecommissionReason.storageTimeout(
+          idleMs, timeoutMs, rpId, detail.cachedBlocksCount)
       case _ =>
         ExecutorDecommissionReason.idleTimeout(
           idleMs,
           timeoutMs,
           rpId,
+          shuffleCount = detail.shuffleIds,
+          cachedBlocksCount = detail.cachedBlocksCount,
           hasShuffleData = detail.shuffleIds > 0,
           hasCachedBlocks = detail.hasCachedBlocks)
     }

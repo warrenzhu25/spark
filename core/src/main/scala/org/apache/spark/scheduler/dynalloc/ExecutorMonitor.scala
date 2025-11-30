@@ -51,6 +51,7 @@ private[spark] case class TimedOutExecutor(
     timeoutWindowNs: Long,
     timeoutCause: ExecutorTimeoutCause,
     hasCachedBlocks: Boolean,
+    cachedBlocksCount: Int,
     shuffleIds: Int)
 
 /**
@@ -163,6 +164,7 @@ private[spark] class ExecutorMonitor(
             timeoutWindowNs = timeoutWindowNs,
             timeoutCause = exec.timeoutCause,
             hasCachedBlocks = exec.cachedBlocks.nonEmpty,
+            cachedBlocksCount = exec.cachedBlocksCount,
             shuffleIds = exec.shuffleIdsCount)
           (name, exec.resourceProfileId)
         }
@@ -604,6 +606,7 @@ private[spark] class ExecutorMonitor(
     def idleStartNs: Long = idleStart
     def shuffleIdsCount: Int = if (shuffleIds != null) shuffleIds.size else 0
     def hasShuffleData: Boolean = shuffleIds != null && shuffleIds.nonEmpty
+    def cachedBlocksCount: Int = cachedBlocks.values.map(_.size).sum
 
     def updateRunningTasks(delta: Int): Unit = {
       runningTasks = math.max(0, runningTasks + delta)

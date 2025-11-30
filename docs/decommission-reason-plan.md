@@ -3,7 +3,7 @@
 Goal: replace the generic `spark scale down` decommission reason with structured, specific messages such as `Idle after 120s` or `Shuffle 100 MB could not migrate before 120s timeout`, and surface the detail consistently in logs, event logs, UI, and APIs.
 
 ## Objectives and Success Criteria
-- Provide reason codes plus human-readable templates that include relevant parameters (idle duration, configured thresholds, shuffle bytes/timeouts, host-level signals).
+- Provide reason codes plus human-readable templates that include relevant parameters (idle duration, configured thresholds, shuffle/cache counts or sizes when available, host-level signals).
 - Preserve backward compatibility: existing consumers still receive the message string, but new structured fields are added and populated.
 - Ensure the extra detail flows end-to-end: creation (`ExecutorAllocationManager`), scheduler state (`ExecutorDecommissionReason`/`DecommissionSummary`), event log, REST API, and UI.
 - Add tests that assert both the structured payload and rendered messages for idle scale-down and shuffle-timeout scenarios.
