@@ -634,10 +634,12 @@ private[spark] class ExecutorAllocationManager(
     detail.timeoutCause match {
       case ShuffleTimeoutCause =>
         ExecutorDecommissionReason.shuffleTimeout(
-          idleMs, timeoutMs, rpId, detail.shuffleIds, detail.cachedBlocksCount)
+          idleMs, timeoutMs, rpId, detail.shuffleIds, detail.cachedBlocksCount,
+          timeoutConfigSuffix = Some(detail.timeoutConfigSuffix))
       case StorageTimeoutCause =>
         ExecutorDecommissionReason.storageTimeout(
-          idleMs, timeoutMs, rpId, detail.cachedBlocksCount)
+          idleMs, timeoutMs, rpId, detail.cachedBlocksCount,
+          timeoutConfigSuffix = Some(detail.timeoutConfigSuffix))
       case _ =>
         ExecutorDecommissionReason.idleTimeout(
           idleMs,
@@ -646,7 +648,8 @@ private[spark] class ExecutorAllocationManager(
           shuffleCount = detail.shuffleIds,
           cachedBlocksCount = detail.cachedBlocksCount,
           hasShuffleData = detail.shuffleIds > 0,
-          hasCachedBlocks = detail.hasCachedBlocks)
+          hasCachedBlocks = detail.hasCachedBlocks,
+          timeoutConfigSuffix = Some(detail.timeoutConfigSuffix))
     }
   }
 

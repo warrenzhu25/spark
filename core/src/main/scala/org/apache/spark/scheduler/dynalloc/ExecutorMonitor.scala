@@ -34,15 +34,19 @@ import org.apache.spark.util.Clock
 
 private[spark] sealed trait ExecutorTimeoutCause {
   def reasonCode: String
+  def configSuffix: String
 }
 private[spark] case object IdleTimeoutCause extends ExecutorTimeoutCause {
   override val reasonCode: String = ExecutorDecommissionReason.IDLE_TIMEOUT_REASON
+  override val configSuffix: String = "executorIdleTimeout"
 }
 private[spark] case object StorageTimeoutCause extends ExecutorTimeoutCause {
   override val reasonCode: String = ExecutorDecommissionReason.STORAGE_TIMEOUT_REASON
+  override val configSuffix: String = "cachedExecutorIdleTimeout"
 }
 private[spark] case object ShuffleTimeoutCause extends ExecutorTimeoutCause {
   override val reasonCode: String = ExecutorDecommissionReason.SHUFFLE_TIMEOUT_REASON
+  override val configSuffix: String = "shuffleTracking.timeout"
 }
 private[spark] case class TimedOutExecutor(
     executorId: String,
@@ -50,6 +54,7 @@ private[spark] case class TimedOutExecutor(
     idleDurationNs: Long,
     timeoutWindowNs: Long,
     timeoutCause: ExecutorTimeoutCause,
+    timeoutConfigSuffix: String,
     hasCachedBlocks: Boolean,
     cachedBlocksCount: Int,
     shuffleIds: Int)
@@ -163,6 +168,7 @@ private[spark] class ExecutorMonitor(
             idleDurationNs = idleDurationNs,
             timeoutWindowNs = timeoutWindowNs,
             timeoutCause = exec.timeoutCause,
+            timeoutConfigSuffix = exec.timeoutCause.configSuffix,
             hasCachedBlocks = exec.cachedBlocks.nonEmpty,
             cachedBlocksCount = exec.cachedBlocksCount,
             shuffleIds = exec.shuffleIdsCount)
