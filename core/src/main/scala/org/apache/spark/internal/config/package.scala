@@ -2099,6 +2099,13 @@ package object config {
       .intConf
       .createWithDefault(10)
 
+  private[spark] val SHUFFLE_SKEW_MIN_SHUFFLE_WRITE_BYTES =
+    ConfigBuilder("spark.scheduler.shuffleSkew.minShuffleWriteBytes")
+      .doc("Minimum shuffle write bytes on one executor before being considered as skewed.")
+      .version("4.0.0")
+      .bytesConf(ByteUnit.BYTE)
+      .createWithDefaultString("256m")
+
   private[spark] val SHUFFLE_SKEW_MAX_EXECUTORS_NUM =
     ConfigBuilder("spark.scheduler.shuffleSkew.maxExecutorsNumber")
       .doc("Maximum number of executors being considered as skew. " +

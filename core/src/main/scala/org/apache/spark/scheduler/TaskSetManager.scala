@@ -23,6 +23,7 @@ import java.util.concurrent.{ConcurrentHashMap, ConcurrentLinkedQueue, TimeUnit}
 
 import scala.collection.mutable
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
+import scala.jdk.CollectionConverters._
 import scala.math.max
 import scala.util.control.NonFatal
 
@@ -31,6 +32,7 @@ import org.apache.spark.InternalAccumulator
 import org.apache.spark.InternalAccumulator.{input, shuffleRead}
 import org.apache.spark.TaskState.TaskState
 import org.apache.spark.errors.SparkCoreErrors
+import org.apache.spark.executor.TaskMetrics
 import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.internal.config._
 import org.apache.spark.resource.ResourceInformation
@@ -117,7 +119,8 @@ private[spark] class TaskSetManager(
   private val shuffleSkewRatio = conf.get(SHUFFLE_SKEW_RATIO)
   private val shuffleSkewMaxExecutorsNum = conf.get(SHUFFLE_SKEW_MAX_EXECUTORS_NUM)
   private val shuffleSkewMaxExecutorsRatio = conf.get(SHUFFLE_SKEW_MAX_EXECUTORS_RATIO)
-  private val shuffleSkewMinFinishedTasks = conf.get(SHUFFLE_SKEW_MIN_FINISHED_TASKS)
+  private val shuffleSkewMinShuffleWriteBytes =
+    conf.get(SHUFFLE_SKEW_MIN_SHUFFLE_WRITE_BYTES)
   private val filteredSkewExecutors = new mutable.HashMap[String, Int]().withDefaultValue(0)
 
   private[scheduler] val taskProcessRateCalculator =
@@ -140,6 +143,8 @@ private[spark] class TaskSetManager(
 
   val taskAttempts = Array.fill[List[TaskInfo]](numTasks)(Nil)
   private[scheduler] var tasksSuccessful = 0
+  private val shuffleWriteBytesByExecutorId =
+    new ConcurrentHashMap[String, Long]()
 
   val weight = 1
   val minShare = 0
@@ -844,6 +849,15 @@ private[spark] class TaskSetManager(
     if (!successful(index)) {
       tasksSuccessful += 1
       finishedTasksByExecutorId(info.executorId) += 1
+      if (isShuffleMapTasks()) {
+        val bytesWritten = getShuffleWriteBytes(result.accumUpdates)
+        if (bytesWritten > 0) {
+          shuffleWriteBytesByExecutorId.put(
+            info.executorId,
+            shuffleWriteBytesByExecutorId.getOrDefault(info.executorId, 0L) + bytesWritten
+          )
+        }
+      }
       logInfo(s"Finished ${taskName(info.taskId)} in ${info.duration} ms " +
         s"on ${info.host} (executor ${info.executorId}) ($tasksSuccessful/$numTasks)")
       // Mark successful and stop if all the tasks have succeeded.
@@ -1057,6 +1071,7 @@ private[spark] class TaskSetManager(
 
   /** Called by TaskScheduler when an executor is lost so we can re-enqueue our tasks */
   override def executorLost(execId: String, host: String, reason: ExecutorLossReason): Unit = {
+    shuffleWriteBytesByExecutorId.remove(execId)
     // Re-enqueue any tasks with potential shuffle data loss that ran on the failed executor
     // if this is a shuffle map stage, and we are not using an external shuffle server which
     // could serve the shuffle outputs or the executor lost is caused by decommission (which
@@ -1305,23 +1320,38 @@ private[spark] class TaskSetManager(
   }
 
   def getSkewedExecutors(totalExecutors: Int): Set[String] = {
-    if (!excludeShuffleSkewExecutors || totalExecutors <= 0) {
+    if (!excludeShuffleSkewExecutors || !isShuffleMapTasks() || totalExecutors <= 0) {
       return Set.empty
     }
-    val averageTaskNum = getAverageTaskNum(totalExecutors)
-    val maxSkewedNum = math.min(math.ceil(
-      totalExecutors * shuffleSkewMaxExecutorsRatio).toInt,
+
+    val writersWithBytes = shuffleWriteBytesByExecutorId.asScala
+      .filter { case (_, bytes) => bytes > 0 }
+    if (writersWithBytes.isEmpty) {
+      return Set.empty
+    }
+
+    val maxSkewedNum = math.min(
+      math.ceil(totalExecutors * shuffleSkewMaxExecutorsRatio).toInt,
       shuffleSkewMaxExecutorsNum)
-    // Filter for executors exceeding the skew threshold
-    val skewedExecutors = finishedTasksByExecutorId.filter { case (_, numOutputs) =>
-      numOutputs >= averageTaskNum * shuffleSkewRatio
+    if (maxSkewedNum <= 0) {
+      return Set.empty
+    }
+
+    val totalBytes = writersWithBytes.values.map(_.toDouble).sum
+    val writersCount = writersWithBytes.size
+    val avgBytesPerExecutor = totalBytes / writersCount
+    val threshold = math.max(avgBytesPerExecutor, shuffleSkewMinShuffleWriteBytes.toDouble) *
+      shuffleSkewRatio
+
+    val skewedExecutors = writersWithBytes.filter { case (_, bytes) =>
+      bytes.toDouble >= threshold
     }.toSeq
-      .sortBy(_._2)(Ordering.Int.reverse)
+      .sortBy(_._2)(Ordering.Long.reverse)
       .take(maxSkewedNum)
 
     if (skewedExecutors.nonEmpty) {
-      logDebug(s"Skewed executors (average $averageTaskNum) for stage " +
-        s"$stageId is $skewedExecutors")
+      logDebug(s"Skewed executors by shuffle write for stage $stageId " +
+        s"(avg=$avgBytesPerExecutor, threshold=$threshold): $skewedExecutors")
     }
     skewedExecutors.map(_._1).toSet
   }
@@ -1337,12 +1367,8 @@ private[spark] class TaskSetManager(
     shuffledOffers.filterNot(e => skewedExecutors.contains(e.executorId))
   }
 
-  private def getAverageTaskNum(totalExecutors: Int) = {
-    if (tasksSuccessful > 0 && totalExecutors > 0) {
-      math.max(tasksSuccessful / totalExecutors, shuffleSkewMinFinishedTasks)
-    } else {
-      shuffleSkewMinFinishedTasks
-    }
+  private def getShuffleWriteBytes(accums: Seq[AccumulatorV2[_, _]]): Long = {
+    TaskMetrics.fromAccumulators(accums).shuffleWriteMetrics.bytesWritten
   }
 
   /**
