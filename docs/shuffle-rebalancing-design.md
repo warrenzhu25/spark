@@ -29,15 +29,21 @@ The system is composed of three main components:
 
 ### 3.1 Imbalance Detection Algorithm
 The `ShuffleRebalanceManager` periodically checks the status of shuffle stages. An executor is considered for rebalancing if:
-1.  **Ratio Check:** Its shuffle data size exceeds the cluster average by a factor defined in `spark.shuffle.rebalance.threshold` (default 1.5x).
-2.  **Absolute Size Check:** The difference between the max and min executor sizes exceeds `spark.shuffle.rebalance.minSizeMB` (default 100MB).
+1.  **Eligibility Window:** Only runs once some tasks have finished but the stage is not done (`0.25 <= completedTasks/numTasks < 1.0`).
+2.  **Ratio Check:** Its shuffle data size exceeds the cluster average by a factor defined in `spark.shuffle.rebalance.threshold` (default 1.5x). Today the code uses an asymmetric cut: sources are `> avg * threshold` and targets are `< avg / threshold`.
+3.  **Absolute Size Check:** The difference between the max and min executor sizes exceeds `spark.shuffle.rebalance.minSizeMB` (default 100MB, computed as max−min).
 
 ### 3.2 Rebalancing Strategy (Greedy)
 The system employs a greedy planning algorithm:
 1.  Sort executors by shuffle data size.
-2.  Identify **Source** executors (those above the threshold) and **Target** executors (those below the threshold).
-3.  Pair Sources with Targets.
-4.  Select specific shuffle blocks (starting with smaller ones for granularity) to move from Source to Target until the Target reaches roughly the average load.
+2.  Identify **Source** executors (size > `avg * threshold`) and **Target** executors (size < `avg / threshold`). Sources are processed in descending size order so the largest holders are drained first.
+3.  Pair Sources with Targets in order; for each pair compute `moveSize = min(sourceSize - avg, avg - targetSize)`.
+4.  Skip pairs where `moveSize <= spark.shuffle.rebalance.minSizeMB`.
+5.  Select specific shuffle blocks **on the source**:
+    * Iterate map-output status entries located on the source executor.
+    * Enumerate all `(shuffleId, mapId, partitionId)` blocks and their sizes; sort ascending by block size.
+    * Pick blocks in ascending order until `moveSize` is met; small blocks go first to stay granular.
+6.  Emit one `ShuffleRebalanceOperation` per source/target pair with the chosen blocks. Targets advance once they are within ~10% of the avg; otherwise the source pointer advances (current implementation’s pointer moves after one attempt, so sources rarely serve multiple targets).
 
 ### 3.3 Execution Flow
 1.  **Trigger:** `ShuffleRebalanceManager` detects imbalance.
@@ -105,3 +111,46 @@ Replaces the simple "Greedy" strategy with an ROI (Return on Investment) calcula
     *   **Fix:** Refactor to use proper iterators or direct access to partition counts from `ShuffleDependency`.
 *   **Lack of Metrics:**
     *   **Fix:** Add `rebalance_bytes_moved`, `rebalance_ops_count`, and `rebalance_errors` to the metrics system for production visibility.
+*   **Implementation gaps (current code):**
+    * `BlockManagerId` for the target is hardcoded to localhost:7337; wire real IDs from the driver instead of placeholders.
+    * `spark.shuffle.rebalance.enableMultiLocation` / `maxLocationsPerBlock` are not enforced when calling `replicateBlock`; add guardrails or cleanup to avoid exceeding replica limits.
+    * There is no cleanup policy for extra replicas if multi-location is disabled; add delayed removal or TTL-driven cleanup.
+    * No stage-completion gate beyond the 25–100% window; add a final check to avoid planning once the stage is almost done (ties into the ROI/time-remaining heuristic).
+    * Planning stops after a single target per source due to pointer movement; adjust pairing so a hot source can feed multiple cold targets when needed.
+    * Targets are chosen by size only; consider rack-awareness and a cap on parallel moves per target to prevent hotspotting.
+
+## 7. New Gate: Disable Rebalance When Shuffle Fetch Wait Is High
+
+### 7.1 Problem
+Shuffle rebalancing is most useful when reducers are waiting on skewed sources. However, when average fetch wait for completed tasks is already high, extra transfers can worsen network congestion or extend stage time. We need a guard that avoids initiating new rebalancing once a shuffle map stage shows sustained high fetch wait in the tasks that already finished.
+
+### 7.2 Signal
+We can reuse existing shuffle read metrics already aggregated in `StageInfo`:
+* `stage.latestInfo.taskMetrics.shuffleReadMetrics.fetchWaitTime` — cumulative fetch wait (milliseconds) across finished tasks in the current attempt.
+* `completedTasks = stage.numTasks - stage.pendingPartitions.size` — count of successful tasks for the attempt.
+Derive `avgFetchWaitMs = fetchWaitTime / completedTasks`, guarded for zero and null metrics.
+
+### 7.3 Configuration
+New driver-side conf to gate the feature:
+* `spark.shuffle.rebalance.fetchWaitThresholdMs` (default `0` to preserve current behavior).
+  * `<= 0`: gating disabled, existing behavior unchanged.
+  * `> 0`: rebalance is skipped when `avgFetchWaitMs >= threshold`.
+Optional follow-up (not required initially): a ratio guard comparing fetch wait to executor runtime, if a relative measure is preferred.
+
+### 7.4 Driver-Side Flow
+1. In `ShuffleRebalanceManager.checkAndInitiateShuffleRebalance`, before computing imbalance:
+   * If gating is enabled, compute `avgFetchWaitMs` from the current stage attempt metrics.
+   * If metrics are missing or `completedTasks == 0`, allow rebalancing (no signal yet).
+2. When `avgFetchWaitMs >= threshold`, short-circuit and do not plan or launch moves for that shuffle attempt. Log once per shuffle attempt for observability.
+3. Maintain a per-shuffle attempt flag (thread-safe map) to avoid repeated computation/log spam. Clear the flag on stage retry (new attempt id) so retries can reconsider.
+
+### 7.5 Safety and Edge Cases
+* Metrics are only available after at least one task finishes; before that we skip gating.
+* Only successful task metrics are used; failed tasks do not contribute to `completedTasks`.
+* Multi-attempt handling: reset gating state when the stage attempt id changes.
+* Logging: include shuffle id, attempt, `avgFetchWaitMs`, threshold.
+
+### 7.6 Testing Strategy
+* Unit test: simulate a shuffle map stage with `completedTasks > 0` and synthetic `fetchWaitTime` exceeding the threshold; verify `checkAndInitiateShuffleRebalance` returns without planning moves.
+* Unit test: with threshold disabled or below average, verify the existing imbalance check proceeds.
+* Concurrency sanity: ensure the per-shuffle gating map is safe to read/write from the scheduler threads used by `ShuffleRebalanceManager`.
