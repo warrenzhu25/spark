@@ -72,6 +72,10 @@ private[spark] class ShuffleRebalanceManager(
   private val shuffleRebalanceThreadPool = ThreadUtils.newDaemonFixedThreadPool(
     shuffleRebalanceMaxConcurrent, "shuffle-rebalance-executor")
 
+  // Thread pool for monitoring rebalance batches
+  private val rebalanceMonitorThreadPool = ThreadUtils.newDaemonCachedThreadPool(
+    "shuffle-rebalance-monitor")
+
   /**
    * Check if shuffle rebalancing is needed for a given stage and initiate rebalancing if necessary.
    * This is called during stage execution when some tasks have completed.
@@ -106,7 +110,28 @@ private[spark] class ShuffleRebalanceManager(
           s"Moving ${Utils.bytesToString(rebalanceOperations.map(_.totalSize).sum)} " +
           s"in ${rebalanceOperations.size} operations.")
 
-        rebalanceOperations.foreach(executeShuffleRebalance)
+        // Execute rebalancing operations and track their futures
+        val futures = rebalanceOperations.map(executeShuffleRebalance).flatMap(_.toSeq)
+
+        // Monitor completion asynchronously
+        if (futures.nonEmpty) {
+          rebalanceMonitorThreadPool.submit(new Runnable {
+            override def run(): Unit = {
+              try {
+                // Wait for all operations to complete
+                futures.foreach(_.get())
+
+                // Check final status
+                val finalStats = getShuffleDistributionStats(shuffleId, numPartitions)
+                logInfo(s"Finished shuffle rebalance for shuffle $shuffleId. " +
+                  s"Final skew: ${f"${finalStats.imbalanceRatio}%.2f"}.")
+              } catch {
+                case e: Exception =>
+                  logWarning(s"Error monitoring rebalance for shuffle $shuffleId", e)
+              }
+            }
+          })
+        }
       }
     }
   }
@@ -252,17 +277,18 @@ private[spark] class ShuffleRebalanceManager(
   /**
    * Execute a shuffle rebalancing operation.
    */
-  private def executeShuffleRebalance(operation: ShuffleRebalanceOperation): Unit = {
+  private def executeShuffleRebalance(
+      operation: ShuffleRebalanceOperation): Option[java.util.concurrent.Future[_]] = {
     val moveKey = s"${operation.shuffleId}-${operation.sourceExecutor}-${operation.targetExecutor}"
 
     if (ongoingMoves.containsKey(moveKey)) {
       logWarning(s"Shuffle move already in progress: $moveKey")
-      return
+      return None
     }
 
     ongoingMoves.put(moveKey, operation)
 
-    shuffleRebalanceThreadPool.submit(new Runnable {
+    val future = shuffleRebalanceThreadPool.submit(new Runnable {
       override def run(): Unit = {
         try {
           logInfo(s"Starting shuffle rebalancing: ${operation.blocks.length} blocks " +
@@ -286,6 +312,7 @@ private[spark] class ShuffleRebalanceManager(
         }
       }
     })
+    Some(future)
   }
 
   /**
