@@ -88,7 +88,26 @@ private[spark] class ShuffleRebalanceManager(
 
     if (isShuffleRebalanceNeeded(executorSizes)) {
       val rebalanceOperations = planShuffleRebalancing(shuffleId, executorSizes, numPartitions)
-      rebalanceOperations.foreach(executeShuffleRebalance)
+
+      if (rebalanceOperations.nonEmpty) {
+        val currentStats = computeDistributionStats(executorSizes)
+
+        // Calculate projected sizes after rebalancing
+        val projectedSizes = mutable.Map(executorSizes.toSeq: _*)
+        rebalanceOperations.foreach { op =>
+          projectedSizes(op.sourceExecutor) -= op.totalSize
+          projectedSizes(op.targetExecutor) += op.totalSize
+        }
+        val projectedStats = computeDistributionStats(projectedSizes.toMap)
+
+        logInfo(s"Initiating shuffle rebalance for shuffle $shuffleId. " +
+          s"Current skew: ${f"${currentStats.imbalanceRatio}%.2f"}, " +
+          s"Projected skew: ${f"${projectedStats.imbalanceRatio}%.2f"}. " +
+          s"Moving ${Utils.bytesToString(rebalanceOperations.map(_.totalSize).sum)} " +
+          s"in ${rebalanceOperations.size} operations.")
+
+        rebalanceOperations.foreach(executeShuffleRebalance)
+      }
     }
   }
 
@@ -310,6 +329,11 @@ private[spark] class ShuffleRebalanceManager(
    */
   def getShuffleDistributionStats(shuffleId: Int, numPartitions: Int): ShuffleDistributionStats = {
     val executorSizes = getExecutorShuffleSizes(shuffleId, numPartitions)
+    computeDistributionStats(executorSizes)
+  }
+
+  private def computeDistributionStats(
+      executorSizes: Map[String, Long]): ShuffleDistributionStats = {
     val sizes = executorSizes.values.toSeq
 
     if (sizes.nonEmpty) {
