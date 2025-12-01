@@ -105,3 +105,39 @@ Replaces the simple "Greedy" strategy with an ROI (Return on Investment) calcula
     *   **Fix:** Refactor to use proper iterators or direct access to partition counts from `ShuffleDependency`.
 *   **Lack of Metrics:**
     *   **Fix:** Add `rebalance_bytes_moved`, `rebalance_ops_count`, and `rebalance_errors` to the metrics system for production visibility.
+
+## 7. New Gate: Disable Rebalance When Shuffle Fetch Wait Is High
+
+### 7.1 Problem
+Shuffle rebalancing is most useful when reducers are waiting on skewed sources. However, when average fetch wait for completed tasks is already high, extra transfers can worsen network congestion or extend stage time. We need a guard that avoids initiating new rebalancing once a shuffle map stage shows sustained high fetch wait in the tasks that already finished.
+
+### 7.2 Signal
+We can reuse existing shuffle read metrics already aggregated in `StageInfo`:
+* `stage.latestInfo.taskMetrics.shuffleReadMetrics.fetchWaitTime` — cumulative fetch wait (milliseconds) across finished tasks in the current attempt.
+* `completedTasks = stage.numTasks - stage.pendingPartitions.size` — count of successful tasks for the attempt.
+Derive `avgFetchWaitMs = fetchWaitTime / completedTasks`, guarded for zero and null metrics.
+
+### 7.3 Configuration
+New driver-side conf to gate the feature:
+* `spark.shuffle.rebalance.fetchWaitThresholdMs` (default `0` to preserve current behavior).
+  * `<= 0`: gating disabled, existing behavior unchanged.
+  * `> 0`: rebalance is skipped when `avgFetchWaitMs >= threshold`.
+Optional follow-up (not required initially): a ratio guard comparing fetch wait to executor runtime, if a relative measure is preferred.
+
+### 7.4 Driver-Side Flow
+1. In `ShuffleRebalanceManager.checkAndInitiateShuffleRebalance`, before computing imbalance:
+   * If gating is enabled, compute `avgFetchWaitMs` from the current stage attempt metrics.
+   * If metrics are missing or `completedTasks == 0`, allow rebalancing (no signal yet).
+2. When `avgFetchWaitMs >= threshold`, short-circuit and do not plan or launch moves for that shuffle attempt. Log once per shuffle attempt for observability.
+3. Maintain a per-shuffle attempt flag (thread-safe map) to avoid repeated computation/log spam. Clear the flag on stage retry (new attempt id) so retries can reconsider.
+
+### 7.5 Safety and Edge Cases
+* Metrics are only available after at least one task finishes; before that we skip gating.
+* Only successful task metrics are used; failed tasks do not contribute to `completedTasks`.
+* Multi-attempt handling: reset gating state when the stage attempt id changes.
+* Logging: include shuffle id, attempt, `avgFetchWaitMs`, threshold.
+
+### 7.6 Testing Strategy
+* Unit test: simulate a shuffle map stage with `completedTasks > 0` and synthetic `fetchWaitTime` exceeding the threshold; verify `checkAndInitiateShuffleRebalance` returns without planning moves.
+* Unit test: with threshold disabled or below average, verify the existing imbalance check proceeds.
+* Concurrency sanity: ensure the per-shuffle gating map is safe to read/write from the scheduler threads used by `ShuffleRebalanceManager`.
