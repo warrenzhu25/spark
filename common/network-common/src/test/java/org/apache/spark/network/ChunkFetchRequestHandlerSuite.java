@@ -20,6 +20,7 @@ package org.apache.spark.network;
 import io.netty.channel.ChannelHandlerContext;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.Timer;
@@ -133,7 +134,9 @@ public class ChunkFetchRequestHandlerSuite {
     Timer responseSendLatencyMillis = new Timer();
     Counter queueDepth = new Counter();
     ShuffleFetchMetrics metrics = new ShuffleFetchMetrics(
-      chunkFetchLatencyMillis, chunkReadLatencyMillis, responseSendLatencyMillis, queueDepth);
+      chunkFetchLatencyMillis, chunkReadLatencyMillis, responseSendLatencyMillis, queueDepth,
+      new ConcurrentHashMap<>(), new ConcurrentHashMap<>(),
+      new ConcurrentHashMap<>(), new ConcurrentHashMap<>());
 
     // Prepare the stream with one buffer
     List<ManagedBuffer> managedBuffers = new ArrayList<>();
@@ -194,7 +197,9 @@ public class ChunkFetchRequestHandlerSuite {
     Timer responseSendLatencyMillis = new Timer();
     Counter queueDepth = new Counter();
     ShuffleFetchMetrics metrics = new ShuffleFetchMetrics(
-      chunkFetchLatencyMillis, chunkReadLatencyMillis, responseSendLatencyMillis, queueDepth);
+      chunkFetchLatencyMillis, chunkReadLatencyMillis, responseSendLatencyMillis, queueDepth,
+      new ConcurrentHashMap<>(), new ConcurrentHashMap<>(),
+      new ConcurrentHashMap<>(), new ConcurrentHashMap<>());
 
     // Prepare the stream with a null buffer (will cause failure)
     List<ManagedBuffer> managedBuffers = new ArrayList<>();
@@ -287,7 +292,9 @@ public class ChunkFetchRequestHandlerSuite {
     Timer responseSendLatencyMillis = new Timer();
     Counter queueDepth = new Counter();
     ShuffleFetchMetrics metrics = new ShuffleFetchMetrics(
-      chunkFetchLatencyMillis, chunkReadLatencyMillis, responseSendLatencyMillis, queueDepth);
+      chunkFetchLatencyMillis, chunkReadLatencyMillis, responseSendLatencyMillis, queueDepth,
+      new ConcurrentHashMap<>(), new ConcurrentHashMap<>(),
+      new ConcurrentHashMap<>(), new ConcurrentHashMap<>());
 
     // Prepare the stream with one buffer
     List<ManagedBuffer> managedBuffers = new ArrayList<>();
@@ -339,7 +346,9 @@ public class ChunkFetchRequestHandlerSuite {
     Timer responseSendLatencyMillis = new Timer();
     Counter queueDepth = new Counter();
     ShuffleFetchMetrics metrics = new ShuffleFetchMetrics(
-      chunkFetchLatencyMillis, chunkReadLatencyMillis, responseSendLatencyMillis, queueDepth);
+      chunkFetchLatencyMillis, chunkReadLatencyMillis, responseSendLatencyMillis, queueDepth,
+      new ConcurrentHashMap<>(), new ConcurrentHashMap<>(),
+      new ConcurrentHashMap<>(), new ConcurrentHashMap<>());
 
     // Prepare the stream with buffers
     List<ManagedBuffer> managedBuffers = new ArrayList<>();
@@ -375,5 +384,92 @@ public class ChunkFetchRequestHandlerSuite {
     responseAndPromisePairs.get(1).getRight().finish(true);
     Assertions.assertEquals(0, queueDepth.getCount(),
       "Queue depth should be 0 after completing all requests");
+  }
+
+  @Test
+  public void testPerShuffleMetricsTracking() throws Exception {
+    RpcHandler rpcHandler = new NoOpRpcHandler();
+    OneForOneStreamManager streamManager = (OneForOneStreamManager) rpcHandler.getStreamManager();
+    Channel channel = mock(Channel.class);
+    ChannelHandlerContext context = mock(ChannelHandlerContext.class);
+    when(context.channel()).thenReturn(channel);
+    List<Pair<Object, ExtendedChannelPromise>> responseAndPromisePairs = new ArrayList<>();
+    when(channel.writeAndFlush(any())).thenAnswer(invocationOnMock0 -> {
+      Object response = invocationOnMock0.getArguments()[0];
+      ExtendedChannelPromise channelFuture = new ExtendedChannelPromise(channel);
+      responseAndPromisePairs.add(Pair.of(response, channelFuture));
+      return channelFuture;
+    });
+
+    // Create metrics with per-shuffle tracking enabled
+    Timer chunkFetchLatencyMillis = new Timer();
+    Timer chunkReadLatencyMillis = new Timer();
+    Timer responseSendLatencyMillis = new Timer();
+    Counter queueDepth = new Counter();
+    ConcurrentHashMap<Long, Integer> streamToShuffleMap = new ConcurrentHashMap<>();
+    ConcurrentHashMap<Integer, Timer> perShuffleLatencyTimers = new ConcurrentHashMap<>();
+    ConcurrentHashMap<Integer, Timer> perShuffleReadLatencyTimers = new ConcurrentHashMap<>();
+    ConcurrentHashMap<Integer, Timer> perShuffleResponseSendLatencyTimers = new ConcurrentHashMap<>();
+    ShuffleFetchMetrics metrics = new ShuffleFetchMetrics(
+      chunkFetchLatencyMillis, chunkReadLatencyMillis, responseSendLatencyMillis, queueDepth,
+      streamToShuffleMap, perShuffleLatencyTimers, perShuffleReadLatencyTimers,
+      perShuffleResponseSendLatencyTimers);
+
+    // Prepare two streams for different shuffles
+    List<ManagedBuffer> managedBuffers1 = new ArrayList<>();
+    managedBuffers1.add(new TestManagedBuffer(10));
+    long streamId1 = streamManager.registerStream("test-app", managedBuffers1.iterator(), channel);
+    streamToShuffleMap.put(streamId1, 100); // Shuffle ID 100
+
+    List<ManagedBuffer> managedBuffers2 = new ArrayList<>();
+    managedBuffers2.add(new TestManagedBuffer(20));
+    long streamId2 = streamManager.registerStream("test-app", managedBuffers2.iterator(), channel);
+    streamToShuffleMap.put(streamId2, 200); // Shuffle ID 200
+
+    TransportClient reverseClient = mock(TransportClient.class);
+    ChunkFetchRequestHandler requestHandler = new ChunkFetchRequestHandler(
+      reverseClient, streamManager, 1000L, false, metrics);
+
+    // Fetch from shuffle 100
+    RequestMessage request1 = new ChunkFetchRequest(new StreamChunkId(streamId1, 0));
+    requestHandler.channelRead(context, request1);
+    responseAndPromisePairs.get(0).getRight().finish(true);
+
+    // Fetch from shuffle 200
+    RequestMessage request2 = new ChunkFetchRequest(new StreamChunkId(streamId2, 0));
+    requestHandler.channelRead(context, request2);
+    responseAndPromisePairs.get(1).getRight().finish(true);
+
+    // Verify global metrics recorded both requests
+    Assertions.assertEquals(2, chunkFetchLatencyMillis.getCount(),
+      "Global metrics should record all requests");
+
+    // Verify per-shuffle metrics exist
+    Assertions.assertTrue(perShuffleLatencyTimers.containsKey(100),
+      "Per-shuffle timer should exist for shuffle 100");
+    Assertions.assertTrue(perShuffleLatencyTimers.containsKey(200),
+      "Per-shuffle timer should exist for shuffle 200");
+    Assertions.assertTrue(perShuffleReadLatencyTimers.containsKey(100),
+      "Per-shuffle read timer should exist for shuffle 100");
+    Assertions.assertTrue(perShuffleReadLatencyTimers.containsKey(200),
+      "Per-shuffle read timer should exist for shuffle 200");
+    Assertions.assertTrue(perShuffleResponseSendLatencyTimers.containsKey(100),
+      "Per-shuffle response timer should exist for shuffle 100");
+    Assertions.assertTrue(perShuffleResponseSendLatencyTimers.containsKey(200),
+      "Per-shuffle response timer should exist for shuffle 200");
+
+    // Verify per-shuffle metrics recorded one request each
+    Assertions.assertEquals(1, perShuffleLatencyTimers.get(100).getCount(),
+      "Per-shuffle timer for shuffle 100 should record 1 request");
+    Assertions.assertEquals(1, perShuffleLatencyTimers.get(200).getCount(),
+      "Per-shuffle timer for shuffle 200 should record 1 request");
+    Assertions.assertEquals(1, perShuffleReadLatencyTimers.get(100).getCount(),
+      "Per-shuffle read timer for shuffle 100 should record 1 request");
+    Assertions.assertEquals(1, perShuffleReadLatencyTimers.get(200).getCount(),
+      "Per-shuffle read timer for shuffle 200 should record 1 request");
+    Assertions.assertEquals(1, perShuffleResponseSendLatencyTimers.get(100).getCount(),
+      "Per-shuffle response timer for shuffle 100 should record 1 request");
+    Assertions.assertEquals(1, perShuffleResponseSendLatencyTimers.get(200).getCount(),
+      "Per-shuffle response timer for shuffle 200 should record 1 request");
   }
 }

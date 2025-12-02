@@ -18,6 +18,7 @@
 package org.apache.spark.network.server;
 
 import java.net.SocketAddress;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 import com.codahale.metrics.Counter;
@@ -68,13 +69,19 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
   private final Timer chunkReadLatencyMillis;
   private final Timer responseSendLatencyMillis;
   private final Counter chunkFetchQueueDepth;
+  // Per-shuffle metrics tracking
+  private final ConcurrentHashMap<Long, Integer> streamToShuffleMap;
+  private final ConcurrentHashMap<Integer, Timer> perShuffleLatencyTimers;
+  private final ConcurrentHashMap<Integer, Timer> perShuffleReadLatencyTimers;
+  private final ConcurrentHashMap<Integer, Timer> perShuffleResponseSendLatencyTimers;
 
   public ChunkFetchRequestHandler(
       TransportClient client,
       StreamManager streamManager,
       Long maxChunksBeingTransferred,
       boolean syncModeEnabled) {
-    this(client, streamManager, maxChunksBeingTransferred, syncModeEnabled, null, null, null, null);
+    this(client, streamManager, maxChunksBeingTransferred, syncModeEnabled,
+      null, null, null, null, null, null, null, null);
   }
 
   public ChunkFetchRequestHandler(
@@ -87,7 +94,11 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
       metrics != null ? metrics.getChunkFetchLatencyMillis() : null,
       metrics != null ? metrics.getChunkReadLatencyMillis() : null,
       metrics != null ? metrics.getResponseSendLatencyMillis() : null,
-      metrics != null ? metrics.getChunkFetchQueueDepth() : null);
+      metrics != null ? metrics.getChunkFetchQueueDepth() : null,
+      metrics != null ? metrics.getStreamToShuffleMap() : null,
+      metrics != null ? metrics.getPerShuffleLatencyTimers() : null,
+      metrics != null ? metrics.getPerShuffleReadLatencyTimers() : null,
+      metrics != null ? metrics.getPerShuffleResponseSendLatencyTimers() : null);
   }
 
   public ChunkFetchRequestHandler(
@@ -98,7 +109,11 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
       Timer chunkFetchLatencyMillis,
       Timer chunkReadLatencyMillis,
       Timer responseSendLatencyMillis,
-      Counter chunkFetchQueueDepth) {
+      Counter chunkFetchQueueDepth,
+      ConcurrentHashMap<Long, Integer> streamToShuffleMap,
+      ConcurrentHashMap<Integer, Timer> perShuffleLatencyTimers,
+      ConcurrentHashMap<Integer, Timer> perShuffleReadLatencyTimers,
+      ConcurrentHashMap<Integer, Timer> perShuffleResponseSendLatencyTimers) {
     this.client = client;
     this.streamManager = streamManager;
     this.maxChunksBeingTransferred = maxChunksBeingTransferred;
@@ -107,6 +122,10 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
     this.chunkReadLatencyMillis = chunkReadLatencyMillis;
     this.responseSendLatencyMillis = responseSendLatencyMillis;
     this.chunkFetchQueueDepth = chunkFetchQueueDepth;
+    this.streamToShuffleMap = streamToShuffleMap;
+    this.perShuffleLatencyTimers = perShuffleLatencyTimers;
+    this.perShuffleReadLatencyTimers = perShuffleReadLatencyTimers;
+    this.perShuffleResponseSendLatencyTimers = perShuffleResponseSendLatencyTimers;
   }
 
   @Override
@@ -114,6 +133,22 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
     logger.warn("Exception in connection from {}", cause,
       MDC.of(LogKeys.HOST_PORT, getRemoteAddress(ctx.channel())));
     ctx.close();
+  }
+
+  /**
+   * Records latency in the per-shuffle timer if per-shuffle tracking is enabled.
+   */
+  private void recordPerShuffleLatency(
+      long streamId,
+      long durationNanos,
+      ConcurrentHashMap<Integer, Timer> timers) {
+    if (streamToShuffleMap != null && timers != null) {
+      Integer shuffleId = streamToShuffleMap.get(streamId);
+      if (shuffleId != null) {
+        Timer perShuffleTimer = timers.computeIfAbsent(shuffleId, id -> new Timer());
+        perShuffleTimer.update(durationNanos, TimeUnit.NANOSECONDS);
+      }
+    }
   }
 
   @Override
@@ -163,6 +198,8 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
 
       if (chunkReadLatencyMillis != null) {
         chunkReadLatencyMillis.update(getChunkDurationNanos, TimeUnit.NANOSECONDS);
+        recordPerShuffleLatency(msg.streamChunkId.streamId(), getChunkDurationNanos,
+          perShuffleReadLatencyTimers);
       }
 
       if (buf == null) {
@@ -178,10 +215,15 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
           if (responseSendLatencyMillis != null) {
             long respondDurationNanos = System.nanoTime() - respondStartNanos;
             responseSendLatencyMillis.update(respondDurationNanos, TimeUnit.NANOSECONDS);
+            recordPerShuffleLatency(msg.streamChunkId.streamId(), respondDurationNanos,
+              perShuffleResponseSendLatencyTimers);
           }
           if (chunkFetchLatencyMillis != null) {
             long totalDuration = System.nanoTime() - requestStartNanos;
             chunkFetchLatencyMillis.update(totalDuration, TimeUnit.NANOSECONDS);
+            // Also record in per-shuffle timer
+            recordPerShuffleLatency(msg.streamChunkId.streamId(), totalDuration,
+              perShuffleLatencyTimers);
           }
           // Decrement queue depth after request completes
           if (chunkFetchQueueDepth != null) {
@@ -203,12 +245,17 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
         if (responseSendLatencyMillis != null) {
           long respondDurationNanos = System.nanoTime() - respondStartNanos;
           responseSendLatencyMillis.update(respondDurationNanos, TimeUnit.NANOSECONDS);
+          recordPerShuffleLatency(msg.streamChunkId.streamId(), respondDurationNanos,
+            perShuffleResponseSendLatencyTimers);
         }
 
         // Update total processing time (used for wait estimation)
         if (chunkFetchLatencyMillis != null) {
           long totalDuration = System.nanoTime() - requestStartNanos;
           chunkFetchLatencyMillis.update(totalDuration, TimeUnit.NANOSECONDS);
+          // Also record in per-shuffle timer
+          recordPerShuffleLatency(msg.streamChunkId.streamId(), totalDuration,
+            perShuffleLatencyTimers);
         }
 
         // Decrement queue depth after request completes

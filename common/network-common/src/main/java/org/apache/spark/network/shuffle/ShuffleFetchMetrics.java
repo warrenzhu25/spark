@@ -17,6 +17,8 @@
 
 package org.apache.spark.network.shuffle;
 
+import java.util.concurrent.ConcurrentHashMap;
+
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.Timer;
 
@@ -28,16 +30,28 @@ public class ShuffleFetchMetrics {
   private final Timer chunkReadLatencyMillis;
   private final Timer responseSendLatencyMillis;
   private final Counter chunkFetchQueueDepth;
+  private final ConcurrentHashMap<Long, Integer> streamToShuffleMap;
+  private final ConcurrentHashMap<Integer, Timer> perShuffleLatencyTimers;
+  private final ConcurrentHashMap<Integer, Timer> perShuffleReadLatencyTimers;
+  private final ConcurrentHashMap<Integer, Timer> perShuffleResponseSendLatencyTimers;
 
   public ShuffleFetchMetrics(
       Timer chunkFetchLatencyMillis,
       Timer chunkReadLatencyMillis,
       Timer responseSendLatencyMillis,
-      Counter chunkFetchQueueDepth) {
+      Counter chunkFetchQueueDepth,
+      ConcurrentHashMap<Long, Integer> streamToShuffleMap,
+      ConcurrentHashMap<Integer, Timer> perShuffleLatencyTimers,
+      ConcurrentHashMap<Integer, Timer> perShuffleReadLatencyTimers,
+      ConcurrentHashMap<Integer, Timer> perShuffleResponseSendLatencyTimers) {
     this.chunkFetchLatencyMillis = chunkFetchLatencyMillis;
     this.chunkReadLatencyMillis = chunkReadLatencyMillis;
     this.responseSendLatencyMillis = responseSendLatencyMillis;
     this.chunkFetchQueueDepth = chunkFetchQueueDepth;
+    this.streamToShuffleMap = streamToShuffleMap;
+    this.perShuffleLatencyTimers = perShuffleLatencyTimers;
+    this.perShuffleReadLatencyTimers = perShuffleReadLatencyTimers;
+    this.perShuffleResponseSendLatencyTimers = perShuffleResponseSendLatencyTimers;
   }
 
   public Timer getChunkFetchLatencyMillis() {
@@ -54,5 +68,21 @@ public class ShuffleFetchMetrics {
 
   public Counter getChunkFetchQueueDepth() {
     return chunkFetchQueueDepth;
+  }
+
+  public ConcurrentHashMap<Long, Integer> getStreamToShuffleMap() {
+    return streamToShuffleMap;
+  }
+
+  public ConcurrentHashMap<Integer, Timer> getPerShuffleLatencyTimers() {
+    return perShuffleLatencyTimers;
+  }
+
+  public ConcurrentHashMap<Integer, Timer> getPerShuffleReadLatencyTimers() {
+    return perShuffleReadLatencyTimers;
+  }
+
+  public ConcurrentHashMap<Integer, Timer> getPerShuffleResponseSendLatencyTimers() {
+    return perShuffleResponseSendLatencyTimers;
   }
 }

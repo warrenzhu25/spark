@@ -26,6 +26,7 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
@@ -166,6 +167,8 @@ public class ExternalBlockHandler extends RpcHandler
           }
           streamId = streamManager.registerStream(client.getClientId(), iterator,
             client.getChannel(), true);
+          // Track stream → shuffle mapping for per-shuffle metrics
+          metrics.registerStreamToShuffle(streamId, msg.shuffleId);
         } else {
           // For the compatibility with the old version, still keep the support for OpenBlocks.
           OpenBlocks msg = (OpenBlocks) msgObj;
@@ -344,6 +347,16 @@ public class ExternalBlockHandler extends RpcHandler
         new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS);
     // NEW: Current queue depth of chunk fetch requests being processed
     private final Counter chunkFetchQueueDepth = new Counter();
+    // Per-shuffle latency tracking: maps stream ID to shuffle ID
+    private final ConcurrentHashMap<Long, Integer> streamToShuffleMap = new ConcurrentHashMap<>();
+    // Per-shuffle latency timers: maps shuffle ID to its latency timer
+    private final ConcurrentHashMap<Integer, Timer> perShuffleLatencyTimers = new ConcurrentHashMap<>();
+    // Per-shuffle read latency timers
+    private final ConcurrentHashMap<Integer, Timer> perShuffleReadLatencyTimers =
+      new ConcurrentHashMap<>();
+    // Per-shuffle response send latency timers
+    private final ConcurrentHashMap<Integer, Timer> perShuffleResponseSendLatencyTimers =
+      new ConcurrentHashMap<>();
     // Block transfer rate in blocks per second
     private final Meter blockTransferRate = new Meter();
     // Block fetch message rate per second. When using non-batch fetches
@@ -410,12 +423,47 @@ public class ExternalBlockHandler extends RpcHandler
         chunkFetchLatencyMillis,
         chunkReadLatencyMillis,
         responseSendLatencyMillis,
-        chunkFetchQueueDepth);
+        chunkFetchQueueDepth,
+        streamToShuffleMap,
+        perShuffleLatencyTimers,
+        perShuffleReadLatencyTimers,
+        perShuffleResponseSendLatencyTimers);
+    }
+
+    /**
+     * Register a mapping from stream ID to shuffle ID for per-shuffle metrics tracking.
+     */
+    public void registerStreamToShuffle(long streamId, int shuffleId) {
+      streamToShuffleMap.put(streamId, shuffleId);
+    }
+
+    /**
+     * Get or create a per-shuffle latency timer for the given shuffle ID.
+     */
+    private Timer getOrCreatePerShuffleTimer(int shuffleId) {
+      return perShuffleLatencyTimers.computeIfAbsent(shuffleId,
+        id -> new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS));
+    }
+    private Timer getOrCreatePerShuffleReadTimer(int shuffleId) {
+      return perShuffleReadLatencyTimers.computeIfAbsent(shuffleId,
+        id -> new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS));
+    }
+    private Timer getOrCreatePerShuffleResponseSendTimer(int shuffleId) {
+      return perShuffleResponseSendLatencyTimers.computeIfAbsent(shuffleId,
+        id -> new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS));
     }
 
     @Override
     public Map<String, Metric> getMetrics() {
-      return allMetrics;
+      // Add per-shuffle metrics to the metrics map
+      Map<String, Metric> metricsWithPerShuffle = new HashMap<>(allMetrics);
+      perShuffleLatencyTimers.forEach((shuffleId, timer) ->
+        metricsWithPerShuffle.put("shuffle_" + shuffleId + "_latencyMillis", timer));
+      perShuffleReadLatencyTimers.forEach((shuffleId, timer) ->
+        metricsWithPerShuffle.put("shuffle_" + shuffleId + "_readLatencyMillis", timer));
+      perShuffleResponseSendLatencyTimers.forEach((shuffleId, timer) ->
+        metricsWithPerShuffle.put("shuffle_" + shuffleId + "_responseSendLatencyMillis", timer));
+      return metricsWithPerShuffle;
     }
   }
 

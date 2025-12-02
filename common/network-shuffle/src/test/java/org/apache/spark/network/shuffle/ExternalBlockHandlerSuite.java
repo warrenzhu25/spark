@@ -21,11 +21,13 @@ import java.io.*;
 import java.nio.ByteBuffer;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.zip.CheckedInputStream;
 import java.util.zip.Checksum;
 
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.Metric;
+import com.codahale.metrics.MetricSet;
 import com.codahale.metrics.Timer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -59,6 +61,8 @@ import org.apache.spark.network.shuffle.protocol.RegisterExecutor;
 import org.apache.spark.network.shuffle.protocol.StreamHandle;
 import org.apache.spark.network.shuffle.protocol.UploadBlock;
 import org.apache.spark.network.util.JavaUtils;
+import org.apache.spark.network.util.MapConfigProvider;
+import org.apache.spark.network.util.TransportConf;
 
 public class ExternalBlockHandlerSuite {
   TransportClient client = mock(TransportClient.class);
@@ -599,5 +603,48 @@ public class ExternalBlockHandlerSuite {
       "Should follow naming pattern");
     assertTrue(responseSendName.endsWith("LatencyMillis"),
       "Should follow naming pattern");
+  }
+
+  @Test
+  public void testPerShuffleMetricsExposure() throws IOException {
+    TransportConf conf = new TransportConf("shuffle", MapConfigProvider.EMPTY);
+    File tempDir = JavaUtils.createDirectory(System.getProperty("java.io.tmpdir"),
+      "per-shuffle-metrics");
+    ExternalBlockHandler handler = new ExternalBlockHandler(conf, tempDir);
+
+    // Simulate per-shuffle metrics creation by updating the exposed maps
+    ShuffleFetchMetrics fetchMetrics =
+      ((ShuffleMetricsSource) handler).getShuffleFetchMetrics();
+    fetchMetrics.getStreamToShuffleMap().put(1L, 42);
+    Timer perShuffleTimer = new Timer();
+    perShuffleTimer.update(1, TimeUnit.MILLISECONDS);
+    fetchMetrics.getPerShuffleLatencyTimers().put(42, perShuffleTimer);
+    Timer perShuffleReadTimer = new Timer();
+    perShuffleReadTimer.update(2, TimeUnit.MILLISECONDS);
+    fetchMetrics.getPerShuffleReadLatencyTimers().put(42, perShuffleReadTimer);
+    Timer perShuffleResponseTimer = new Timer();
+    perShuffleResponseTimer.update(3, TimeUnit.MILLISECONDS);
+    fetchMetrics.getPerShuffleResponseSendLatencyTimers().put(42, perShuffleResponseTimer);
+
+    MetricSet allMetrics = handler.getAllMetrics();
+    Map<String, Metric> initialMetrics = allMetrics.getMetrics();
+
+    // Verify per-shuffle timer is exposed via metrics map
+    assertTrue(initialMetrics.containsKey("shuffle_42_latencyMillis"),
+      "Per-shuffle latency metric should be exposed with shuffle-prefixed name");
+    assertEquals(1,
+      ((Timer) initialMetrics.get("shuffle_42_latencyMillis")).getCount(),
+      "Per-shuffle timer should carry the updates made through the metrics object");
+    assertTrue(initialMetrics.containsKey("shuffle_42_readLatencyMillis"),
+      "Per-shuffle read latency metric should be exposed");
+    assertEquals(1,
+      ((Timer) initialMetrics.get("shuffle_42_readLatencyMillis")).getCount(),
+      "Per-shuffle read timer should carry updates");
+    assertTrue(initialMetrics.containsKey("shuffle_42_responseSendLatencyMillis"),
+      "Per-shuffle response send latency metric should be exposed");
+    assertEquals(1,
+      ((Timer) initialMetrics.get("shuffle_42_responseSendLatencyMillis")).getCount(),
+      "Per-shuffle response send timer should carry updates");
+    tempDir.delete();
   }
 }
