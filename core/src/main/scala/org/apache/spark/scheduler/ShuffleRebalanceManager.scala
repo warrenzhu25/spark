@@ -46,6 +46,7 @@ private[spark] class ShuffleRebalanceManager(
   private val shuffleRebalanceMinSizeMB = conf.get(SHUFFLE_REBALANCE_MIN_SIZE_MB)
   private val shuffleRebalanceCheckIntervalMs = conf.get(SHUFFLE_REBALANCE_CHECK_INTERVAL_MS)
   private val shuffleRebalanceMaxConcurrent = conf.get(SHUFFLE_REBALANCE_MAX_CONCURRENT)
+  private val fetchWaitThresholdMs = conf.get(SHUFFLE_REBALANCE_FETCH_WAIT_THRESHOLD_MS)
 
   // Multi-location configuration
   private val enableMultiLocation = conf.get(SHUFFLE_REBALANCE_ENABLE_MULTI_LOCATION)
@@ -68,6 +69,9 @@ private[spark] class ShuffleRebalanceManager(
   // Track ongoing shuffle rebalancings
   private val ongoingMoves = new ConcurrentHashMap[String, ShuffleRebalanceOperation]()
 
+  // Track which shuffle attempts have already logged fetch wait gating to avoid log spam
+  private val loggedFetchWaitGating = new ConcurrentHashMap[Int, java.lang.Boolean]()
+
   // Thread pool for shuffle rebalancing operations
   private val shuffleRebalanceThreadPool = ThreadUtils.newDaemonFixedThreadPool(
     shuffleRebalanceMaxConcurrent, "shuffle-rebalance-executor")
@@ -82,6 +86,28 @@ private[spark] class ShuffleRebalanceManager(
    */
   def checkAndInitiateShuffleRebalance(stage: ShuffleMapStage, completedTasks: Int): Unit = {
     if (!shuffleRebalanceEnabled) return
+
+    if (fetchWaitThresholdMs > 0 && completedTasks > 0) {
+      val stageInfo = stage.latestInfo
+      val taskMetrics = stageInfo.taskMetrics
+      if (taskMetrics != null) {
+        val totalFetchWaitMs = taskMetrics.shuffleReadMetrics.fetchWaitTime
+        val avgFetchWaitMs = totalFetchWaitMs / completedTasks
+
+        if (avgFetchWaitMs >= fetchWaitThresholdMs) {
+          val shuffleId = stage.shuffleDep.shuffleId
+          val attemptKey = shuffleId * 1000 + stageInfo.attemptNumber()
+          if (loggedFetchWaitGating.putIfAbsent(attemptKey, true) == null) {
+            val message =
+              s"Skipping shuffle rebalance for shuffle $shuffleId " +
+                s"(stage ${stage.id}, attempt ${stageInfo.attemptNumber()}) due to high fetch " +
+                s"wait: avgFetchWaitMs=$avgFetchWaitMs >= threshold=$fetchWaitThresholdMs"
+            logInfo(message)
+          }
+          return
+        }
+      }
+    }
 
     val completionRatio = completedTasks.toDouble / stage.numTasks
     if (completionRatio < 0.25 || completionRatio >= 1.0) return

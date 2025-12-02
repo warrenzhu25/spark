@@ -53,7 +53,7 @@ import org.apache.spark.util.io.{ChunkedByteBuffer, ChunkedByteBufferOutputStrea
  *
  * All public methods of this class are thread-safe.
  */
-private class ShuffleStatus(
+private[spark] class ShuffleStatus(
     numPartitions: Int,
     numReducers: Int = -1) extends Logging {
 

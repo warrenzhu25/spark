@@ -787,6 +787,16 @@ package object config {
         "Invalid location selection strategy")
       .createWithDefault("LOCALITY_PREFERRED")
 
+  private[spark] val SHUFFLE_REBALANCE_FETCH_WAIT_THRESHOLD_MS =
+    ConfigBuilder("spark.shuffle.rebalance.fetchWaitThresholdMs")
+      .doc("Maximum average fetch wait time (in milliseconds) per task before disabling " +
+        "shuffle rebalancing. When the average fetch wait time exceeds this threshold, " +
+        "rebalancing is skipped to avoid adding network load during high contention. " +
+        "Set to 0 or negative to disable this check (default behavior).")
+      .version("4.0.0")
+      .longConf
+      .createWithDefault(0L)
+
   private[spark] val SHUFFLE_SERVICE_DB_ENABLED =
     ConfigBuilder("spark.shuffle.service.db.enabled")
       .doc("Whether to use db in ExternalShuffleService. Note that this only affects " +

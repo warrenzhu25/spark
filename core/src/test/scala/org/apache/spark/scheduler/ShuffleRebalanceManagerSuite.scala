@@ -17,15 +17,136 @@
 
 package org.apache.spark.scheduler
 
-import org.mockito.Mockito.{mock, when}
+import java.util.concurrent.ConcurrentHashMap
 
-import org.apache.spark.{MapOutputTrackerMaster, ShuffleDependency, SparkConf, SparkFunSuite}
+import scala.collection.JavaConverters._
+
+import org.mockito.Mockito.{mock, verifyNoInteractions, when}
+
+import org.apache.spark.{MapOutputTrackerMaster, ShuffleDependency, ShuffleStatus, SparkConf, SparkFunSuite}
+import org.apache.spark.executor.TaskMetrics
 import org.apache.spark.internal.config._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.BlockManagerMaster
 import org.apache.spark.util.CallSite
 
 class ShuffleRebalanceManagerSuite extends SparkFunSuite {
+
+  test("shuffle rebalance gated when fetch wait is high") {
+    val conf = new SparkConf()
+      .set(SHUFFLE_REBALANCE_ENABLED, true)
+      .set(SHUFFLE_REBALANCE_FETCH_WAIT_THRESHOLD_MS, 1000L)
+
+    val mapOutputTracker = mock(classOf[MapOutputTrackerMaster])
+    val blockManagerMaster = mock(classOf[BlockManagerMaster])
+    val manager = new ShuffleRebalanceManager(conf, mapOutputTracker, blockManagerMaster)
+
+    val stage = createStageWithFetchWait(
+      shuffleId = 1,
+      numTasks = 100,
+      fetchWaitMs = Some(60000L),
+      numPartitions = 2)
+
+    manager.checkAndInitiateShuffleRebalance(stage, completedTasks = 50)
+
+    verifyNoInteractions(mapOutputTracker)
+  }
+
+  test("shuffle rebalance proceeds when fetch wait is below threshold") {
+    val conf = new SparkConf()
+      .set(SHUFFLE_REBALANCE_ENABLED, true)
+      .set(SHUFFLE_REBALANCE_FETCH_WAIT_THRESHOLD_MS, 1000L)
+
+    val mapOutputTracker = mock(classOf[MapOutputTrackerMaster])
+    val shuffleStatuses = createShuffleStatuses(shuffleId = 1, numMaps = 1)
+    when(mapOutputTracker.shuffleStatuses)
+      .thenReturn(shuffleStatuses.asInstanceOf[collection.concurrent.Map[Int, ShuffleStatus]])
+
+    val blockManagerMaster = mock(classOf[BlockManagerMaster])
+    val manager = new ShuffleRebalanceManager(conf, mapOutputTracker, blockManagerMaster)
+
+    val stage = createStageWithFetchWait(
+      shuffleId = 1,
+      numTasks = 100,
+      fetchWaitMs = Some(25000L),
+      numPartitions = 2)
+
+    manager.checkAndInitiateShuffleRebalance(stage, completedTasks = 50)
+
+    assert(loggedFetchWaitAttempts(manager).isEmpty)
+  }
+
+  test("shuffle rebalance gate disabled when threshold is zero or negative") {
+    val conf = new SparkConf()
+      .set(SHUFFLE_REBALANCE_ENABLED, true)
+      .set(SHUFFLE_REBALANCE_FETCH_WAIT_THRESHOLD_MS, 0L)
+
+    val mapOutputTracker = mock(classOf[MapOutputTrackerMaster])
+    val shuffleStatuses = createShuffleStatuses(shuffleId = 1, numMaps = 1)
+    when(mapOutputTracker.shuffleStatuses)
+      .thenReturn(shuffleStatuses.asInstanceOf[collection.concurrent.Map[Int, ShuffleStatus]])
+
+    val blockManagerMaster = mock(classOf[BlockManagerMaster])
+    val manager = new ShuffleRebalanceManager(conf, mapOutputTracker, blockManagerMaster)
+
+    val stage = createStageWithFetchWait(
+      shuffleId = 1,
+      numTasks = 100,
+      fetchWaitMs = Some(600000L),
+      numPartitions = 2)
+
+    manager.checkAndInitiateShuffleRebalance(stage, completedTasks = 50)
+
+    assert(loggedFetchWaitAttempts(manager).isEmpty)
+  }
+
+  test("shuffle rebalance handles missing task metrics gracefully") {
+    val conf = new SparkConf()
+      .set(SHUFFLE_REBALANCE_ENABLED, true)
+      .set(SHUFFLE_REBALANCE_FETCH_WAIT_THRESHOLD_MS, 1000L)
+
+    val mapOutputTracker = mock(classOf[MapOutputTrackerMaster])
+    val shuffleStatuses = createShuffleStatuses(shuffleId = 1, numMaps = 1)
+    when(mapOutputTracker.shuffleStatuses)
+      .thenReturn(shuffleStatuses.asInstanceOf[collection.concurrent.Map[Int, ShuffleStatus]])
+
+    val blockManagerMaster = mock(classOf[BlockManagerMaster])
+    val manager = new ShuffleRebalanceManager(conf, mapOutputTracker, blockManagerMaster)
+
+    val stage = createStageWithFetchWait(
+      shuffleId = 1,
+      numTasks = 100,
+      fetchWaitMs = None,
+      numPartitions = 2)
+
+    manager.checkAndInitiateShuffleRebalance(stage, completedTasks = 50)
+
+    assert(loggedFetchWaitAttempts(manager).isEmpty)
+  }
+
+  test("shuffle rebalance logs fetch wait gating once per attempt") {
+    val conf = new SparkConf()
+      .set(SHUFFLE_REBALANCE_ENABLED, true)
+      .set(SHUFFLE_REBALANCE_FETCH_WAIT_THRESHOLD_MS, 1000L)
+
+    val mapOutputTracker = mock(classOf[MapOutputTrackerMaster])
+    val blockManagerMaster = mock(classOf[BlockManagerMaster])
+    val manager = new ShuffleRebalanceManager(conf, mapOutputTracker, blockManagerMaster)
+
+    val stage = createStageWithFetchWait(
+      shuffleId = 1,
+      numTasks = 100,
+      fetchWaitMs = Some(60000L),
+      numPartitions = 2,
+      attemptNumber = 0)
+
+    manager.checkAndInitiateShuffleRebalance(stage, completedTasks = 50)
+    manager.checkAndInitiateShuffleRebalance(stage, completedTasks = 51)
+    manager.checkAndInitiateShuffleRebalance(stage, completedTasks = 52)
+
+    assert(loggedFetchWaitAttempts(manager).size === 1)
+    verifyNoInteractions(mapOutputTracker)
+  }
 
   test("shuffle move detection with balanced executors") {
     val conf = new SparkConf()
@@ -157,6 +278,85 @@ class ShuffleRebalanceManagerSuite extends SparkFunSuite {
     assert(source.metricRegistry.getGauges.containsKey("rebalanceOpsCount"))
     assert(source.metricRegistry.getGauges.containsKey("rebalanceBytesMoved"))
     assert(source.metricRegistry.getGauges.containsKey("rebalanceErrors"))
+  }
+
+  private def createStageWithFetchWait(
+      shuffleId: Int,
+      numTasks: Int,
+      fetchWaitMs: Option[Long],
+      numPartitions: Int,
+      attemptNumber: Int = 0): ShuffleMapStage = {
+    val stage = mock(classOf[ShuffleMapStage])
+    val partitioner = mock(classOf[org.apache.spark.Partitioner])
+    when(partitioner.numPartitions).thenReturn(numPartitions)
+
+    val shuffleDep = mock(classOf[ShuffleDependency[_, _, _]])
+    when(shuffleDep.shuffleId).thenReturn(shuffleId)
+    when(shuffleDep.partitioner).thenReturn(partitioner)
+
+    val stageInfo = createStageInfo(
+      stageId = 1,
+      attemptId = attemptNumber,
+      numTasks = numTasks,
+      shuffleId = shuffleId,
+      fetchWaitMs = fetchWaitMs)
+
+    val dep: ShuffleDependency[_, _, _] = shuffleDep
+    when(stage.id).thenReturn(1)
+    when(stage.numTasks).thenReturn(numTasks)
+    when(stage.shuffleDep).thenAnswer(_ => dep.asInstanceOf[ShuffleDependency[Any, Any, Any]])
+    when(stage.latestInfo).thenReturn(stageInfo)
+    stage
+  }
+
+  private def createStageInfo(
+      stageId: Int,
+      attemptId: Int,
+      numTasks: Int,
+      shuffleId: Int,
+      fetchWaitMs: Option[Long]): StageInfo = {
+    val taskMetrics = fetchWaitMs.map { wait =>
+      val metrics = new TaskMetrics()
+      metrics.shuffleReadMetrics.setFetchWaitTime(wait)
+      metrics
+    }.orNull
+
+    new StageInfo(
+      stageId,
+      attemptId,
+      s"stage-$stageId",
+      numTasks,
+      Seq.empty,
+      Seq.empty,
+      "details",
+      taskMetrics,
+      Seq.empty,
+      Some(shuffleId),
+      resourceProfileId = 0)
+  }
+
+  private def createShuffleStatuses(
+      shuffleId: Int,
+      numMaps: Int,
+      mapStatuses: Seq[MapStatus] = Seq.empty): collection.concurrent.Map[Int, ShuffleStatus] = {
+    val shuffleStatus = new ShuffleStatus(numMaps)
+    mapStatuses.zipWithIndex.foreach { case (status, idx) =>
+      if (idx < shuffleStatus.mapStatuses.length) {
+        shuffleStatus.mapStatuses(idx) = status
+      }
+    }
+
+    val statuses = new ConcurrentHashMap[Int, ShuffleStatus]().asScala
+    statuses.put(shuffleId, shuffleStatus)
+    statuses
+  }
+
+  private def loggedFetchWaitAttempts(manager: ShuffleRebalanceManager): Set[Int] = {
+    val field = classOf[ShuffleRebalanceManager].getDeclaredField("loggedFetchWaitGating")
+    field.setAccessible(true)
+    val logged = field.get(manager)
+      .asInstanceOf[ConcurrentHashMap[Int, java.lang.Boolean]]
+    logged.keySet().asScala.map(_.intValue()).toSet
   }
 
   private def createMockShuffleMapStage(shuffleId: Int): ShuffleMapStage = {
