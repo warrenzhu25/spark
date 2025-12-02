@@ -1517,6 +1517,23 @@ package object config {
       .intConf
       .createWithDefault(Integer.MAX_VALUE)
 
+  private[spark] val SHUFFLE_MULTI_LOCATION_ENABLED =
+    ConfigBuilder("spark.shuffle.multiLocation.enabled")
+      .doc("When enabled, allows shuffle outputs to be stored at multiple locations " +
+        "for improved fault tolerance and load balancing.")
+      .version("4.0.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  private[spark] val SHUFFLE_MULTI_LOCATION_MAX_REPLICATES =
+    ConfigBuilder("spark.shuffle.multiLocation.maxReplicates")
+      .doc("Maximum number of locations where each shuffle output can be replicated. " +
+        "Higher values improve fault tolerance but increase storage overhead.")
+      .version("4.0.0")
+      .intConf
+      .checkValue(v => v > 0 && v <= 10, "Max replicates must be between 1 and 10.")
+      .createWithDefault(3)
+
   private[spark] val SHUFFLE_MAP_OUTPUT_PARALLEL_AGGREGATION_THRESHOLD =
     ConfigBuilder("spark.shuffle.mapOutput.parallelAggregationThreshold")
       .internal()

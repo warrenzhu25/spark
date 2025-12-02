@@ -216,6 +216,113 @@ class MapOutputTrackerSuite extends SparkFunSuite with LocalSparkContext {
     intercept[IllegalArgumentException] { newTrackerMaster(newConf) }
   }
 
+
+  test("MapStatus interface default multi-location behavior") {
+    val loc = BlockManagerId("exec1", "host1", 1000)
+    val status = MapStatus(loc, Array(1000L, 2000L), 5)
+
+    assert(status.location === loc)
+    assert(status.locations === Seq(loc))
+
+    status.addLocation(BlockManagerId("exec2", "host2", 1000))
+    assert(status.locations === Seq(loc))
+  }
+
+  test("CompressedMapStatus multi-location functionality") {
+    val loc1 = BlockManagerId("exec1", "host1", 1000)
+    val loc2 = BlockManagerId("exec2", "host2", 1000)
+    val loc3 = BlockManagerId("exec3", "host3", 1000)
+    val status = new CompressedMapStatus(loc1, Array(1000L, 2000L), 5)
+
+    assert(status.location === loc1)
+    assert(status.locations === Seq(loc1))
+
+    status.addLocation(loc2)
+    assert(status.locations === Seq(loc1, loc2))
+
+    status.addLocation(loc3)
+    assert(status.locations === Seq(loc1, loc2, loc3))
+
+    status.addLocation(loc2)
+    assert(status.locations === Seq(loc1, loc2, loc3))
+
+    status.updateLocation(BlockManagerId("exec1-new", "host1", 2000))
+    assert(status.location.executorId === "exec1-new")
+    assert(status.locations.head.executorId === "exec1-new")
+  }
+
+  test("HighlyCompressedMapStatus multi-location functionality") {
+    val loc1 = BlockManagerId("exec1", "host1", 1000)
+    val loc2 = BlockManagerId("exec2", "host2", 1000)
+    val loc3 = BlockManagerId("exec3", "host3", 1000)
+    val sizes = Array.fill(2000)(1000L)
+    val status = HighlyCompressedMapStatus(loc1, sizes, 5)
+
+    assert(status.location === loc1)
+    assert(status.locations === Seq(loc1))
+
+    status.addLocation(loc2)
+    assert(status.locations === Seq(loc1, loc2))
+
+    status.addLocation(loc3)
+    assert(status.locations === Seq(loc1, loc2, loc3))
+
+    status.updateLocation(BlockManagerId("exec1-new", "host1", 2000))
+    assert(status.location.executorId === "exec1-new")
+    assert(status.locations.head.executorId === "exec1-new")
+  }
+
+  test("ShuffleStatus multi-location management") {
+    val tracker = newTrackerMaster()
+    tracker.registerShuffle(0, 2, MergeStatus.SHUFFLE_PUSH_DUMMY_NUM_REDUCES)
+
+    val loc1 = BlockManagerId("exec1", "host1", 1000)
+    val loc2 = BlockManagerId("exec2", "host2", 1000)
+    val status1 = MapStatus(loc1, Array(1000L, 2000L), 5)
+    val status2 = MapStatus(loc2, Array(1500L, 2500L), 6)
+
+    tracker.registerMapOutput(0, 0, status1)
+    tracker.registerMapOutput(0, 1, status2)
+
+    val shuffleStatus = tracker.shuffleStatuses(0)
+    shuffleStatus.addMapOutputLocation(5, BlockManagerId("exec3", "host3", 1000))
+
+    val retrievedStatus = shuffleStatus.getMapStatus(5)
+    assert(retrievedStatus.isDefined)
+    assert(retrievedStatus.get.locations.size >= 1)
+
+    shuffleStatus.removeMapOutputLocation(0, loc1)
+    val statusAfterRemoval = shuffleStatus.getMapStatus(5)
+    assert(statusAfterRemoval.isDefined)
+
+    tracker.stop()
+  }
+
+  test("balanced location selection in convertMapStatuses") {
+    val tracker = newTrackerMaster()
+    tracker.registerShuffle(0, 2, MergeStatus.SHUFFLE_PUSH_DUMMY_NUM_REDUCES)
+
+    val loc1 = BlockManagerId("exec1", "host1", 1000)
+    val loc2 = BlockManagerId("exec2", "host2", 1000)
+    val status = new CompressedMapStatus(loc1, Array(1000L, 2000L), 5)
+    status.addLocation(loc2)
+
+    tracker.registerMapOutput(0, 0, status)
+    tracker.registerMapOutput(0, 1, status)
+
+    val statuses: Array[MapStatus] = Array(status, status)
+    val result = MapOutputTracker.convertMapStatuses(0, 0, 2, statuses, 0, 2)
+
+    val locationCounts = result.iter.map(_._1).toSeq.groupBy(identity).map {
+      case (loc, locs) => (loc, locs.size)
+    }
+
+    assert(locationCounts.size <= 2)
+    assert(locationCounts.values.sum > 0)
+
+    tracker.stop()
+  }
+
   test("getLocationsWithLargestOutputs with multiple outputs in same machine") {
     val rpcEnv = createRpcEnv("test")
     val tracker = newTrackerMaster()

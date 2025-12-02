@@ -182,6 +182,27 @@ private class ShuffleStatus(
   }
 
   /**
+   * Add an additional location for an existing map output.
+   */
+  def addMapOutputLocation(mapId: Long, bmAddress: BlockManagerId): Unit = withWriteLock {
+    try {
+      val mapIndex = mapIdToMapIndex.get(mapId)
+      val mapStatusOpt = mapIndex.map(mapStatuses(_)).flatMap(Option(_))
+      mapStatusOpt match {
+        case Some(mapStatus) =>
+          logInfo(s"Adding map output location for ${mapId} at ${bmAddress}")
+          mapStatus.addLocation(bmAddress)
+          invalidateSerializedMapOutputStatusCache()
+        case None =>
+          logWarning(s"Asked to add location for untracked map output ${mapId}")
+      }
+    } catch {
+      case e: java.lang.NullPointerException =>
+        logWarning(s"Unable to add location for map output ${mapId}, status removed in-flight")
+    }
+  }
+
+  /**
    * Update the map output location (e.g. during migration).
    */
   def updateMapOutput(mapId: Long, bmAddress: BlockManagerId): Unit = withWriteLock {
@@ -210,6 +231,28 @@ private class ShuffleStatus(
     } catch {
       case e: java.lang.NullPointerException =>
         logWarning(s"Unable to update map output for ${mapId}, status removed in-flight")
+    }
+  }
+
+  /**
+   * Remove a specific location from a map output. If it's the only location,
+   * removes the entire map output.
+   */
+  def removeMapOutputLocation(mapIndex: Int, bmAddress: BlockManagerId): Unit = withWriteLock {
+    logDebug(s"Removing map output location ${mapIndex} ${bmAddress}")
+    val currentMapStatus = mapStatuses(mapIndex)
+    if (currentMapStatus != null) {
+      val locations = currentMapStatus.locations
+      if (locations.contains(bmAddress)) {
+        if (locations.size > 1) {
+          val newLocations = locations.filterNot(_ == bmAddress)
+          currentMapStatus.updateLocation(newLocations.head)
+          newLocations.tail.foreach(currentMapStatus.addLocation)
+          invalidateSerializedMapOutputStatusCache()
+        } else {
+          removeMapOutput(mapIndex, bmAddress)
+        }
+      }
     }
   }
 
@@ -1645,7 +1688,17 @@ private[spark] object MapOutputTracker extends Logging {
       mergeStatusesOpt: Option[Array[MergeStatus]] = None): MapSizesByExecutorId = {
     assert (mapStatuses != null)
     val splitsByAddress = new HashMap[BlockManagerId, ListBuffer[(BlockId, Long, Int)]]
+    val executorLoadTracker = new HashMap[BlockManagerId, Long]()
     var enableBatchFetch = true
+
+    def selectBalancedLocation(status: MapStatus, blockSize: Long): BlockManagerId = {
+      val locations = status.locations
+      if (locations.size == 1) {
+        locations.head
+      } else {
+        locations.minBy(loc => executorLoadTracker.getOrElse(loc, 0L))
+      }
+    }
     // Only use MergeStatus for reduce tasks that fetch all map outputs. Since a merged shuffle
     // partition consists of blocks merged in random order, we are unable to serve map index
     // subrange requests. However, when a reduce task needs to fetch blocks from a subrange of
@@ -1682,7 +1735,10 @@ private[spark] object MapOutputTracker extends Logging {
             !mergeStatus.tracker.contains(mapIndex)) {
             val size = mapStatus.getSizeForBlock(partId)
             if (size != 0) {
-              splitsByAddress.getOrElseUpdate(mapStatus.location, ListBuffer()) +=
+              val selectedLoc = selectBalancedLocation(mapStatus, size)
+              executorLoadTracker(selectedLoc) =
+                executorLoadTracker.getOrElse(selectedLoc, 0L) + size
+              splitsByAddress.getOrElseUpdate(selectedLoc, ListBuffer()) +=
                 ((ShuffleBlockId(shuffleId, mapStatus.mapId, partId), size, mapIndex))
             }
           }
@@ -1695,7 +1751,10 @@ private[spark] object MapOutputTracker extends Logging {
         for (part <- startPartition until endPartition) {
           val size = status.getSizeForBlock(part)
           if (size != 0) {
-            splitsByAddress.getOrElseUpdate(status.location, ListBuffer()) +=
+            val selectedLoc = selectBalancedLocation(status, size)
+            executorLoadTracker(selectedLoc) =
+              executorLoadTracker.getOrElse(selectedLoc, 0L) + size
+            splitsByAddress.getOrElseUpdate(selectedLoc, ListBuffer()) +=
               ((ShuffleBlockId(shuffleId, status.mapId, part), size, mapIndex))
           }
         }
