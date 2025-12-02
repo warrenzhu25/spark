@@ -218,14 +218,22 @@ class MapOutputTrackerSuite extends SparkFunSuite with LocalSparkContext {
 
 
   test("MapStatus interface default multi-location behavior") {
-    val loc = BlockManagerId("exec1", "host1", 1000)
-    val status = MapStatus(loc, Array(1000L, 2000L), 5)
+    val loc1 = BlockManagerId("exec1", "host1", 1000)
+    val loc2 = BlockManagerId("exec2", "host2", 1000)
+    val status = MapStatus(loc1, Array(1000L, 2000L), 5)
 
-    assert(status.location === loc)
-    assert(status.locations === Seq(loc))
+    // Initially should have one location
+    assert(status.location === loc1)
+    assert(status.locations === Seq(loc1))
 
-    status.addLocation(BlockManagerId("exec2", "host2", 1000))
-    assert(status.locations === Seq(loc))
+    // After adding a location, should have both locations
+    status.addLocation(loc2)
+    assert(status.location === loc1)  // Primary location unchanged
+    assert(status.locations === Seq(loc1, loc2))
+
+    // Adding duplicate should not change locations
+    status.addLocation(loc2)
+    assert(status.locations === Seq(loc1, loc2))
   }
 
   test("CompressedMapStatus multi-location functionality") {
