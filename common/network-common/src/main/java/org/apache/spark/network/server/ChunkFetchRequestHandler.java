@@ -22,6 +22,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 import com.codahale.metrics.Counter;
+import com.codahale.metrics.Histogram;
 import com.codahale.metrics.Timer;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
@@ -69,6 +70,8 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
   private final Timer chunkReadLatencyMillis;
   private final Timer responseSendLatencyMillis;
   private final Counter chunkFetchQueueDepth;
+  private final Timer queueWaitTimeMillis;
+  private final Histogram queueLengthHistogram;
   // Per-shuffle metrics tracking
   private final ConcurrentHashMap<Long, Integer> streamToShuffleMap;
   private final ConcurrentHashMap<Integer, Timer> perShuffleLatencyTimers;
@@ -81,7 +84,7 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
       Long maxChunksBeingTransferred,
       boolean syncModeEnabled) {
     this(client, streamManager, maxChunksBeingTransferred, syncModeEnabled,
-      null, null, null, null, null, null, null, null);
+      null, null, null, null, null, null, null, null, null, null);
   }
 
   public ChunkFetchRequestHandler(
@@ -95,6 +98,8 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
       metrics != null ? metrics.getChunkReadLatencyMillis() : null,
       metrics != null ? metrics.getResponseSendLatencyMillis() : null,
       metrics != null ? metrics.getChunkFetchQueueDepth() : null,
+      metrics != null ? metrics.getQueueWaitTimeMillis() : null,
+      metrics != null ? metrics.getQueueLengthHistogram() : null,
       metrics != null ? metrics.getStreamToShuffleMap() : null,
       metrics != null ? metrics.getPerShuffleLatencyTimers() : null,
       metrics != null ? metrics.getPerShuffleReadLatencyTimers() : null,
@@ -110,6 +115,8 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
       Timer chunkReadLatencyMillis,
       Timer responseSendLatencyMillis,
       Counter chunkFetchQueueDepth,
+      Timer queueWaitTimeMillis,
+      Histogram queueLengthHistogram,
       ConcurrentHashMap<Long, Integer> streamToShuffleMap,
       ConcurrentHashMap<Integer, Timer> perShuffleLatencyTimers,
       ConcurrentHashMap<Integer, Timer> perShuffleReadLatencyTimers,
@@ -122,6 +129,8 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
     this.chunkReadLatencyMillis = chunkReadLatencyMillis;
     this.responseSendLatencyMillis = responseSendLatencyMillis;
     this.chunkFetchQueueDepth = chunkFetchQueueDepth;
+    this.queueWaitTimeMillis = queueWaitTimeMillis;
+    this.queueLengthHistogram = queueLengthHistogram;
     this.streamToShuffleMap = streamToShuffleMap;
     this.perShuffleLatencyTimers = perShuffleLatencyTimers;
     this.perShuffleReadLatencyTimers = perShuffleReadLatencyTimers;
@@ -155,6 +164,14 @@ public class ChunkFetchRequestHandler extends SimpleChannelInboundHandler<ChunkF
   protected void channelRead0(
       ChannelHandlerContext ctx,
       final ChunkFetchRequest msg) throws Exception {
+    // Measure queue wait time (from arrival to processing start)
+    final long processingStartNanos = System.nanoTime();
+    final long arrivalTimeNanos = msg.getArrivalTimeNanos();
+    if (queueWaitTimeMillis != null && arrivalTimeNanos > 0) {
+      final long queueWaitNanos = processingStartNanos - arrivalTimeNanos;
+      queueWaitTimeMillis.update(queueWaitNanos, TimeUnit.NANOSECONDS);
+    }
+
     Channel channel = ctx.channel();
     processFetchRequest(channel, msg);
   }

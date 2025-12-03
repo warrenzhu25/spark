@@ -20,6 +20,7 @@ package org.apache.spark.network.shuffle;
 import java.util.concurrent.ConcurrentHashMap;
 
 import com.codahale.metrics.Counter;
+import com.codahale.metrics.Histogram;
 import com.codahale.metrics.Timer;
 
 /**
@@ -30,6 +31,8 @@ public class ShuffleFetchMetrics {
   private final Timer chunkReadLatencyMillis;
   private final Timer responseSendLatencyMillis;
   private final Counter chunkFetchQueueDepth;
+  private final Timer queueWaitTimeMillis;
+  private final Histogram queueLengthHistogram;
   private final ConcurrentHashMap<Long, Integer> streamToShuffleMap;
   private final ConcurrentHashMap<Integer, Timer> perShuffleLatencyTimers;
   private final ConcurrentHashMap<Integer, Timer> perShuffleReadLatencyTimers;
@@ -40,6 +43,8 @@ public class ShuffleFetchMetrics {
       Timer chunkReadLatencyMillis,
       Timer responseSendLatencyMillis,
       Counter chunkFetchQueueDepth,
+      Timer queueWaitTimeMillis,
+      Histogram queueLengthHistogram,
       ConcurrentHashMap<Long, Integer> streamToShuffleMap,
       ConcurrentHashMap<Integer, Timer> perShuffleLatencyTimers,
       ConcurrentHashMap<Integer, Timer> perShuffleReadLatencyTimers,
@@ -48,6 +53,8 @@ public class ShuffleFetchMetrics {
     this.chunkReadLatencyMillis = chunkReadLatencyMillis;
     this.responseSendLatencyMillis = responseSendLatencyMillis;
     this.chunkFetchQueueDepth = chunkFetchQueueDepth;
+    this.queueWaitTimeMillis = queueWaitTimeMillis;
+    this.queueLengthHistogram = queueLengthHistogram;
     this.streamToShuffleMap = streamToShuffleMap;
     this.perShuffleLatencyTimers = perShuffleLatencyTimers;
     this.perShuffleReadLatencyTimers = perShuffleReadLatencyTimers;
@@ -84,5 +91,13 @@ public class ShuffleFetchMetrics {
 
   public ConcurrentHashMap<Integer, Timer> getPerShuffleResponseSendLatencyTimers() {
     return perShuffleResponseSendLatencyTimers;
+  }
+
+  public Timer getQueueWaitTimeMillis() {
+    return queueWaitTimeMillis;
+  }
+
+  public Histogram getQueueLengthHistogram() {
+    return queueLengthHistogram;
   }
 }

@@ -26,8 +26,19 @@ import io.netty.buffer.ByteBuf;
 public final class ChunkFetchRequest extends AbstractMessage implements RequestMessage {
   public final StreamChunkId streamChunkId;
 
+  // Transient field (not serialized) - set server-side after decode to measure queue wait time
+  private transient long arrivalTimeNanos;
+
   public ChunkFetchRequest(StreamChunkId streamChunkId) {
     this.streamChunkId = streamChunkId;
+  }
+
+  public void setArrivalTimeNanos(long nanos) {
+    this.arrivalTimeNanos = nanos;
+  }
+
+  public long getArrivalTimeNanos() {
+    return arrivalTimeNanos;
   }
 
   @Override

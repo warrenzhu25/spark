@@ -30,13 +30,15 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
+import com.codahale.metrics.Counter;
 import com.codahale.metrics.Gauge;
+import com.codahale.metrics.Histogram;
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.Metric;
 import com.codahale.metrics.MetricSet;
 import com.codahale.metrics.RatioGauge;
 import com.codahale.metrics.Timer;
-import com.codahale.metrics.Counter;
+import com.codahale.metrics.UniformReservoir;
 import com.google.common.annotations.VisibleForTesting;
 
 import org.apache.spark.internal.SparkLogger;
@@ -347,6 +349,11 @@ public class ExternalBlockHandler extends RpcHandler
         new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS);
     // NEW: Current queue depth of chunk fetch requests being processed
     private final Counter chunkFetchQueueDepth = new Counter();
+    // NEW: Queue wait time from message decode to processing start
+    private final Timer queueWaitTimeMillis =
+        new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS);
+    // NEW: Queue length histogram (sampled periodically from EventLoop)
+    private final Histogram queueLengthHistogram = new Histogram(new UniformReservoir());
     // Per-shuffle latency tracking: maps stream ID to shuffle ID
     private final ConcurrentHashMap<Long, Integer> streamToShuffleMap = new ConcurrentHashMap<>();
     // Per-shuffle latency timers: maps shuffle ID to its latency timer
@@ -382,6 +389,8 @@ public class ExternalBlockHandler extends RpcHandler
       allMetrics.put("chunkReadLatencyMillis", chunkReadLatencyMillis);
       allMetrics.put("responseSendLatencyMillis", responseSendLatencyMillis);
       allMetrics.put("chunkFetchQueueDepth", chunkFetchQueueDepth);
+      allMetrics.put("queueWaitTimeMillis", queueWaitTimeMillis);
+      allMetrics.put("queueLengthHistogram", queueLengthHistogram);
       allMetrics.put("blockTransferRate", blockTransferRate);
       allMetrics.put("blockTransferMessageRate", blockTransferMessageRate);
       allMetrics.put("blockTransferRateBytes", blockTransferRateBytes);
@@ -418,12 +427,22 @@ public class ExternalBlockHandler extends RpcHandler
       return chunkFetchQueueDepth;
     }
 
+    public Timer getQueueWaitTimeMillis() {
+      return queueWaitTimeMillis;
+    }
+
+    public Histogram getQueueLengthHistogram() {
+      return queueLengthHistogram;
+    }
+
     public ShuffleFetchMetrics toShuffleFetchMetrics() {
       return new ShuffleFetchMetrics(
         chunkFetchLatencyMillis,
         chunkReadLatencyMillis,
         responseSendLatencyMillis,
         chunkFetchQueueDepth,
+        queueWaitTimeMillis,
+        queueLengthHistogram,
         streamToShuffleMap,
         perShuffleLatencyTimers,
         perShuffleReadLatencyTimers,

@@ -46,6 +46,12 @@ public final class MessageDecoder extends MessageToMessageDecoder<ByteBuf> {
     Message decoded = decode(msgType, in);
     assert decoded.type() == msgType;
     logger.trace("Received message {}: {}", msgType, decoded);
+
+    // Timestamp ChunkFetchRequest after decoding to measure queue wait time
+    if (decoded instanceof ChunkFetchRequest) {
+      ((ChunkFetchRequest) decoded).setArrivalTimeNanos(System.nanoTime());
+    }
+
     out.add(decoded);
   }
 
