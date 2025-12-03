@@ -34,6 +34,7 @@ import scala.util.control.NonFatal
 import com.google.common.util.concurrent.{Futures, SettableFuture}
 
 import org.apache.spark._
+import org.apache.spark.{GetTopKSlowestExecutors, HeartbeatReceiver, ResetServerShuffleStats}
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.errors.SparkCoreErrors
 import org.apache.spark.executor.{ExecutorMetrics, TaskMetrics}
@@ -48,7 +49,8 @@ import org.apache.spark.partial.{ApproximateActionListener, ApproximateEvaluator
 import org.apache.spark.rdd.{RDD, RDDCheckpointData}
 import org.apache.spark.resource.{ResourceProfile, TaskResourceProfile}
 import org.apache.spark.resource.ResourceProfile.{DEFAULT_RESOURCE_PROFILE_ID, EXECUTOR_CORES_LOCAL_PROPERTY, PYSPARK_MEMORY_LOCAL_PROPERTY}
-import org.apache.spark.rpc.RpcTimeout
+import org.apache.spark.rpc.{RpcAddress, RpcTimeout}
+import org.apache.spark.shuffle.ServerShuffleFetchAggregate
 import org.apache.spark.storage._
 import org.apache.spark.storage.BlockManagerMessages.BlockManagerHeartbeat
 import org.apache.spark.util._
@@ -2883,6 +2885,13 @@ private[spark] class DAGScheduler(
         log"finished in ${MDC(TIME_UNITS, serviceTime)} ms")
       stage.latestInfo.completionTime = Some(clock.getTimeMillis())
 
+      // Report server-side shuffle fetch statistics for shuffle stages
+      stage match {
+        case _: ShuffleMapStage =>
+          reportServerShuffleStats(stage)
+        case _ =>
+      }
+
       // Clear failure count for this stage, now that it's succeeded.
       // We only limit consecutive failures of stage attempts,so that if a stage is
       // re-used many times in a long-running job, unrelated failures don't eventually cause the
@@ -2899,6 +2908,45 @@ private[spark] class DAGScheduler(
     }
     listenerBus.post(SparkListenerStageCompleted(stage.latestInfo))
     runningStages -= stage
+  }
+
+  /**
+   * Report server-side shuffle fetch statistics for completed shuffle stages.
+   * Logs top-K slowest executors with breakdown metrics and validation formula.
+   */
+  private def reportServerShuffleStats(stage: Stage): Unit = {
+    try {
+      val heartbeatReceiver = sc.env.rpcEnv.setupEndpointRef(
+        RpcAddress(sc.env.rpcEnv.address.host, sc.env.rpcEnv.address.port),
+        HeartbeatReceiver.ENDPOINT_NAME)
+      val timeout = RpcTimeout(sc.conf, "spark.rpc.askTimeout", "120s")
+
+      val topK = heartbeatReceiver.askSync[Seq[ServerShuffleFetchAggregate]](
+        GetTopKSlowestExecutors,
+        timeout)
+
+      if (topK.nonEmpty) {
+        logInfo(log"Server-side shuffle fetch stats for stage ${MDC(STAGE_ID, stage.id)}:")
+        topK.zipWithIndex.foreach { case (stats, idx) =>
+          logInfo(
+            log"  #${MDC(INDEX, idx + 1)} Executor " +
+            log"${MDC(EXECUTOR_ID, stats.executorId)}: " +
+            log"avgLatency=${MDC(TIME_UNITS, f"${stats.avgLatency}%.2f")}ms, " +
+            log"requests=${MDC(COUNT, stats.totalRequests)}, " +
+            log"diskRead=${MDC(RATIO, f"${stats.diskReadPercent}%.1f")}%, " +
+            log"send=${MDC(RATIO, f"${stats.sendPercent}%.1f")}%, " +
+            log"queueWait=${MDC(RATIO, f"${stats.queueWaitPercent}%.1f")}%, " +
+            log"maxQLen=${MDC(SIZE, stats.maxQueueLength)}, " +
+            log"avgQLen=${MDC(SIZE, f"${stats.avgQueueLength}%.2f")}")
+        }
+      }
+
+      // Reset stats after reporting
+      heartbeatReceiver.askSync[Boolean](ResetServerShuffleStats, timeout)
+    } catch {
+      case e: Exception =>
+        logWarning(log"Failed to retrieve server shuffle stats", e)
+    }
   }
 
   /**

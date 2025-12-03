@@ -31,7 +31,8 @@ import org.apache.spark.scheduler._
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.RemoveExecutor
 import org.apache.spark.scheduler.cluster.CoarseGrainedSchedulerBackend
 import org.apache.spark.scheduler.local.LocalSchedulerBackend
-import org.apache.spark.shuffle.ServerShuffleFetchStats
+import org.apache.spark.shuffle.{ServerShuffleFetchAggregate, ServerShuffleFetchStats,
+  ServerShuffleFetchStatsAggregator}
 import org.apache.spark.storage.BlockManagerId
 import org.apache.spark.util._
 
@@ -59,6 +60,10 @@ private[spark] case object TaskSchedulerIsSet
 
 private[spark] case object ExpireDeadHosts
 
+private[spark] case object GetTopKSlowestExecutors
+
+private[spark] case object ResetServerShuffleStats
+
 private case class ExecutorRegistered(executorId: String)
 
 private case class ExecutorRemoved(executorId: String)
@@ -83,6 +88,9 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
 
   // executor ID -> timestamp of when the last heartbeat from this executor was received
   private val executorLastSeen = new HashMap[String, Long]
+
+  // Aggregator for server-side shuffle fetch statistics
+  private val serverShuffleStatsAggregator = new ServerShuffleFetchStatsAggregator(topK = 3)
 
   private val executorTimeoutMs = sc.conf.get(
     config.STORAGE_BLOCKMANAGER_HEARTBEAT_TIMEOUT
@@ -135,6 +143,11 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
     case ExpireDeadHosts =>
       expireDeadHosts()
       context.reply(true)
+    case GetTopKSlowestExecutors =>
+      context.reply(getTopKSlowestExecutors())
+    case ResetServerShuffleStats =>
+      resetServerShuffleStats()
+      context.reply(true)
 
     // Messages received from executors
     case heartbeat @ Heartbeat(
@@ -143,6 +156,12 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
       if (scheduler != null) {
         if (executorLastSeen.contains(executorId)) {
           executorLastSeen(executorId) = clock.getTimeMillis()
+
+          // Process server-side shuffle fetch statistics if present
+          serverShuffleStats.foreach { stats =>
+            serverShuffleStatsAggregator.mergeStats(stats)
+          }
+
           eventLoopThread.submit(new Runnable {
             override def run(): Unit = Utils.tryLogNonFatalError {
               val unknownExecutor = !scheduler.executorHeartbeatReceived(
@@ -209,6 +228,22 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
    */
   override def onExecutorRemoved(executorRemoved: SparkListenerExecutorRemoved): Unit = {
     removeExecutor(executorRemoved.executorId)
+  }
+
+  /**
+   * Get top-K executors with highest average shuffle fetch latency.
+   * Used for post-hoc observability after stage completion.
+   */
+  def getTopKSlowestExecutors(): Seq[ServerShuffleFetchAggregate] = {
+    serverShuffleStatsAggregator.getTopKSlowestExecutors
+  }
+
+  /**
+   * Reset accumulated server-side shuffle fetch statistics.
+   * Called after stage completion to prepare for next stage.
+   */
+  def resetServerShuffleStats(): Unit = {
+    serverShuffleStatsAggregator.reset()
   }
 
   private def expireDeadHosts(): Unit = {
