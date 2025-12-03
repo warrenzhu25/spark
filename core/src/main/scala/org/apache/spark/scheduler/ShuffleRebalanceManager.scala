@@ -233,6 +233,10 @@ private[spark] class ShuffleRebalanceManager(
 
   /**
    * Plan shuffle rebalancing operations to balance data distribution.
+   *
+   * Uses a one-to-many greedy algorithm: each source (largest first) distributes
+   * to multiple targets (smallest first) until balanced. This minimizes the maximum
+   * executor size and achieves optimal balance.
    */
   private def planShuffleRebalancing(
       shuffleId: Int,
@@ -241,45 +245,69 @@ private[spark] class ShuffleRebalanceManager(
 
     val sorted = executorSizes.toSeq.sortBy(_._2)
     val avgSize = executorSizes.values.sum.toDouble / executorSizes.size
-
     val operations = mutable.ArrayBuffer[ShuffleRebalanceOperation]()
 
-    // Identify source (over-loaded) and target (under-loaded) executors
-    val sources = sorted.filter(_._2 > avgSize * shuffleRebalanceThreshold).reverse
-    val targets = sorted.filter(_._2 < avgSize / shuffleRebalanceThreshold)
+    val numExecutors = sorted.length
+    if (numExecutors < 2) return operations.toSeq
 
-    var sourceIdx = 0
+    // Sources: All executors above average (largest first)
+    // Targets: All executors below average (smallest first)
+    val sources = sorted.filter(_._2 > avgSize).reverse
+    val targets = sorted.filter(_._2 < avgSize)
+
+    if (sources.isEmpty || targets.isEmpty) {
+      return operations.toSeq
+    }
+
+    // Track remaining excess/deficit for each executor
+    val sourceRemaining = mutable.Map(sources.map { case (exec, size) =>
+      exec -> (size - avgSize.toLong)
+    }: _*)
+    val targetRemaining = mutable.Map(targets.map { case (exec, size) =>
+      exec -> (avgSize.toLong - size)
+    }: _*)
+
     var targetIdx = 0
 
-    while (sourceIdx < sources.length && targetIdx < targets.length) {
-      val (sourceExec, sourceSize) = sources(sourceIdx)
-      val (targetExec, targetSize) = targets(targetIdx)
+    // Process each source, distributing to multiple targets (one-to-many)
+    for ((sourceExec, _) <- sources if sourceRemaining(sourceExec) > 0) {
 
-      val moveSize = math.min(
-        sourceSize - avgSize.toLong,
-        avgSize.toLong - targetSize
-      )
+      // Keep moving from this source to multiple targets until balanced
+      while (targetIdx < targets.length && sourceRemaining(sourceExec) > 0) {
+        val (targetExec, _) = targets(targetIdx)
+        val targetCapacity = targetRemaining(targetExec)
 
-      if (moveSize > shuffleRebalanceMinSizeMB * 1024 * 1024) {
-        // Find specific shuffle blocks to move
-        val blocksToMove = selectBlocksToMove(shuffleId, sourceExec, moveSize, numPartitions)
+        if (targetCapacity <= 0) {
+          targetIdx += 1
+        } else {
+          // Move as much as possible: limited by source excess or target capacity
+          val moveSize = math.min(sourceRemaining(sourceExec), targetCapacity)
 
-        if (blocksToMove.nonEmpty) {
-          operations += ShuffleRebalanceOperation(
-            shuffleId = shuffleId,
-            sourceExecutor = sourceExec,
-            targetExecutor = targetExec,
-            blocks = blocksToMove,
-            totalSize = blocksToMove.map(_._2).sum
-          )
+          if (moveSize > shuffleRebalanceMinSizeMB * 1024 * 1024) {
+            val blocksToMove = selectBlocksToMove(shuffleId, sourceExec, moveSize, numPartitions)
+
+            if (blocksToMove.nonEmpty) {
+              val actualMoveSize = blocksToMove.map(_._2).sum
+
+              operations += ShuffleRebalanceOperation(
+                shuffleId = shuffleId,
+                sourceExecutor = sourceExec,
+                targetExecutor = targetExec,
+                blocks = blocksToMove,
+                totalSize = actualMoveSize
+              )
+
+              // Update remaining capacity
+              sourceRemaining(sourceExec) -= actualMoveSize
+              targetRemaining(targetExec) -= actualMoveSize
+            }
+          }
+
+          // Move to next target if this one is full or move was too small
+          if (targetRemaining(targetExec) <= shuffleRebalanceMinSizeMB * 1024 * 1024) {
+            targetIdx += 1
+          }
         }
-      }
-
-      // Move to next target if current one is filled enough
-      if (targetSize + moveSize >= avgSize * 0.9) {
-        targetIdx += 1
-      } else {
-        sourceIdx += 1
       }
     }
 
