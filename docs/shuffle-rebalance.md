@@ -69,6 +69,68 @@ When imbalance is detected:
 - Selects specific shuffle blocks to move
 - Plans move operations to minimize disruption
 
+#### Source and Target Selection Strategy
+
+The rebalance planner uses a **one-to-many greedy algorithm** optimized for minimizing skew ratio:
+
+**Goal**: Minimize `maxSize / avgSize` by aggressively reducing the maximum executor size.
+
+**Algorithm**:
+1. **Identify Sources**: All executors with size > average (sorted descending)
+2. **Identify Targets**: All executors with size < average (sorted ascending)
+3. **Greedy Pairing**: Process sources from largest to smallest, each source distributes to multiple targets:
+   - Source #1 (largest) → Target #1 (smallest), then Target #2, then Target #3, ... until balanced
+   - Source #2 (2nd largest) → Remaining targets
+   - Continue until all sources are balanced or targets are filled
+
+**Block Selection**: Within each operation, blocks are selected smallest-first for granular balancing.
+
+**Example**:
+```
+Initial: [exec1: 300MB, exec2: 150MB, exec3: 100MB, exec4: 50MB, exec5: 0MB]
+Average: 120MB
+
+Sources: [exec1: 300MB, exec2: 150MB]  (excess: 180MB, 30MB)
+Targets: [exec5: 0MB, exec4: 50MB, exec3: 100MB]  (deficit: 120MB, 70MB, 20MB)
+
+Operations:
+  1. exec1 → exec5: 120MB  (exec1: 300→180, exec5: 0→120)
+  2. exec1 → exec4: 60MB   (exec1: 180→120, exec4: 50→110)
+  3. exec2 → exec4: 10MB   (exec2: 150→140, exec4: 110→120)
+  4. exec2 → exec3: 20MB   (exec2: 140→120, exec3: 100→120)
+
+Final: All executors at 120MB (perfect balance!)
+```
+
+**Why One-to-Many?**
+
+Compared to one-to-one pairing (largest source → smallest target only):
+- ✅ **Better balance**: Can fully drain large sources to multiple targets
+- ✅ **Lower max**: Achieves provably optimal max size reduction
+- ✅ **Fewer iterations**: Balances in one pass instead of multiple rounds
+- ❌ **More operations**: Creates more replication operations (controlled by `minSizeMB`)
+
+**Configuration Control**:
+
+The aggressiveness is tuned via existing configs (no separate strategy selection needed):
+
+| Use Case | `threshold` | `minSizeMB` | Behavior |
+|----------|-------------|-------------|----------|
+| **Conservative** | 2.0 | 500 | Only fix extreme skew, few large moves |
+| **Balanced** (default) | 1.5 | 100 | Good balance vs. overhead |
+| **Aggressive** | 1.2 | 10 | Maximize balance, more operations |
+
+- `threshold`: Controls when rebalancing triggers (imbalance detection)
+- `minSizeMB`: Controls minimum move size (operation granularity)
+- `maxConcurrent`: Controls network pressure (parallelism)
+
+**Mathematical Optimality**:
+
+For any distribution of executor sizes, the one-to-many greedy algorithm achieves the minimum possible maximum executor size given the constraint that we move data toward the average. This is because:
+1. We always process the largest source first (greedy choice)
+2. We fill targets in order from smallest to largest (optimal packing)
+3. We stop when source reaches average or targets are exhausted (optimality condition)
+
 ### 3. Execution Phase
 
 Move operations are executed:
@@ -106,15 +168,31 @@ val result = data.groupBy("key").agg(count("*"))
 result.write.parquet("output")
 ```
 
-### With Custom Thresholds
+### Conservative Tuning (Minimize Network Overhead)
+
+For workloads where network bandwidth is limited or you want to avoid unnecessary data movement:
 
 ```scala
 val spark = SparkSession.builder
-  .appName("Shuffle Rebalancing Example")
+  .appName("Shuffle Rebalancing - Conservative")
   .config("spark.shuffle.rebalance.enabled", "true")
-  .config("spark.shuffle.rebalance.threshold", "2.0")      // More tolerance for imbalance
-  .config("spark.shuffle.rebalance.minSizeMB", "500")      // Only move for larger differences
-  .config("spark.shuffle.rebalance.maxConcurrent", "1")    // Conservative concurrency
+  .config("spark.shuffle.rebalance.threshold", "2.0")      // Only fix severe skew
+  .config("spark.shuffle.rebalance.minSizeMB", "500")      // Only move large chunks
+  .config("spark.shuffle.rebalance.maxConcurrent", "1")    // Limit concurrent operations
+  .getOrCreate()
+```
+
+### Aggressive Tuning (Maximize Balance)
+
+For workloads where perfect balance is critical and network overhead is acceptable:
+
+```scala
+val spark = SparkSession.builder
+  .appName("Shuffle Rebalancing - Aggressive")
+  .config("spark.shuffle.rebalance.enabled", "true")
+  .config("spark.shuffle.rebalance.threshold", "1.2")      // Fix even minor skew
+  .config("spark.shuffle.rebalance.minSizeMB", "50")       // Allow smaller moves
+  .config("spark.shuffle.rebalance.maxConcurrent", "4")    // More parallelism
   .getOrCreate()
 ```
 
