@@ -51,7 +51,7 @@ import org.apache.spark.resource.ResourceInformation
 import org.apache.spark.rpc.RpcTimeout
 import org.apache.spark.scheduler._
 import org.apache.spark.serializer.SerializerHelper
-import org.apache.spark.shuffle.{FetchFailedException, ShuffleBlockPusher}
+import org.apache.spark.shuffle.{FetchFailedException, ServerShuffleFetchStats, ShuffleBlockPusher}
 import org.apache.spark.status.api.v1.ThreadStackTrace
 import org.apache.spark.storage.{StorageLevel, TaskResultBlockId}
 import org.apache.spark.util._
@@ -1255,6 +1255,17 @@ private[spark] class Executor(
     }
   }
 
+  /**
+   * Collects server-side shuffle fetch statistics from the BlockManager's shuffle service.
+   * Returns None if the feature is disabled or metrics are unavailable.
+   */
+  private def getServerShuffleStats(): Option[ServerShuffleFetchStats] = {
+    // TODO: Implement actual metrics collection from ExternalBlockHandler
+    // For now, return None as a placeholder
+    // This will be implemented when wiring up the BlockManager integration
+    None
+  }
+
   /** Reports heartbeat and metrics for active tasks to the driver. */
   private def reportHeartBeat(): Unit = {
     // list of (task id, accumUpdates) to send back to the driver
@@ -1282,8 +1293,11 @@ private[spark] class Executor(
       }
     }
 
+    // Collect server-side shuffle fetch statistics if enabled
+    val serverShuffleStats = getServerShuffleStats()
+
     val message = Heartbeat(executorId, accumUpdates.toArray, env.blockManager.blockManagerId,
-      executorUpdates)
+      executorUpdates, serverShuffleStats)
     try {
       val response = heartbeatReceiverRef.askSync[HeartbeatResponse](
         message, new RpcTimeout(HEARTBEAT_INTERVAL_MS.millis, EXECUTOR_HEARTBEAT_INTERVAL.key))

@@ -31,6 +31,7 @@ import org.apache.spark.scheduler._
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.RemoveExecutor
 import org.apache.spark.scheduler.cluster.CoarseGrainedSchedulerBackend
 import org.apache.spark.scheduler.local.LocalSchedulerBackend
+import org.apache.spark.shuffle.ServerShuffleFetchStats
 import org.apache.spark.storage.BlockManagerId
 import org.apache.spark.util._
 
@@ -46,7 +47,9 @@ private[spark] case class Heartbeat(
     accumUpdates: Array[(Long, Seq[AccumulatorV2[_, _]])],
     blockManagerId: BlockManagerId,
     // (stageId, stageAttemptId) -> executor metric peaks
-    executorUpdates: Map[(Int, Int), ExecutorMetrics])
+    executorUpdates: Map[(Int, Int), ExecutorMetrics],
+    // Server-side shuffle fetch statistics (optional)
+    serverShuffleStats: Option[ServerShuffleFetchStats] = None)
 
 /**
  * An event that SparkContext uses to notify HeartbeatReceiver that SparkContext.taskScheduler is
@@ -134,7 +137,8 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
       context.reply(true)
 
     // Messages received from executors
-    case heartbeat @ Heartbeat(executorId, accumUpdates, blockManagerId, executorUpdates) =>
+    case heartbeat @ Heartbeat(
+        executorId, accumUpdates, blockManagerId, executorUpdates, serverShuffleStats) =>
       var reregisterBlockManager = !sc.isStopped
       if (scheduler != null) {
         if (executorLastSeen.contains(executorId)) {
