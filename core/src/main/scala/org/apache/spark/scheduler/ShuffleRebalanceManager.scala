@@ -130,9 +130,14 @@ private[spark] class ShuffleRebalanceManager(
         }
         val projectedStats = computeDistributionStats(projectedSizes.toMap)
 
+        // Calculate skew reduction percentage
+        val skewReduction = 100.0 * (currentStats.imbalanceRatio - projectedStats.imbalanceRatio) /
+          currentStats.imbalanceRatio
+
         logInfo(s"Initiating shuffle rebalance for shuffle $shuffleId. " +
-          s"Current skew: ${f"${currentStats.imbalanceRatio}%.2f"}, " +
-          s"Projected skew: ${f"${projectedStats.imbalanceRatio}%.2f"}. " +
+          s"Baseline skew: ${f"${currentStats.imbalanceRatio}%.2f"}, " +
+          s"Projected skew after rebalance: ${f"${projectedStats.imbalanceRatio}%.2f"} " +
+          s"(${f"$skewReduction%.1f"}% reduction). " +
           s"Moving ${Utils.bytesToString(rebalanceOperations.map(_.totalSize).sum)} " +
           s"in ${rebalanceOperations.size} operations.")
 
@@ -141,6 +146,9 @@ private[spark] class ShuffleRebalanceManager(
 
         // Monitor completion asynchronously
         if (futures.nonEmpty) {
+          // Capture baseline for comparison in final summary
+          val baselineSkew = currentStats.imbalanceRatio
+
           rebalanceMonitorThreadPool.submit(new Runnable {
             override def run(): Unit = {
               try {
@@ -149,8 +157,27 @@ private[spark] class ShuffleRebalanceManager(
 
                 // Check final status
                 val finalStats = getShuffleDistributionStats(shuffleId, numPartitions)
+                val multiLocStats = getMultiLocationStats(shuffleId)
+
+                // Calculate overall improvement
+                val totalSkewReduction = 100.0 * (baselineSkew - finalStats.imbalanceRatio) /
+                  baselineSkew
+
+                val multiLocInfo = if (enableMultiLocation && multiLocStats.totalBlocks > 0) {
+                  val pctMultiLoc = 100.0 * multiLocStats.blocksWithMultiLocation /
+                    multiLocStats.totalBlocks
+                  s" Multi-location enabled: ${multiLocStats.blocksWithMultiLocation}/" +
+                    s"${multiLocStats.totalBlocks} blocks (${f"$pctMultiLoc%.1f"}%) " +
+                    s"with avg ${f"${multiLocStats.averageLocationsPerBlock}%.2f"} " +
+                    s"locations/block for improved fetch load balancing."
+                } else {
+                  ""
+                }
+
                 logInfo(s"Finished shuffle rebalance for shuffle $shuffleId. " +
-                  s"Final skew: ${f"${finalStats.imbalanceRatio}%.2f"}.")
+                  s"Final skew: ${f"${finalStats.imbalanceRatio}%.2f"} " +
+                  s"(${f"$totalSkewReduction%.1f"}% improvement from baseline " +
+                  s"${f"$baselineSkew%.2f"}).$multiLocInfo")
               } catch {
                 case e: Exception =>
                   logWarning(s"Error monitoring rebalance for shuffle $shuffleId", e)
@@ -410,6 +437,40 @@ private[spark] class ShuffleRebalanceManager(
     }
   }
 
+  /**
+   * Get multi-location statistics for a shuffle.
+   */
+  private def getMultiLocationStats(shuffleId: Int): MultiLocationStats = {
+    val shuffleStatus = mapOutputTracker.shuffleStatuses(shuffleId)
+    var totalBlocks = 0
+    var blocksWithMultiLocation = 0
+    var totalLocations = 0
+    var maxLocations = 0
+
+    shuffleStatus.withMapStatuses { statuses =>
+      statuses.filter(_ != null).foreach { status =>
+        totalBlocks += 1
+        val locationCount = status.locations.size
+        totalLocations += locationCount
+        if (locationCount > 1) {
+          blocksWithMultiLocation += 1
+        }
+        if (locationCount > maxLocations) {
+          maxLocations = locationCount
+        }
+      }
+    }
+
+    MultiLocationStats(
+      totalBlocks = totalBlocks,
+      blocksWithMultiLocation = blocksWithMultiLocation,
+      averageLocationsPerBlock = if (totalBlocks > 0) {
+        totalLocations.toDouble / totalBlocks
+      } else 0.0,
+      maxLocationsPerBlock = maxLocations
+    )
+  }
+
 
 
 
@@ -447,3 +508,12 @@ private[spark] case class ShuffleDistributionStats(
     standardDeviation: Double,
     imbalanceRatio: Double,
     executorCount: Int)
+
+/**
+ * Statistics about multi-location distribution for shuffle blocks.
+ */
+private[spark] case class MultiLocationStats(
+    totalBlocks: Int,
+    blocksWithMultiLocation: Int,
+    averageLocationsPerBlock: Double,
+    maxLocationsPerBlock: Int)

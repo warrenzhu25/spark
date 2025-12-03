@@ -190,8 +190,15 @@ private[spark] class ShuffleStatus(
       val mapStatusOpt = mapIndex.map(mapStatuses(_)).flatMap(Option(_))
       mapStatusOpt match {
         case Some(mapStatus) =>
-          logInfo(s"Adding map output location for ${mapId} at ${bmAddress}")
+          val locationsBefore = mapStatus.locations.size
           mapStatus.addLocation(bmAddress)
+          val locationsAfter = mapStatus.locations.size
+          if (locationsAfter > locationsBefore) {
+            logInfo(s"Added location $bmAddress for map output $mapId. " +
+              s"Total locations: $locationsAfter")
+          } else {
+            logDebug(s"Location $bmAddress already exists for map output $mapId")
+          }
           invalidateSerializedMapOutputStatusCache()
         case None =>
           logWarning(s"Asked to add location for untracked map output ${mapId}")

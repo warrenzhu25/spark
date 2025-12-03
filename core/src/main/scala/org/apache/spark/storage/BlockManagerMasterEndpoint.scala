@@ -821,6 +821,18 @@ class BlockManagerMasterEndpoint(
           case _ =>
         }
       }
+
+      // Handle multi-location tracking for shuffle blocks
+      blockId match {
+        case ShuffleBlockId(shuffleId, mapId, _) =>
+          // Check if this is a new location for an existing map output
+          if (!firstBlock && locations.size > 1) {
+            mapOutputTracker.shuffleStatuses.get(shuffleId).foreach { shuffleStatus =>
+              shuffleStatus.addMapOutputLocation(mapId, blockManagerId)
+            }
+          }
+        case _ => // Not a shuffle block, no action needed
+      }
     } else {
       locations.remove(blockManagerId)
     }
