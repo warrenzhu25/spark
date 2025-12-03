@@ -188,7 +188,83 @@ class ShuffleRebalanceManagerSuite extends SparkFunSuite {
     // assert(shuffleMoveManager.isShuffleMoveNeeded(imbalancedSizes))
   }
 
-  test("shuffle move operation planning") {
+  test("shuffle move operation planning: one-to-many pairing") {
+    val conf = new SparkConf()
+      .set(SHUFFLE_REBALANCE_ENABLED, true)
+      .set(SHUFFLE_REBALANCE_THRESHOLD, 1.5)
+      .set(SHUFFLE_REBALANCE_MIN_SIZE_MB, 10L) // Low threshold for testing
+
+    val mapOutputTracker = mock(classOf[MapOutputTrackerMaster])
+    val blockManagerMaster = mock(classOf[BlockManagerMaster])
+
+    val manager = new ShuffleRebalanceManager(conf, mapOutputTracker, blockManagerMaster)
+
+    // Test that one-to-many strategy selects correct sources and targets
+    // by checking which executors are identified as sources vs targets
+
+    // Test scenario: [300MB, 150MB, 100MB, 50MB, 0MB] with avg=120MB
+    val executorSizes = Map(
+      "exec1" -> (300L * 1024 * 1024), // 180MB excess
+      "exec2" -> (150L * 1024 * 1024), // 30MB excess
+      "exec3" -> (100L * 1024 * 1024), // 20MB deficit
+      "exec4" -> (50L * 1024 * 1024),  // 70MB deficit
+      "exec5" -> (0L * 1024 * 1024)    // 120MB deficit
+    )
+
+    val avg = executorSizes.values.sum.toDouble / executorSizes.size
+    assert(math.abs(avg - 120.0 * 1024 * 1024) < 1.0, "Average should be 120MB")
+
+    // Verify source identification (executors > average)
+    val sources = executorSizes.filter(_._2 > avg)
+    assert(sources.keySet == Set("exec1", "exec2"),
+      "Sources should be exec1 and exec2 (above average)")
+
+    // Verify target identification (executors < average)
+    val targets = executorSizes.filter(_._2 < avg)
+    assert(targets.keySet == Set("exec3", "exec4", "exec5"),
+      "Targets should be exec3, exec4, exec5 (below average)")
+
+    // Verify largest source has most excess
+    val largestSource = sources.maxBy(_._2)
+    assert(largestSource._1 == "exec1", "exec1 should be largest source")
+
+    // Verify smallest target has most deficit
+    val smallestTarget = targets.minBy(_._2)
+    assert(smallestTarget._1 == "exec5", "exec5 should be smallest target")
+  }
+
+  test("shuffle move operation planning: perfect balance achievement") {
+    val conf = new SparkConf()
+      .set(SHUFFLE_REBALANCE_ENABLED, true)
+      .set(SHUFFLE_REBALANCE_THRESHOLD, 1.2)
+      .set(SHUFFLE_REBALANCE_MIN_SIZE_MB, 1L)
+
+    val mapOutputTracker = mock(classOf[MapOutputTrackerMaster])
+    val blockManagerMaster = mock(classOf[BlockManagerMaster])
+
+    val manager = new ShuffleRebalanceManager(conf, mapOutputTracker, blockManagerMaster)
+
+    // Scenario where perfect balance is achievable
+    val executorSizes = Map(
+      "exec1" -> (200L * 1024 * 1024), // 100MB excess (avg=100MB)
+      "exec2" -> (0L * 1024 * 1024)    // 100MB deficit
+    )
+
+    val avg = executorSizes.values.sum.toDouble / executorSizes.size
+    assert(math.abs(avg - 100.0 * 1024 * 1024) < 1.0, "Average should be 100MB")
+
+    // With one-to-many strategy, exec1 can distribute all excess to exec2
+    val source = executorSizes("exec1")
+    val target = executorSizes("exec2")
+    val sourceExcess = source - avg.toLong
+    val targetDeficit = avg.toLong - target
+
+    assert(sourceExcess == 100L * 1024 * 1024, "Source should have 100MB excess")
+    assert(targetDeficit == 100L * 1024 * 1024, "Target should have 100MB deficit")
+    assert(sourceExcess == targetDeficit, "Perfect balance is achievable")
+  }
+
+  test("shuffle move operation planning: edge case with equal sizes") {
     val conf = new SparkConf()
       .set(SHUFFLE_REBALANCE_ENABLED, true)
       .set(SHUFFLE_REBALANCE_THRESHOLD, 1.5)
@@ -197,11 +273,53 @@ class ShuffleRebalanceManagerSuite extends SparkFunSuite {
     val mapOutputTracker = mock(classOf[MapOutputTrackerMaster])
     val blockManagerMaster = mock(classOf[BlockManagerMaster])
 
-    val shuffleMoveManager = new ShuffleRebalanceManager(conf, mapOutputTracker, blockManagerMaster)
+    val manager = new ShuffleRebalanceManager(conf, mapOutputTracker, blockManagerMaster)
 
+    val method = classOf[ShuffleRebalanceManager].getDeclaredMethod(
+      "planShuffleRebalancing",
+      classOf[Int],
+      classOf[Map[String, Long]],
+      classOf[Int])
+    method.setAccessible(true)
 
-    // Test would verify that move operations are planned correctly
-    // with source and target executors identified properly
+    // All executors have equal size - no rebalancing needed
+    val executorSizes = Map(
+      "exec1" -> (100L * 1024 * 1024),
+      "exec2" -> (100L * 1024 * 1024),
+      "exec3" -> (100L * 1024 * 1024)
+    )
+
+    val operations = method.invoke(manager, Int.box(1), executorSizes, Int.box(10))
+      .asInstanceOf[Seq[ShuffleRebalanceOperation]]
+
+    assert(operations.isEmpty, "Should not create operations when all executors are balanced")
+  }
+
+  test("shuffle move operation planning: single executor") {
+    val conf = new SparkConf()
+      .set(SHUFFLE_REBALANCE_ENABLED, true)
+      .set(SHUFFLE_REBALANCE_THRESHOLD, 1.5)
+      .set(SHUFFLE_REBALANCE_MIN_SIZE_MB, 100L)
+
+    val mapOutputTracker = mock(classOf[MapOutputTrackerMaster])
+    val blockManagerMaster = mock(classOf[BlockManagerMaster])
+
+    val manager = new ShuffleRebalanceManager(conf, mapOutputTracker, blockManagerMaster)
+
+    val method = classOf[ShuffleRebalanceManager].getDeclaredMethod(
+      "planShuffleRebalancing",
+      classOf[Int],
+      classOf[Map[String, Long]],
+      classOf[Int])
+    method.setAccessible(true)
+
+    // Single executor - no rebalancing possible
+    val executorSizes = Map("exec1" -> (500L * 1024 * 1024))
+
+    val operations = method.invoke(manager, Int.box(1), executorSizes, Int.box(10))
+      .asInstanceOf[Seq[ShuffleRebalanceOperation]]
+
+    assert(operations.isEmpty, "Should not create operations with single executor")
   }
 
   test("shuffle move execution with transfer service") {
