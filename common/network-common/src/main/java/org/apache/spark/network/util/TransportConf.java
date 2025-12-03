@@ -491,6 +491,22 @@ public class TransportConf {
   }
 
   /**
+   * Whether to track queue wait time for shuffle fetch requests.
+   * When enabled, measures time from message decode to processing start.
+   */
+  public boolean shuffleQueueWaitTimeEnabled() {
+    return conf.getBoolean("spark.shuffle.server.queueWaitTimeEnabled", false);
+  }
+
+  /**
+   * Whether to sample queue length for shuffle fetch requests.
+   * When enabled, periodically samples EventLoop queue depth.
+   */
+  public boolean shuffleQueueLengthSamplingEnabled() {
+    return conf.getBoolean("spark.shuffle.server.queueLengthSamplingEnabled", false);
+  }
+
+  /**
    * Percentage of io.serverThreads used by netty to process FinalizeShuffleMerge. When the config
    * `spark.shuffle.server.finalizeShuffleMergeThreadsPercent` is set, shuffle server will use a
    * separate EventLoopGroup to process FinalizeShuffleMerge messages, which are I/O intensive and

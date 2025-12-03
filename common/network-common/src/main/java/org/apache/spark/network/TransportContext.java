@@ -248,7 +248,9 @@ public class TransportContext implements Closeable {
             conf.maxChunksBeingTransferred(), true /* syncModeEnabled */, metrics);
 
           // Initialize queue length sampling for shuffle fetch metrics
-          metricsSource.initializeQueueLengthSampling(chunkFetchWorkers);
+          if (conf.shuffleQueueLengthSamplingEnabled()) {
+            metricsSource.initializeQueueLengthSampling(chunkFetchWorkers);
+          }
         } else {
           chunkFetchHandler = new ChunkFetchRequestHandler(
             channelHandler.getClient(), rpcHandler.getStreamManager(),
