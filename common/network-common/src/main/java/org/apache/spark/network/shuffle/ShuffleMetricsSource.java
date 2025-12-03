@@ -17,6 +17,8 @@
 
 package org.apache.spark.network.shuffle;
 
+import io.netty.channel.EventLoopGroup;
+
 /**
  * Implemented by RPC handlers that can expose shuffle fetch metrics for fetch request handling.
  */
@@ -25,4 +27,14 @@ public interface ShuffleMetricsSource {
    * @return metrics for shuffle fetch handling, or null if not available.
    */
   ShuffleFetchMetrics getShuffleFetchMetrics();
+
+  /**
+   * Initialize queue length sampling from the chunk fetch EventLoopGroup.
+   * This is called when the chunk fetch workers EventLoopGroup is created.
+   *
+   * @param chunkFetchWorkers The EventLoopGroup handling chunk fetch requests
+   */
+  default void initializeQueueLengthSampling(EventLoopGroup chunkFetchWorkers) {
+    // Default implementation does nothing for backwards compatibility
+  }
 }

@@ -239,12 +239,16 @@ public class TransportContext implements Closeable {
       if (chunkFetchWorkers != null) {
         ChunkFetchRequestHandler chunkFetchHandler;
         if (rpcHandler instanceof org.apache.spark.network.shuffle.ShuffleMetricsSource) {
+          org.apache.spark.network.shuffle.ShuffleMetricsSource metricsSource =
+            (org.apache.spark.network.shuffle.ShuffleMetricsSource) rpcHandler;
           org.apache.spark.network.shuffle.ShuffleFetchMetrics metrics =
-            ((org.apache.spark.network.shuffle.ShuffleMetricsSource) rpcHandler)
-              .getShuffleFetchMetrics();
+            metricsSource.getShuffleFetchMetrics();
           chunkFetchHandler = new ChunkFetchRequestHandler(
             channelHandler.getClient(), rpcHandler.getStreamManager(),
             conf.maxChunksBeingTransferred(), true /* syncModeEnabled */, metrics);
+
+          // Initialize queue length sampling for shuffle fetch metrics
+          metricsSource.initializeQueueLengthSampling(chunkFetchWorkers);
         } else {
           chunkFetchHandler = new ChunkFetchRequestHandler(
             channelHandler.getClient(), rpcHandler.getStreamManager(),

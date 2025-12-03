@@ -40,6 +40,9 @@ import com.codahale.metrics.RatioGauge;
 import com.codahale.metrics.Timer;
 import com.codahale.metrics.UniformReservoir;
 import com.google.common.annotations.VisibleForTesting;
+import io.netty.channel.EventLoop;
+import io.netty.channel.EventLoopGroup;
+import io.netty.util.concurrent.SingleThreadEventExecutor;
 
 import org.apache.spark.internal.SparkLogger;
 import org.apache.spark.internal.SparkLoggerFactory;
@@ -127,6 +130,11 @@ public class ExternalBlockHandler extends RpcHandler
   @Override
   public ShuffleFetchMetrics getShuffleFetchMetrics() {
     return metrics.toShuffleFetchMetrics();
+  }
+
+  @Override
+  public void initializeQueueLengthSampling(EventLoopGroup chunkFetchWorkers) {
+    metrics.initializeQueueLengthSampling(chunkFetchWorkers);
   }
 
   @Override
@@ -454,6 +462,37 @@ public class ExternalBlockHandler extends RpcHandler
      */
     public void registerStreamToShuffle(long streamId, int shuffleId) {
       streamToShuffleMap.put(streamId, shuffleId);
+    }
+
+    /**
+     * Initialize periodic queue length sampling from the chunk fetch EventLoopGroup.
+     * Must be called after the EventLoopGroup is created.
+     *
+     * @param chunkFetchWorkers The EventLoopGroup handling chunk fetch requests
+     */
+    public void initializeQueueLengthSampling(EventLoopGroup chunkFetchWorkers) {
+      if (chunkFetchWorkers == null || queueLengthHistogram == null) {
+        return;
+      }
+
+      // Schedule periodic sampling on each EventLoop
+      chunkFetchWorkers.forEach(eventExecutor -> {
+        if (eventExecutor instanceof SingleThreadEventExecutor) {
+          SingleThreadEventExecutor executor = (SingleThreadEventExecutor) eventExecutor;
+          executor.scheduleAtFixedRate(() -> {
+            try {
+              // pendingTasks() returns number of tasks waiting in queue
+              // Must be called from within EventLoop to be cheap and thread-safe
+              int pending = executor.pendingTasks();
+              queueLengthHistogram.update(pending);
+            } catch (Exception e) {
+              logger.debug("Error sampling queue length", e);
+            }
+          }, 0, 100, TimeUnit.MILLISECONDS);
+        }
+      });
+
+      logger.info("Initialized queue length sampling for shuffle fetch metrics");
     }
 
     /**
