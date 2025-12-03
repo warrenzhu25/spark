@@ -23,7 +23,9 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 import com.codahale.metrics.Counter;
+import com.codahale.metrics.Histogram;
 import com.codahale.metrics.Timer;
+import com.codahale.metrics.UniformReservoir;
 import io.netty.channel.Channel;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -41,6 +43,20 @@ import org.apache.spark.network.shuffle.ShuffleFetchMetrics;
 import org.apache.spark.util.Pair;
 
 public class ChunkFetchRequestHandlerSuite {
+
+  private ShuffleFetchMetrics createTestMetrics() {
+    Timer chunkFetchLatencyMillis = new Timer();
+    Timer chunkReadLatencyMillis = new Timer();
+    Timer responseSendLatencyMillis = new Timer();
+    Counter queueDepth = new Counter();
+    Timer queueWait = new Timer();
+    Histogram queueLength = new Histogram(new UniformReservoir());
+    return new ShuffleFetchMetrics(
+      chunkFetchLatencyMillis, chunkReadLatencyMillis, responseSendLatencyMillis, queueDepth,
+      queueWait, queueLength,
+      new ConcurrentHashMap<>(), new ConcurrentHashMap<>(),
+      new ConcurrentHashMap<>(), new ConcurrentHashMap<>());
+  }
 
   @Test
   public void handleChunkFetchRequest() throws Exception {
@@ -129,14 +145,7 @@ public class ChunkFetchRequestHandlerSuite {
     });
 
     // Create metrics
-    Timer chunkFetchLatencyMillis = new Timer();
-    Timer chunkReadLatencyMillis = new Timer();
-    Timer responseSendLatencyMillis = new Timer();
-    Counter queueDepth = new Counter();
-    ShuffleFetchMetrics metrics = new ShuffleFetchMetrics(
-      chunkFetchLatencyMillis, chunkReadLatencyMillis, responseSendLatencyMillis, queueDepth,
-      new ConcurrentHashMap<>(), new ConcurrentHashMap<>(),
-      new ConcurrentHashMap<>(), new ConcurrentHashMap<>());
+    ShuffleFetchMetrics metrics = createTestMetrics();
 
     // Prepare the stream with one buffer
     List<ManagedBuffer> managedBuffers = new ArrayList<>();
@@ -159,19 +168,19 @@ public class ChunkFetchRequestHandlerSuite {
     responseAndPromisePairs.get(0).getRight().finish(true);
 
     // Verify all metrics were updated
-    Assertions.assertEquals(1, chunkFetchLatencyMillis.getCount(),
+    Assertions.assertEquals(1, metrics.getChunkFetchLatencyMillis().getCount(),
       "Total fetch latency should be recorded");
-    Assertions.assertEquals(1, chunkReadLatencyMillis.getCount(),
+    Assertions.assertEquals(1, metrics.getChunkReadLatencyMillis().getCount(),
       "Disk read latency should be recorded");
-    Assertions.assertEquals(1, responseSendLatencyMillis.getCount(),
+    Assertions.assertEquals(1, metrics.getResponseSendLatencyMillis().getCount(),
       "Response send latency should be recorded");
 
     // Verify timing values are reasonable (non-zero)
-    Assertions.assertTrue(chunkFetchLatencyMillis.getSnapshot().getMax() > 0,
+    Assertions.assertTrue(metrics.getChunkFetchLatencyMillis().getSnapshot().getMax() > 0,
       "Total fetch time should be positive");
-    Assertions.assertTrue(chunkReadLatencyMillis.getSnapshot().getMax() >= 0,
+    Assertions.assertTrue(metrics.getChunkReadLatencyMillis().getSnapshot().getMax() >= 0,
       "Disk read time should be non-negative");
-    Assertions.assertTrue(responseSendLatencyMillis.getSnapshot().getMax() >= 0,
+    Assertions.assertTrue(metrics.getResponseSendLatencyMillis().getSnapshot().getMax() >= 0,
       "Response send time should be non-negative");
   }
 
@@ -192,14 +201,7 @@ public class ChunkFetchRequestHandlerSuite {
     });
 
     // Create metrics
-    Timer chunkFetchLatencyMillis = new Timer();
-    Timer chunkReadLatencyMillis = new Timer();
-    Timer responseSendLatencyMillis = new Timer();
-    Counter queueDepth = new Counter();
-    ShuffleFetchMetrics metrics = new ShuffleFetchMetrics(
-      chunkFetchLatencyMillis, chunkReadLatencyMillis, responseSendLatencyMillis, queueDepth,
-      new ConcurrentHashMap<>(), new ConcurrentHashMap<>(),
-      new ConcurrentHashMap<>(), new ConcurrentHashMap<>());
+    ShuffleFetchMetrics metrics = createTestMetrics();
 
     // Prepare the stream with a null buffer (will cause failure)
     List<ManagedBuffer> managedBuffers = new ArrayList<>();
@@ -222,11 +224,11 @@ public class ChunkFetchRequestHandlerSuite {
     responseAndPromisePairs.get(0).getRight().finish(true);
 
     // Verify metrics were updated even on failure
-    Assertions.assertEquals(1, chunkFetchLatencyMillis.getCount(),
+    Assertions.assertEquals(1, metrics.getChunkFetchLatencyMillis().getCount(),
       "Total fetch latency should be recorded on failure");
-    Assertions.assertEquals(1, chunkReadLatencyMillis.getCount(),
+    Assertions.assertEquals(1, metrics.getChunkReadLatencyMillis().getCount(),
       "Disk read latency should be recorded (measures getChunk call time, even when null)");
-    Assertions.assertEquals(1, responseSendLatencyMillis.getCount(),
+    Assertions.assertEquals(1, metrics.getResponseSendLatencyMillis().getCount(),
       "Response send latency should be recorded on failure");
   }
 
@@ -287,14 +289,7 @@ public class ChunkFetchRequestHandlerSuite {
     });
 
     // Create metrics
-    Timer chunkFetchLatencyMillis = new Timer();
-    Timer chunkReadLatencyMillis = new Timer();
-    Timer responseSendLatencyMillis = new Timer();
-    Counter queueDepth = new Counter();
-    ShuffleFetchMetrics metrics = new ShuffleFetchMetrics(
-      chunkFetchLatencyMillis, chunkReadLatencyMillis, responseSendLatencyMillis, queueDepth,
-      new ConcurrentHashMap<>(), new ConcurrentHashMap<>(),
-      new ConcurrentHashMap<>(), new ConcurrentHashMap<>());
+    ShuffleFetchMetrics metrics = createTestMetrics();
 
     // Prepare the stream with one buffer
     List<ManagedBuffer> managedBuffers = new ArrayList<>();
@@ -312,9 +307,9 @@ public class ChunkFetchRequestHandlerSuite {
 
     // Verify that total time >= disk read time + response send time
     // (May not be exactly equal due to other overhead like authorization, serialization, etc.)
-    long totalTimeNanos = chunkFetchLatencyMillis.getSnapshot().getMax();
-    long diskReadTimeNanos = chunkReadLatencyMillis.getSnapshot().getMax();
-    long responseSendTimeNanos = responseSendLatencyMillis.getSnapshot().getMax();
+    long totalTimeNanos = metrics.getChunkFetchLatencyMillis().getSnapshot().getMax();
+    long diskReadTimeNanos = metrics.getChunkReadLatencyMillis().getSnapshot().getMax();
+    long responseSendTimeNanos = metrics.getResponseSendLatencyMillis().getSnapshot().getMax();
 
     Assertions.assertTrue(totalTimeNanos >= diskReadTimeNanos,
       "Total time should be >= disk read time");
@@ -341,14 +336,7 @@ public class ChunkFetchRequestHandlerSuite {
     });
 
     // Create metrics with queue depth counter
-    Timer chunkFetchLatencyMillis = new Timer();
-    Timer chunkReadLatencyMillis = new Timer();
-    Timer responseSendLatencyMillis = new Timer();
-    Counter queueDepth = new Counter();
-    ShuffleFetchMetrics metrics = new ShuffleFetchMetrics(
-      chunkFetchLatencyMillis, chunkReadLatencyMillis, responseSendLatencyMillis, queueDepth,
-      new ConcurrentHashMap<>(), new ConcurrentHashMap<>(),
-      new ConcurrentHashMap<>(), new ConcurrentHashMap<>());
+    ShuffleFetchMetrics metrics = createTestMetrics();
 
     // Prepare the stream with buffers
     List<ManagedBuffer> managedBuffers = new ArrayList<>();
@@ -361,28 +349,28 @@ public class ChunkFetchRequestHandlerSuite {
       reverseClient, rpcHandler.getStreamManager(), 2L, false, metrics);
 
     // Initially queue depth should be 0
-    Assertions.assertEquals(0, queueDepth.getCount(), "Initial queue depth should be 0");
+    Assertions.assertEquals(0, metrics.getChunkFetchQueueDepth().getCount(), "Initial queue depth should be 0");
 
     // Fetch first chunk - queue depth should increase to 1
     RequestMessage request1 = new ChunkFetchRequest(new StreamChunkId(streamId, 0));
     requestHandler.channelRead(context, request1);
-    Assertions.assertEquals(1, queueDepth.getCount(),
+    Assertions.assertEquals(1, metrics.getChunkFetchQueueDepth().getCount(),
       "Queue depth should be 1 while request is in flight");
 
     // Fetch second chunk before completing first - queue depth should be 2
     RequestMessage request2 = new ChunkFetchRequest(new StreamChunkId(streamId, 1));
     requestHandler.channelRead(context, request2);
-    Assertions.assertEquals(2, queueDepth.getCount(),
+    Assertions.assertEquals(2, metrics.getChunkFetchQueueDepth().getCount(),
       "Queue depth should be 2 with two requests in flight");
 
     // Complete first request - queue depth should decrease to 1
     responseAndPromisePairs.get(0).getRight().finish(true);
-    Assertions.assertEquals(1, queueDepth.getCount(),
+    Assertions.assertEquals(1, metrics.getChunkFetchQueueDepth().getCount(),
       "Queue depth should be 1 after completing one request");
 
     // Complete second request - queue depth should return to 0
     responseAndPromisePairs.get(1).getRight().finish(true);
-    Assertions.assertEquals(0, queueDepth.getCount(),
+    Assertions.assertEquals(0, metrics.getChunkFetchQueueDepth().getCount(),
       "Queue depth should be 0 after completing all requests");
   }
 
@@ -406,12 +394,15 @@ public class ChunkFetchRequestHandlerSuite {
     Timer chunkReadLatencyMillis = new Timer();
     Timer responseSendLatencyMillis = new Timer();
     Counter queueDepth = new Counter();
+    Timer queueWait = new Timer();
+    Histogram queueLength = new Histogram(new UniformReservoir());
     ConcurrentHashMap<Long, Integer> streamToShuffleMap = new ConcurrentHashMap<>();
     ConcurrentHashMap<Integer, Timer> perShuffleLatencyTimers = new ConcurrentHashMap<>();
     ConcurrentHashMap<Integer, Timer> perShuffleReadLatencyTimers = new ConcurrentHashMap<>();
     ConcurrentHashMap<Integer, Timer> perShuffleResponseSendLatencyTimers = new ConcurrentHashMap<>();
     ShuffleFetchMetrics metrics = new ShuffleFetchMetrics(
       chunkFetchLatencyMillis, chunkReadLatencyMillis, responseSendLatencyMillis, queueDepth,
+      queueWait, queueLength,
       streamToShuffleMap, perShuffleLatencyTimers, perShuffleReadLatencyTimers,
       perShuffleResponseSendLatencyTimers);
 
@@ -441,7 +432,7 @@ public class ChunkFetchRequestHandlerSuite {
     responseAndPromisePairs.get(1).getRight().finish(true);
 
     // Verify global metrics recorded both requests
-    Assertions.assertEquals(2, chunkFetchLatencyMillis.getCount(),
+    Assertions.assertEquals(2, metrics.getChunkFetchLatencyMillis().getCount(),
       "Global metrics should record all requests");
 
     // Verify per-shuffle metrics exist

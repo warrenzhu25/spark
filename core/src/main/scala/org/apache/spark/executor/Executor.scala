@@ -34,6 +34,7 @@ import scala.concurrent.duration._
 import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
+import com.codahale.metrics.{Histogram, Timer}
 import com.google.common.cache.{Cache, CacheBuilder, RemovalListener, RemovalNotification}
 import com.google.common.util.concurrent.ThreadFactoryBuilder
 import org.slf4j.{MDC => SLF4JMDC}
@@ -47,6 +48,8 @@ import org.apache.spark.internal.config.{EXECUTOR_USER_CLASS_PATH_FIRST => EXECU
 import org.apache.spark.internal.plugin.PluginContainer
 import org.apache.spark.memory.{SparkOutOfMemoryError, TaskMemoryManager}
 import org.apache.spark.metrics.source.JVMCPUSource
+import org.apache.spark.network.netty.NettyBlockTransferService
+import org.apache.spark.network.shuffle.ShuffleFetchMetrics
 import org.apache.spark.resource.ResourceInformation
 import org.apache.spark.rpc.RpcTimeout
 import org.apache.spark.scheduler._
@@ -1259,11 +1262,129 @@ private[spark] class Executor(
    * Collects server-side shuffle fetch statistics from the BlockManager's shuffle service.
    * Returns None if the feature is disabled or metrics are unavailable.
    */
+  private case class ShuffleMetricsSnapshot(
+      requestCount: Long,
+      totalLatencySum: Long,
+      totalLatencyMax: Long,
+      diskReadLatencySum: Long,
+      diskReadLatencyMax: Long,
+      sendLatencySum: Long,
+      sendLatencyMax: Long,
+      queueWaitTimeSum: Long,
+      queueWaitTimeMax: Long,
+      queueLengthMax: Int,
+      queueLengthMean: Double,
+      queueLengthSamples: Long)
+
+  @GuardedBy("this")
+  private var lastServerShuffleSnapshot: Option[ShuffleMetricsSnapshot] = None
+
   private def getServerShuffleStats(): Option[ServerShuffleFetchStats] = {
-    // TODO: Implement actual metrics collection from ExternalBlockHandler
-    // For now, return None as a placeholder
-    // This will be implemented when wiring up the BlockManager integration
-    None
+    if (!conf.get(SHUFFLE_SERVER_FETCH_STATS_ENABLED)) {
+      return None
+    }
+
+    val metricsOpt: Option[ShuffleFetchMetrics] = env.blockManager.blockTransferService match {
+      case netty: NettyBlockTransferService => netty.getServerShuffleFetchMetrics
+      case _ => None
+    }
+
+    val metrics = metricsOpt.getOrElse(return None)
+
+    def snapshotTimer(timer: Timer): (Long, Long, Long) = {
+      val snap = timer.getSnapshot
+      val count = timer.getCount
+      val sum = (snap.getMean * count).toLong
+      (count, snap.getMax, sum)
+    }
+
+    def snapshotHistogram(hist: Histogram): (Double, Int, Long) = {
+      val snap = hist.getSnapshot
+      (snap.getMean, snap.getMax.toInt, snap.size())
+    }
+
+    def buildSnapshot(m: ShuffleFetchMetrics): ShuffleMetricsSnapshot = {
+      val (reqCount, totalMax, totalSum) = snapshotTimer(m.getChunkFetchLatencyMillis)
+      val (_, diskMax, diskSum) = snapshotTimer(m.getChunkReadLatencyMillis)
+      val (_, sendMax, sendSum) = snapshotTimer(m.getResponseSendLatencyMillis)
+
+      val queueWaitTimer = m.getQueueWaitTimeMillis
+      val (queueWaitSum, queueWaitMax, queueWaitCount) =
+        if (queueWaitTimer != null) {
+          val queueSnap = queueWaitTimer.getSnapshot
+          ((queueSnap.getMean * queueSnap.size()).toLong, queueSnap.getMax, queueSnap.size().toLong)
+        } else {
+          (0L, 0L, 0L)
+        }
+
+      val queueLengthHist = m.getQueueLengthHistogram
+      val (queueLengthMean, queueLengthMax, queueLengthSamples) =
+        if (queueLengthHist != null) snapshotHistogram(queueLengthHist) else (0.0, 0, 0L)
+
+      ShuffleMetricsSnapshot(
+        requestCount = reqCount,
+        totalLatencySum = totalSum,
+        totalLatencyMax = totalMax,
+        diskReadLatencySum = diskSum,
+        diskReadLatencyMax = diskMax,
+        sendLatencySum = sendSum,
+        sendLatencyMax = sendMax,
+        queueWaitTimeSum = queueWaitSum,
+        queueWaitTimeMax = queueWaitMax,
+        queueLengthMax = queueLengthMax,
+        queueLengthMean = queueLengthMean,
+        queueLengthSamples = queueLengthSamples + queueWaitCount)
+    }
+
+    def delta(previous: Option[ShuffleMetricsSnapshot], current: ShuffleMetricsSnapshot):
+      Option[ServerShuffleFetchStats] = {
+      val prev = previous.getOrElse(ShuffleMetricsSnapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0, 0))
+
+      val deltaRequests = current.requestCount - prev.requestCount
+      if (deltaRequests <= 0) {
+        return None
+      }
+
+      val totalLatencySum = current.totalLatencySum - prev.totalLatencySum
+      val diskReadSum = current.diskReadLatencySum - prev.diskReadLatencySum
+      val sendSum = current.sendLatencySum - prev.sendLatencySum
+      val queueWaitSum = current.queueWaitTimeSum - prev.queueWaitTimeSum
+
+      if (Seq(totalLatencySum, diskReadSum, sendSum, queueWaitSum).exists(_ < 0)) {
+        return None
+      }
+
+      val queueSamplesDelta = current.queueLengthSamples - prev.queueLengthSamples
+      val queueMean = if (queueSamplesDelta > 0) {
+        val totalMeanSum =
+          current.queueLengthMean * current.queueLengthSamples -
+            prev.queueLengthMean * prev.queueLengthSamples
+        totalMeanSum / queueSamplesDelta
+      } else {
+        0.0
+      }
+
+      Some(ServerShuffleFetchStats(
+        executorId = executorId,
+        requestCount = deltaRequests,
+        totalLatencySum = totalLatencySum,
+        totalLatencyMax = current.totalLatencyMax,
+        diskReadLatencySum = diskReadSum,
+        diskReadLatencyMax = current.diskReadLatencyMax,
+        sendLatencySum = sendSum,
+        sendLatencyMax = current.sendLatencyMax,
+        queueWaitTimeSum = queueWaitSum,
+        queueWaitTimeMax = current.queueWaitTimeMax,
+        maxQueueLength = current.queueLengthMax,
+        avgQueueLength = queueMean))
+    }
+
+    val currentSnapshot = buildSnapshot(metrics)
+    val deltaStats = delta(lastServerShuffleSnapshot, currentSnapshot)
+    this.synchronized {
+      lastServerShuffleSnapshot = Some(currentSnapshot)
+    }
+    deltaStats
   }
 
   /** Reports heartbeat and metrics for active tasks to the driver. */

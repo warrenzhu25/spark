@@ -36,7 +36,7 @@ import org.apache.spark.network.buffer.{ManagedBuffer, NioManagedBuffer}
 import org.apache.spark.network.client.{RpcResponseCallback, TransportClientBootstrap}
 import org.apache.spark.network.crypto.{AuthClientBootstrap, AuthServerBootstrap}
 import org.apache.spark.network.server._
-import org.apache.spark.network.shuffle.{BlockFetchingListener, BlockTransferListener, DownloadFileManager, OneForOneBlockFetcher, RetryingBlockTransferor}
+import org.apache.spark.network.shuffle.{BlockFetchingListener, BlockTransferListener, DownloadFileManager, OneForOneBlockFetcher, RetryingBlockTransferor, ShuffleFetchMetrics}
 import org.apache.spark.network.shuffle.protocol.{UploadBlock, UploadBlockStream}
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.rpc.RpcEndpointRef
@@ -65,9 +65,10 @@ private[spark] class NettyBlockTransferService(
 
   private[this] var transportContext: TransportContext = _
   private[this] var server: TransportServer = _
+  private[this] var rpcHandler: NettyBlockRpcServer = _
 
   override def init(blockDataManager: BlockDataManager): Unit = {
-    val rpcHandler = new NettyBlockRpcServer(conf.getAppId, serializer, blockDataManager)
+    rpcHandler = new NettyBlockRpcServer(conf.getAppId, serializer, blockDataManager)
     var serverBootstrap: Option[TransportServerBootstrap] = None
     var clientBootstrap: Option[TransportClientBootstrap] = None
     this.transportConf = SparkTransportConf.fromSparkConf(
@@ -114,6 +115,13 @@ private[spark] class NettyBlockTransferService(
         allMetrics
       }
     }
+  }
+
+  /**
+   * Expose shuffle fetch metrics recorded by the RPC handler for heartbeat reporting.
+   */
+  private[spark] def getServerShuffleFetchMetrics: Option[ShuffleFetchMetrics] = {
+    Option(rpcHandler).map(_.serverShuffleMetrics())
   }
 
   override def fetchBlocks(

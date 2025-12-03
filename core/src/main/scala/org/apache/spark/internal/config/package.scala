@@ -1437,6 +1437,23 @@ package object config {
       .intConf
       .createWithDefault(3)
 
+  private[spark] val SHUFFLE_SERVER_FETCH_STATS_ENABLED =
+    ConfigBuilder("spark.shuffle.serverFetchStats.enabled")
+      .doc("Enable collection and reporting of server-side shuffle fetch metrics from executors " +
+        "back to the driver via heartbeats.")
+      .version("4.0.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  private[spark] val SHUFFLE_SERVER_FETCH_STATS_TOP_K =
+    ConfigBuilder("spark.shuffle.serverFetchStats.topK")
+      .doc("Number of executors to include when reporting server-side shuffle fetch statistics " +
+        "after a stage completes.")
+      .version("4.0.0")
+      .intConf
+      .checkValue(_ > 0, "Top-K executors must be a positive value.")
+      .createWithDefault(3)
+
   private[spark] val SHUFFLE_MAX_ATTEMPTS_ON_NETTY_OOM =
     ConfigBuilder("spark.shuffle.maxAttemptsOnNettyOOM")
       .doc("The max attempts of a shuffle block would retry on Netty OOM issue before throwing " +

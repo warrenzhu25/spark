@@ -18,9 +18,14 @@
 package org.apache.spark.network.netty
 
 import java.nio.ByteBuffer
+import java.util.concurrent.TimeUnit
 
 import scala.jdk.CollectionConverters._
 import scala.reflect.ClassTag
+
+import com.codahale.metrics.{Counter, Histogram}
+import io.netty.channel.EventLoopGroup
+import io.netty.util.concurrent.SingleThreadEventExecutor
 
 import org.apache.spark.SparkException
 import org.apache.spark.internal.Logging
@@ -29,7 +34,9 @@ import org.apache.spark.network.BlockDataManager
 import org.apache.spark.network.buffer.NioManagedBuffer
 import org.apache.spark.network.client.{RpcResponseCallback, StreamCallbackWithID, TransportClient}
 import org.apache.spark.network.server.{OneForOneStreamManager, RpcHandler, StreamManager}
+import org.apache.spark.network.shuffle.{ShuffleFetchMetrics, ShuffleMetricsSource}
 import org.apache.spark.network.shuffle.protocol._
+import org.apache.spark.network.util.TimerWithCustomTimeUnit
 import org.apache.spark.serializer.Serializer
 import org.apache.spark.storage.{BlockId, BlockManager, ShuffleBlockBatchId, ShuffleBlockId, StorageLevel}
 
@@ -44,9 +51,45 @@ class NettyBlockRpcServer(
     appId: String,
     serializer: Serializer,
     blockManager: BlockDataManager)
-  extends RpcHandler with Logging {
+  extends RpcHandler with ShuffleMetricsSource with Logging {
 
   private val streamManager = new OneForOneStreamManager()
+
+  private val shuffleFetchMetrics: ShuffleFetchMetrics = new ShuffleFetchMetrics(
+    new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS),
+    new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS),
+    new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS),
+    new Counter(),
+    new TimerWithCustomTimeUnit(TimeUnit.MILLISECONDS),
+    new Histogram(new com.codahale.metrics.UniformReservoir()),
+    null,
+    null,
+    null,
+    null)
+
+  override def getShuffleFetchMetrics(): ShuffleFetchMetrics = shuffleFetchMetrics
+
+  override def initializeQueueLengthSampling(chunkFetchWorkers: EventLoopGroup): Unit = {
+    if (chunkFetchWorkers == null) return
+    chunkFetchWorkers.forEach { executor =>
+      executor match {
+        case single: SingleThreadEventExecutor =>
+          single.scheduleAtFixedRate(() => {
+            try {
+              shuffleFetchMetrics.getQueueLengthHistogram.update(single.pendingTasks())
+            } catch {
+              case _: Exception => // best-effort sampling
+            }
+          }, 0, 100, TimeUnit.MILLISECONDS)
+        case _ =>
+      }
+    }
+  }
+
+  /**
+   * Shuffle fetch metrics used by the executor for heartbeat reporting.
+   */
+  private[netty] def serverShuffleMetrics(): ShuffleFetchMetrics = shuffleFetchMetrics
 
   override def receive(
       client: TransportClient,

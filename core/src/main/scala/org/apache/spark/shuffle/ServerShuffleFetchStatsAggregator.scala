@@ -45,13 +45,13 @@ private[spark] class ServerShuffleFetchStatsAggregator(topK: Int = 3) {
 
   /**
    * Get top-K executors with highest average shuffle fetch latency.
-   * Returns executors sorted by average latency (descending).
+   * Returns executors sorted by total latency (descending).
    */
   def getTopKSlowestExecutors: Seq[ServerShuffleFetchAggregate] = synchronized {
     statsMap.values
       .filter(_.totalRequests > 0)
       .toSeq
-      .sortBy(-_.avgLatency)
+      .sortBy(-_.totalLatencySum)
       .take(topK)
   }
 
@@ -68,6 +68,13 @@ private[spark] class ServerShuffleFetchStatsAggregator(topK: Int = 3) {
    */
   def reset(): Unit = synchronized {
     statsMap.clear()
+  }
+
+  /**
+   * Remove metrics associated with an executor that has been lost.
+   */
+  def removeExecutor(executorId: String): Unit = synchronized {
+    statsMap.remove(executorId)
   }
 
   /**

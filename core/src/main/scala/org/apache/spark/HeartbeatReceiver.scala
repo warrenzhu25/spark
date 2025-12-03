@@ -90,7 +90,13 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
   private val executorLastSeen = new HashMap[String, Long]
 
   // Aggregator for server-side shuffle fetch statistics
-  private val serverShuffleStatsAggregator = new ServerShuffleFetchStatsAggregator(topK = 3)
+  private val serverShuffleStatsEnabled = sc.conf.get(config.SHUFFLE_SERVER_FETCH_STATS_ENABLED)
+  private val serverShuffleStatsTopK = sc.conf.get(config.SHUFFLE_SERVER_FETCH_STATS_TOP_K)
+  private val serverShuffleStatsAggregator = if (serverShuffleStatsEnabled) {
+    Some(new ServerShuffleFetchStatsAggregator(topK = serverShuffleStatsTopK))
+  } else {
+    None
+  }
 
   private val executorTimeoutMs = sc.conf.get(
     config.STORAGE_BLOCKMANAGER_HEARTBEAT_TIMEOUT
@@ -136,6 +142,7 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
       context.reply(true)
     case ExecutorRemoved(executorId) =>
       executorLastSeen.remove(executorId)
+      serverShuffleStatsAggregator.foreach(_.removeExecutor(executorId))
       context.reply(true)
     case TaskSchedulerIsSet =>
       scheduler = sc.taskScheduler
@@ -159,7 +166,7 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
 
           // Process server-side shuffle fetch statistics if present
           serverShuffleStats.foreach { stats =>
-            serverShuffleStatsAggregator.mergeStats(stats)
+            serverShuffleStatsAggregator.foreach(_.mergeStats(stats))
           }
 
           eventLoopThread.submit(new Runnable {
@@ -235,7 +242,7 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
    * Used for post-hoc observability after stage completion.
    */
   def getTopKSlowestExecutors(): Seq[ServerShuffleFetchAggregate] = {
-    serverShuffleStatsAggregator.getTopKSlowestExecutors
+    serverShuffleStatsAggregator.map(_.getTopKSlowestExecutors).getOrElse(Seq.empty)
   }
 
   /**
@@ -243,7 +250,7 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
    * Called after stage completion to prepare for next stage.
    */
   def resetServerShuffleStats(): Unit = {
-    serverShuffleStatsAggregator.reset()
+    serverShuffleStatsAggregator.foreach(_.reset())
   }
 
   private def expireDeadHosts(): Unit = {

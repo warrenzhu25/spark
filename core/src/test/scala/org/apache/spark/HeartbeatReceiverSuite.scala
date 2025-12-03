@@ -29,13 +29,14 @@ import org.scalatest.{BeforeAndAfterEach, PrivateMethodTester}
 import org.scalatest.concurrent.Eventually._
 
 import org.apache.spark.executor.{ExecutorMetrics, TaskMetrics}
-import org.apache.spark.internal.config.{DYN_ALLOCATION_TESTING, STORAGE_BLOCKMANAGER_HEARTBEAT_TIMEOUT}
+import org.apache.spark.internal.config.{DYN_ALLOCATION_TESTING, SHUFFLE_SERVER_FETCH_STATS_ENABLED, STORAGE_BLOCKMANAGER_HEARTBEAT_TIMEOUT}
 import org.apache.spark.internal.config.Network.NETWORK_TIMEOUT
 import org.apache.spark.resource.{ResourceProfile, ResourceProfileManager}
 import org.apache.spark.rpc.{RpcCallContext, RpcEndpoint, RpcEndpointRef, RpcEnv}
 import org.apache.spark.scheduler._
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages._
 import org.apache.spark.scheduler.cluster.CoarseGrainedSchedulerBackend
+import org.apache.spark.shuffle.{ServerShuffleFetchAggregate, ServerShuffleFetchStats}
 import org.apache.spark.storage.BlockManagerId
 import org.apache.spark.util.{ManualClock, ThreadUtils}
 
@@ -74,6 +75,7 @@ class HeartbeatReceiverSuite
       .setMaster("local[2]")
       .setAppName("test")
       .set(DYN_ALLOCATION_TESTING, true)
+      .set(SHUFFLE_SERVER_FETCH_STATS_ENABLED, true)
     sc = spy[SparkContext](new SparkContext(conf))
     scheduler = mock(classOf[TaskSchedulerImpl])
     when(sc.taskScheduler).thenReturn(scheduler)
@@ -264,17 +266,55 @@ class HeartbeatReceiverSuite
       STORAGE_BLOCKMANAGER_HEARTBEAT_TIMEOUT.key))
   }
 
+  test("server shuffle stats aggregation and reset") {
+    heartbeatReceiverRef.askSync[Boolean](TaskSchedulerIsSet)
+    addExecutorAndVerify(executorId1)
+    addExecutorAndVerify(executorId2)
+
+    val stats1 = ServerShuffleFetchStats(
+      executorId1, 10, totalLatencySum = 1000, totalLatencyMax = 200,
+      diskReadLatencySum = 300, diskReadLatencyMax = 120,
+      sendLatencySum = 200, sendLatencyMax = 80,
+      queueWaitTimeSum = 100, queueWaitTimeMax = 40,
+      maxQueueLength = 2, avgQueueLength = 1.0)
+    val stats2 = ServerShuffleFetchStats(
+      executorId2, 5, totalLatencySum = 2000, totalLatencyMax = 150,
+      diskReadLatencySum = 500, diskReadLatencyMax = 90,
+      sendLatencySum = 400, sendLatencyMax = 70,
+      queueWaitTimeSum = 50, queueWaitTimeMax = 30,
+      maxQueueLength = 3, avgQueueLength = 1.5)
+
+    triggerHeartbeat(executorId1, executorShouldReregister = false, serverStats = Some(stats1))
+    triggerHeartbeat(executorId2, executorShouldReregister = false, serverStats = Some(stats2))
+
+    val topK = heartbeatReceiverRef.askSync[Seq[ServerShuffleFetchAggregate]](
+      GetTopKSlowestExecutors)
+    assert(topK.map(_.executorId) === Seq(executorId2, executorId1))
+    assert(topK.head.totalLatencySum === 2000)
+
+    heartbeatReceiverRef.askSync[Boolean](ResetServerShuffleStats)
+    val afterReset = heartbeatReceiverRef.askSync[Seq[ServerShuffleFetchAggregate]](
+      GetTopKSlowestExecutors)
+    assert(afterReset.isEmpty)
+  }
+
   /** Manually send a heartbeat and return the response. */
   private def triggerHeartbeat(
       executorId: String,
-      executorShouldReregister: Boolean): Unit = {
+      executorShouldReregister: Boolean,
+      serverStats: Option[ServerShuffleFetchStats] = None): Unit = {
     val metrics = TaskMetrics.empty
     val blockManagerId = BlockManagerId(executorId, "localhost", 12345)
     val executorMetrics = new ExecutorMetrics(Array(123456L, 543L, 12345L, 1234L, 123L,
       12L, 432L, 321L, 654L, 765L))
     val executorUpdates = mutable.Map((0, 0) -> executorMetrics)
     val response = heartbeatReceiverRef.askSync[HeartbeatResponse](
-      Heartbeat(executorId, Array(1L -> metrics.accumulators()), blockManagerId, executorUpdates))
+      Heartbeat(
+        executorId,
+        Array(1L -> metrics.accumulators()),
+        blockManagerId,
+        executorUpdates,
+        serverStats))
     if (executorShouldReregister) {
       assert(response.reregisterBlockManager)
     } else {
