@@ -47,6 +47,8 @@ private[spark] class ShuffleRebalanceManager(
   private val shuffleRebalanceCheckIntervalMs = conf.get(SHUFFLE_REBALANCE_CHECK_INTERVAL_MS)
   private val shuffleRebalanceMaxConcurrent = conf.get(SHUFFLE_REBALANCE_MAX_CONCURRENT)
   private val fetchWaitThresholdMs = conf.get(SHUFFLE_REBALANCE_FETCH_WAIT_THRESHOLD_MS)
+  private val minCompletionRatio = conf.get(SHUFFLE_REBALANCE_MIN_COMPLETION_RATIO)
+  private val maxCompletionRatio = conf.get(SHUFFLE_REBALANCE_MAX_COMPLETION_RATIO)
 
   // Multi-location configuration
   private val enableMultiLocation = conf.get(SHUFFLE_REBALANCE_ENABLE_MULTI_LOCATION)
@@ -85,7 +87,11 @@ private[spark] class ShuffleRebalanceManager(
    * This is called during stage execution when some tasks have completed.
    */
   def checkAndInitiateShuffleRebalance(stage: ShuffleMapStage, completedTasks: Int): Unit = {
-    if (!shuffleRebalanceEnabled) return
+    if (!shuffleRebalanceEnabled) {
+      logDebug(s"Shuffle rebalance disabled for shuffle ${stage.shuffleDep.shuffleId}. " +
+        s"Set spark.shuffle.rebalance.enabled=true to enable.")
+      return
+    }
 
     if (fetchWaitThresholdMs > 0 && completedTasks > 0) {
       val stageInfo = stage.latestInfo
@@ -110,16 +116,35 @@ private[spark] class ShuffleRebalanceManager(
     }
 
     val completionRatio = completedTasks.toDouble / stage.numTasks
-    if (completionRatio < 0.25 || completionRatio >= 1.0) return
+    if (completionRatio < minCompletionRatio || completionRatio >= maxCompletionRatio) {
+      logDebug(s"Shuffle rebalance skipped for shuffle ${stage.shuffleDep.shuffleId}: " +
+        s"completion ratio ${f"$completionRatio%.2f"} " +
+        s"($completedTasks/${stage.numTasks} tasks) outside valid range " +
+        s"[$minCompletionRatio, $maxCompletionRatio).")
+      return
+    }
+
+    logDebug(s"Checking shuffle rebalance for shuffle ${stage.shuffleDep.shuffleId}: " +
+      s"$completedTasks/${stage.numTasks} tasks completed " +
+      s"(${f"${completionRatio * 100}%.1f"}%)")
 
     val shuffleId = stage.shuffleDep.shuffleId
     val numPartitions = stage.shuffleDep.partitioner.numPartitions
     val executorSizes = getExecutorShuffleSizes(shuffleId, numPartitions)
 
-    if (isShuffleRebalanceNeeded(executorSizes)) {
+    logDebug(s"Executor shuffle distribution for shuffle $shuffleId: " +
+      executorSizes.toSeq.sortBy(_._2).reverse
+        .map { case (exec, size) => s"$exec=${Utils.bytesToString(size)}" }
+        .mkString(", "))
+
+    if (isShuffleRebalanceNeeded(executorSizes, shuffleId)) {
       val rebalanceOperations = planShuffleRebalancing(shuffleId, executorSizes, numPartitions)
 
-      if (rebalanceOperations.nonEmpty) {
+      if (rebalanceOperations.isEmpty) {
+        logInfo(s"No rebalance operations planned for shuffle $shuffleId. " +
+          s"Possible reasons: all moves < ${shuffleRebalanceMinSizeMB}MB threshold, " +
+          s"no suitable blocks to move, or all executors within acceptable range.")
+      } else {
         val currentStats = computeDistributionStats(executorSizes)
 
         // Calculate projected sizes after rebalancing
@@ -216,8 +241,14 @@ private[spark] class ShuffleRebalanceManager(
   /**
    * Determine if shuffle rebalancing is needed based on size distribution.
    */
-  private def isShuffleRebalanceNeeded(executorSizes: Map[String, Long]): Boolean = {
-    if (executorSizes.size < 2) return false
+  private def isShuffleRebalanceNeeded(
+      executorSizes: Map[String, Long],
+      shuffleId: Int): Boolean = {
+    if (executorSizes.size < 2) {
+      logDebug(s"Shuffle rebalance not needed for shuffle $shuffleId: " +
+        s"only ${executorSizes.size} executor(s)")
+      return false
+    }
 
     val sizes = executorSizes.values.toSeq
     val avgSize = sizes.sum.toDouble / sizes.length
@@ -228,7 +259,34 @@ private[spark] class ShuffleRebalanceManager(
     val imbalanceRatio = maxSize.toDouble / avgSize
     val sizeDifferenceMB = (maxSize - minSize) / (1024 * 1024)
 
-    imbalanceRatio > shuffleRebalanceThreshold && sizeDifferenceMB > shuffleRebalanceMinSizeMB
+    val isNeeded =
+      imbalanceRatio > shuffleRebalanceThreshold && sizeDifferenceMB > shuffleRebalanceMinSizeMB
+
+    if (!isNeeded) {
+      val failedChecks = mutable.ArrayBuffer[String]()
+      if (imbalanceRatio <= shuffleRebalanceThreshold) {
+        failedChecks += s"imbalance ratio ${f"$imbalanceRatio%.2f"} <= " +
+          s"threshold $shuffleRebalanceThreshold"
+      }
+      if (sizeDifferenceMB <= shuffleRebalanceMinSizeMB) {
+        failedChecks += s"size difference ${sizeDifferenceMB}MB <= " +
+          s"min ${shuffleRebalanceMinSizeMB}MB"
+      }
+      logInfo(s"Shuffle rebalance not needed for shuffle $shuffleId: " +
+        s"${failedChecks.mkString(", ")}. " +
+        s"Distribution: ${executorSizes.size} executors, " +
+        s"avg=${Utils.bytesToString(avgSize.toLong)}, " +
+        s"max=${Utils.bytesToString(maxSize)}, min=${Utils.bytesToString(minSize)}")
+    } else {
+      logInfo(s"Shuffle rebalance needed for shuffle $shuffleId: " +
+        s"imbalance ratio ${f"$imbalanceRatio%.2f"} > threshold $shuffleRebalanceThreshold, " +
+        s"size difference ${sizeDifferenceMB}MB > min ${shuffleRebalanceMinSizeMB}MB. " +
+        s"Distribution: ${executorSizes.size} executors, " +
+        s"avg=${Utils.bytesToString(avgSize.toLong)}, " +
+        s"max=${Utils.bytesToString(maxSize)}, min=${Utils.bytesToString(minSize)}")
+    }
+
+    isNeeded
   }
 
   /**

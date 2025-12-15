@@ -797,6 +797,29 @@ package object config {
       .longConf
       .createWithDefault(0L)
 
+  private[spark] val SHUFFLE_REBALANCE_MIN_COMPLETION_RATIO =
+    ConfigBuilder("spark.shuffle.rebalance.minCompletionRatio")
+      .doc("Minimum completion ratio (0.0 to 1.0) of shuffle map tasks before triggering " +
+        "rebalancing. Rebalancing is skipped if fewer tasks have completed to avoid " +
+        "rebalancing based on insufficient data. Set to 0.0 to allow rebalancing from the " +
+        "first completed task. Default is 0.25 (25% of tasks).")
+      .version("4.0.0")
+      .doubleConf
+      .checkValue(v => v >= 0.0 && v < 1.0,
+        "Min completion ratio must be in range [0.0, 1.0)")
+      .createWithDefault(0.25)
+
+  private[spark] val SHUFFLE_REBALANCE_MAX_COMPLETION_RATIO =
+    ConfigBuilder("spark.shuffle.rebalance.maxCompletionRatio")
+      .doc("Maximum completion ratio of shuffle map tasks for triggering rebalancing. " +
+        "Rebalancing is skipped if this ratio is reached. Set to a value > 1.0 (e.g., 2.0) " +
+        "to effectively disable the upper bound check and allow rebalancing even when all " +
+        "tasks are complete. Default is 1.0 (100% of tasks).")
+      .version("4.0.0")
+      .doubleConf
+      .checkValue(v => v > 0.0, "Max completion ratio must be greater than 0.0")
+      .createWithDefault(1.0)
+
   private[spark] val SHUFFLE_SERVICE_DB_ENABLED =
     ConfigBuilder("spark.shuffle.service.db.enabled")
       .doc("Whether to use db in ExternalShuffleService. Note that this only affects " +
