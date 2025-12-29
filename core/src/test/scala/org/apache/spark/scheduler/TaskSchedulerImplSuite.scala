@@ -263,6 +263,62 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext
     assert(taskDescriptions.forall(t => t.executorId != "exe1"))
   }
 
+  test("barrier tasks assign correct offer index with shuffle skew filtering") {
+    val taskScheduler = setupSchedulerWithMockTaskSetShuffleSkewExecutors()
+
+    // Create 5 WorkerOffers, exe1 will be filtered out (index 1)
+    val workerOffers = IndexedSeq(
+      WorkerOffer("exe0", "host0", 2),
+      WorkerOffer("exe1", "host1", 2),
+      WorkerOffer("exe2", "host2", 2),
+      WorkerOffer("exe3", "host3", 2),
+      WorkerOffer("exe4", "host4", 2))
+
+    // Submit barrier taskset with 3 tasks (must launch together)
+    val barrierTaskSet = FakeTask.createBarrierTaskSet(3)
+    taskScheduler.submitTasks(barrierTaskSet)
+
+    val taskDescriptions = taskScheduler.resourceOffers(workerOffers).flatten
+
+    // All 3 barrier tasks should be scheduled
+    assert(taskDescriptions.length === 3)
+
+    // Tasks should NOT be on exe1 (filtered)
+    assert(taskDescriptions.forall(t => t.executorId != "exe1"))
+
+    // Verify tasks are on expected executors (exe0, exe2, exe3)
+    val executorIds = taskDescriptions.map(_.executorId).toSet
+    assert(executorIds === Set("exe0", "exe2", "exe3"))
+  }
+
+  test("tasks array indexing with filtered offers") {
+    val taskScheduler = setupSchedulerWithMockTaskSetShuffleSkewExecutors()
+
+    // Create 4 WorkerOffers
+    val workerOffers = IndexedSeq(
+      WorkerOffer("exe0", "host0", 1),
+      WorkerOffer("exe1", "host1", 1),
+      WorkerOffer("exe2", "host2", 1),
+      WorkerOffer("exe3", "host3", 1))
+
+    val taskSet = FakeTask.createTaskSet(3)
+    taskScheduler.submitTasks(taskSet)
+
+    // Call resourceOffers which internally creates tasks array
+    val tasksByExecutor = taskScheduler.resourceOffers(workerOffers)
+
+    // Verify task results are in correct positions
+    // tasksByExecutor should have 4 entries (one per shuffledOffer)
+    assert(tasksByExecutor.length === 4)
+
+    // exe1 (index 1) should have no tasks (filtered)
+    assert(tasksByExecutor(1).isEmpty)
+
+    // Other executors should have tasks
+    assert(tasksByExecutor(0).nonEmpty || tasksByExecutor(2).nonEmpty ||
+      tasksByExecutor(3).nonEmpty)
+  }
+
   test("Scheduler correctly accounts for multiple CPUs per task") {
     val taskCpus = 2
     val taskScheduler = setupSchedulerWithMaster(
