@@ -1304,11 +1304,11 @@ private[spark] class TaskSetManager(
     recomputeLocality()
   }
 
-  def getSkewedExecutors(): Set[String] = {
+  def getSkewedExecutors(totalExecutors: Int): Set[String] = {
     if (!excludeShuffleSkewExecutors) {
       return Set.empty
     }
-    val averageTaskNum = getAverageTaskNum()
+    val averageTaskNum = getAverageTaskNum(totalExecutors)
     val maxSkewedNum = math.min(math.ceil(
       finishedTasksByExecutorId.size * shuffleSkewMaxExecutorsRatio).toInt,
       shuffleSkewMaxExecutorsNum)
@@ -1328,7 +1328,7 @@ private[spark] class TaskSetManager(
 
   def filterShuffleSkewExecutors(
     shuffledOffers: Seq[WorkerOffer]): Seq[WorkerOffer] = {
-    val skewedExecutors = getSkewedExecutors()
+    val skewedExecutors = getSkewedExecutors(shuffledOffers.length)
     if (!isShuffleMapTasks()) {
       return shuffledOffers
     }
@@ -1336,9 +1336,9 @@ private[spark] class TaskSetManager(
     shuffledOffers.filterNot(e => skewedExecutors.contains(e.executorId))
   }
 
-  private def getAverageTaskNum() = {
-    if (finishedTasksByExecutorId.nonEmpty) {
-      math.max(tasksSuccessful / finishedTasksByExecutorId.size, shuffleSkewMinFinishedTasks)
+  private def getAverageTaskNum(totalExecutors: Int) = {
+    if (tasksSuccessful > 0 && totalExecutors > 0) {
+      math.max(tasksSuccessful / totalExecutors, shuffleSkewMinFinishedTasks)
     } else {
       shuffleSkewMinFinishedTasks
     }

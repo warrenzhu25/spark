@@ -2333,7 +2333,7 @@ class TaskSetManagerSuite
       Some(2),
       Some(1.0))
 
-    assert(manager.getSkewedExecutors().isEmpty)
+    assert(manager.getSkewedExecutors(3).isEmpty)
     val directTaskResult = createTaskResult(0)
 
     // Offer resources for the task to start
@@ -2346,9 +2346,9 @@ class TaskSetManagerSuite
         manager.handleSuccessfulTask(task.taskId, directTaskResult)
       }
       if (i > 2) {
-        assert(manager.getSkewedExecutors() === Set("exec2"))
+        assert(manager.getSkewedExecutors(3) === Set("exec2"))
       } else {
-        assert(manager.getSkewedExecutors().isEmpty)
+        assert(manager.getSkewedExecutors(3).isEmpty)
       }
     }
   }
@@ -2364,7 +2364,7 @@ class TaskSetManagerSuite
 
     val directTaskResult = createTaskResult(0)
 
-    assert(manager.getSkewedExecutors().isEmpty)
+    assert(manager.getSkewedExecutors(3).isEmpty)
     // Offer resources for the task to start
     for (i <- 1 to numTasks) {
       if (i == 1) {
@@ -2374,7 +2374,7 @@ class TaskSetManagerSuite
         val task = manager.resourceOffer(s"exec2", s"host2", NO_PREF)._1.get
         manager.handleSuccessfulTask(task.taskId, directTaskResult)
       }
-      assert(manager.getSkewedExecutors().isEmpty)
+      assert(manager.getSkewedExecutors(3).isEmpty)
     }
   }
 
@@ -2389,7 +2389,7 @@ class TaskSetManagerSuite
 
     val directTaskResult = createTaskResult(0)
 
-    assert(manager.getSkewedExecutors().isEmpty)
+    assert(manager.getSkewedExecutors(3).isEmpty)
     // Offer resources for the task to start
     for (i <- 1 to numTasks) {
       if (i % 2 == 0) {
@@ -2403,9 +2403,9 @@ class TaskSetManagerSuite
         manager.handleSuccessfulTask(task.taskId, directTaskResult)
       }
       if (i >= 6 && i != 9) {
-        assert(manager.getSkewedExecutors() === Set("exec1"), "" + i)
+        assert(manager.getSkewedExecutors(3) === Set("exec1"), "" + i)
       } else {
-        assert(manager.getSkewedExecutors().isEmpty, "" + i)
+        assert(manager.getSkewedExecutors(3).isEmpty, "" + i)
       }
     }
   }
