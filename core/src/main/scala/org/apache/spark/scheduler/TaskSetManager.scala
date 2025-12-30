@@ -119,6 +119,10 @@ private[spark] class TaskSetManager(
   private val shuffleSkewMaxExecutorsRatio = conf.get(SHUFFLE_SKEW_MAX_EXECUTORS_RATIO)
   private val shuffleSkewMinFinishedTasks = conf.get(SHUFFLE_SKEW_MIN_FINISHED_TASKS)
   private val filteredSkewExecutors = new mutable.HashMap[String, Int]().withDefaultValue(0)
+  // Baseline metrics for measuring shuffle skew filtering improvement
+  private var baselineMaxTasksPerExecutor: Int = 0
+  private var baselineTotalExecutors: Int = 0
+  private var firstFilteringDone: Boolean = false
 
   private[scheduler] val taskProcessRateCalculator =
     if (sched.efficientTaskCalcualtionEnabled) {
@@ -591,8 +595,8 @@ private[spark] class TaskSetManager(
   private def maybeFinishTaskSet(): Unit = {
     if (isZombie && runningTasks == 0) {
       sched.taskSetFinished(this)
-      if (filteredSkewExecutors.nonEmpty) {
-        logInfo(s"Filtered shuffle skew executors for stage $stageId is: $filteredSkewExecutors")
+      if (filteredSkewExecutors.nonEmpty && firstFilteringDone) {
+        logShuffleSkewFilteringSummary()
       }
       if (tasksSuccessful == numTasks) {
         healthTracker.foreach(_.updateExcludedForSuccessfulTaskSet(
@@ -601,6 +605,50 @@ private[spark] class TaskSetManager(
           taskSetExcludelistHelperOpt.get.execToFailures))
       }
     }
+  }
+
+  /**
+   * Log summary of shuffle skew filtering improvement when stage completes.
+   * Shows the reduction in max executor load from excluding skewed executors.
+   */
+  private def logShuffleSkewFilteringSummary(): Unit = {
+    // Calculate actual max tasks after filtering
+    val actualMaxTasks = if (finishedTasksByExecutorId.nonEmpty) {
+      finishedTasksByExecutorId.values.max
+    } else {
+      0
+    }
+
+    // Calculate ideal distribution
+    val idealMaxTasks = if (baselineTotalExecutors > 0) {
+      math.ceil(tasksSuccessful.toDouble / baselineTotalExecutors).toInt
+    } else {
+      0
+    }
+
+    // Calculate improvement
+    val tasksReduced = baselineMaxTasksPerExecutor - actualMaxTasks
+    val improvementPercent = if (baselineMaxTasksPerExecutor > 0) {
+      (tasksReduced.toDouble / baselineMaxTasksPerExecutor * 100).toInt
+    } else {
+      0
+    }
+
+    // Format filtered executors with details
+    val filteredSummary = filteredSkewExecutors.toSeq
+      .sortBy(-_._2)
+      .map { case (execId, count) =>
+        val tasks = finishedTasksByExecutorId.getOrElse(execId, 0)
+        s"$execId($tasks tasks, excluded $count times)"
+      }
+      .mkString(", ")
+
+    logInfo(s"Shuffle skew filtering summary for stage $stageId: " +
+      s"Filtered executors: [$filteredSummary] | " +
+      s"Before filtering: max $baselineMaxTasksPerExecutor tasks/executor " +
+      s"(ideal: $idealMaxTasks across $baselineTotalExecutors executors) | " +
+      s"After filtering: max $actualMaxTasks tasks/executor | " +
+      s"Improvement: reduced max load by $tasksReduced tasks ($improvementPercent%)")
   }
 
   /**
@@ -1332,6 +1380,18 @@ private[spark] class TaskSetManager(
     if (!isShuffleMapTasks()) {
       return shuffledOffers
     }
+
+    // Capture baseline metrics on first filtering occurrence
+    if (!firstFilteringDone && skewedExecutors.nonEmpty) {
+      firstFilteringDone = true
+      baselineTotalExecutors = shuffledOffers.length
+      baselineMaxTasksPerExecutor = if (finishedTasksByExecutorId.nonEmpty) {
+        finishedTasksByExecutorId.values.max
+      } else {
+        0
+      }
+    }
+
     skewedExecutors.foreach(e => filteredSkewExecutors(e) += 1)
     shuffledOffers.filterNot(e => skewedExecutors.contains(e.executorId))
   }
