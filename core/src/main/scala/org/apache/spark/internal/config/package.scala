@@ -949,6 +949,16 @@ package object config {
       .booleanConf
       .createWithDefault(false)
 
+  private[spark] val FETCH_FAILURE_EXECUTOR_REMOVAL_THRESHOLD =
+    ConfigBuilder("spark.scheduler.fetchFailure.executorRemovalThreshold")
+      .doc("Minimum number of fetch failures from an executor before marking it as failed. " +
+        "The counter is reset when a ShuffleMapTask succeeds on that executor. " +
+        "Setting this > 1 helps tolerate transient fetch failures.")
+      .version("3.6.0")
+      .intConf
+      .checkValue(_ >= 1, "must be at least 1")
+      .createWithDefault(3)
+
   private[spark] val LISTENER_BUS_EVENT_QUEUE_CAPACITY =
     ConfigBuilder("spark.scheduler.listenerbus.eventqueue.capacity")
       .doc("The default capacity for event queues. Spark will try to initialize " +

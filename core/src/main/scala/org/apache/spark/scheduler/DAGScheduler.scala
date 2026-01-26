@@ -209,6 +209,14 @@ private[spark] class DAGScheduler(
    */
   private val shuffleFileLostEpoch = new HashMap[String, Long]
 
+  /**
+   * Tracks the number of fetch failures per executor.
+   * Used to implement threshold-based executor failure marking.
+   * Counter is reset when a successful task completion indicates
+   * the executor is functioning properly.
+   */
+  private val executorFetchFailureCount = new HashMap[String, Int]
+
   private [scheduler] val outputCommitCoordinator = env.outputCommitCoordinator
 
   // A closure serializer that we reuse.
@@ -248,6 +256,12 @@ private[spark] class DAGScheduler(
    */
   private[scheduler] val ignoreDecommissionFetchFailure =
     sc.getConf.get(config.STAGE_IGNORE_DECOMMISSION_FETCH_FAILURE)
+
+  /**
+   * Minimum number of fetch failures from an executor before marking it as failed.
+   */
+  private[scheduler] val fetchFailureThreshold =
+    sc.getConf.get(config.FETCH_FAILURE_EXECUTOR_REMOVAL_THRESHOLD)
 
   /**
    * Number of max concurrent tasks check failures for each barrier job.
@@ -1951,6 +1965,12 @@ private[spark] class DAGScheduler(
                 // available.
                 mapOutputTracker.registerMapOutput(
                   shuffleStage.shuffleDep.shuffleId, smt.partitionId, status)
+                // Reset fetch failure counter for this executor on successful task completion
+                if (executorFetchFailureCount.contains(execId)) {
+                  logDebug(s"Resetting fetch failure counter for executor $execId " +
+                    "due to successful task")
+                  executorFetchFailureCount.remove(execId)
+                }
               }
             } else {
               logInfo(s"Ignoring $smt completion from an older attempt of indeterminate stage")
@@ -2098,39 +2118,50 @@ private[spark] class DAGScheduler(
             }
           }
 
-          // TODO: mark the executor as failed only if there were lots of fetch failures on it
+          // Track fetch failure and only mark executor as failed after threshold
           if (bmAddress != null) {
-            val externalShuffleServiceEnabled = env.blockManager.externalShuffleServiceEnabled
-            val isHostDecommissioned = taskScheduler
-              .getExecutorDecommissionState(bmAddress.executorId)
-              .exists(_.workerHost.isDefined)
+            val execId = bmAddress.executorId
+            val currentCount = executorFetchFailureCount.getOrElse(execId, 0) + 1
+            executorFetchFailureCount(execId) = currentCount
 
-            // Shuffle output of all executors on host `bmAddress.host` may be lost if:
-            // - External shuffle service is enabled, so we assume that all shuffle data on node is
-            //   bad.
-            // - Host is decommissioned, thus all executors on that host will die.
-            val shuffleOutputOfEntireHostLost = externalShuffleServiceEnabled ||
-              isHostDecommissioned
-            val hostToUnregisterOutputs = if (shuffleOutputOfEntireHostLost
-              && unRegisterOutputOnHostOnFetchFailure) {
-              Some(bmAddress.host)
+            if (currentCount >= fetchFailureThreshold) {
+              val externalShuffleServiceEnabled = env.blockManager.externalShuffleServiceEnabled
+              val isHostDecommissioned = taskScheduler
+                .getExecutorDecommissionState(execId)
+                .exists(_.workerHost.isDefined)
+
+              // Shuffle output of all executors on host `bmAddress.host` may be lost if:
+              // - External shuffle service is enabled, so we assume that all shuffle data on node
+              //   is bad.
+              // - Host is decommissioned, thus all executors on that host will die.
+              val shuffleOutputOfEntireHostLost = externalShuffleServiceEnabled ||
+                isHostDecommissioned
+              val hostToUnregisterOutputs = if (shuffleOutputOfEntireHostLost
+                && unRegisterOutputOnHostOnFetchFailure) {
+                Some(bmAddress.host)
+              } else {
+                // Unregister shuffle data just for one executor (we don't have any
+                // reason to believe shuffle data has been lost for the entire host).
+                None
+              }
+              removeExecutorAndUnregisterOutputs(
+                execId = execId,
+                fileLost = true,
+                hostToUnregisterOutputs = hostToUnregisterOutputs,
+                maybeEpoch = Some(task.epoch),
+                // shuffleFileLostEpoch is ignored when a host is decommissioned because some
+                // decommissioned executors on that host might have been removed before this fetch
+                // failure and might have bumped up the shuffleFileLostEpoch. We ignore that, and
+                // proceed with unconditional removal of shuffle outputs from all executors on that
+                // host, including from those that we still haven't confirmed as lost due to
+                // heartbeat delays.
+                ignoreShuffleFileLostEpoch = isHostDecommissioned)
+              // Reset counter after marking failed
+              executorFetchFailureCount.remove(execId)
             } else {
-              // Unregister shuffle data just for one executor (we don't have any
-              // reason to believe shuffle data has been lost for the entire host).
-              None
+              logInfo(s"Fetch failure $currentCount/$fetchFailureThreshold from executor $execId," +
+                " not marking as failed yet")
             }
-            removeExecutorAndUnregisterOutputs(
-              execId = bmAddress.executorId,
-              fileLost = true,
-              hostToUnregisterOutputs = hostToUnregisterOutputs,
-              maybeEpoch = Some(task.epoch),
-              // shuffleFileLostEpoch is ignored when a host is decommissioned because some
-              // decommissioned executors on that host might have been removed before this fetch
-              // failure and might have bumped up the shuffleFileLostEpoch. We ignore that, and
-              // proceed with unconditional removal of shuffle outputs from all executors on that
-              // host, including from those that we still haven't confirmed as lost due to heartbeat
-              // delays.
-              ignoreShuffleFileLostEpoch = isHostDecommissioned)
           }
         }
 
@@ -2634,6 +2665,8 @@ private[spark] class DAGScheduler(
       fileLost = fileLost,
       hostToUnregisterOutputs = workerHost,
       maybeEpoch = None)
+    // Clean up fetch failure counter for this executor
+    executorFetchFailureCount.remove(execId)
   }
 
   /**

@@ -400,6 +400,9 @@ class DAGSchedulerSuite extends SparkFunSuite with TempLocalSparkContext with Ti
 
   override def beforeEach(): Unit = {
     super.beforeEach()
+    // Set threshold to 1 for backward compatibility with existing tests that expect
+    // immediate executor marking on fetch failure. New tests can override this.
+    conf.set(config.FETCH_FAILURE_EXECUTOR_REMOVAL_THRESHOLD, 1)
     firstInit = true
   }
 
@@ -5116,6 +5119,127 @@ class DAGSchedulerSuite extends SparkFunSuite with TempLocalSparkContext with Ti
         assert(reason.getMessage.contains(expectedMsg))
       case other => fail(s"expected JobFailed, not $other")
     }
+  }
+
+  test("SPARK-XXXXX: fetch failure threshold - executor not marked failed before threshold") {
+    // With threshold of 3, first 2 fetch failures should not mark executor as failed
+    conf.set(config.FETCH_FAILURE_EXECUTOR_REMOVAL_THRESHOLD, 3)
+    val shuffleMapRdd = new MyRDD(sc, 2, Nil)
+    val shuffleDep = new ShuffleDependency(shuffleMapRdd, new HashPartitioner(2))
+    val shuffleId = shuffleDep.shuffleId
+    val reduceRdd = new MyRDD(sc, 2, List(shuffleDep), tracker = mapOutputTracker)
+    submit(reduceRdd, Array(0, 1))
+    completeShuffleMapStageSuccessfully(0, 0, reduceRdd.partitions.length)
+
+    // First fetch failure - should NOT mark executor as failed
+    runEvent(makeCompletionEvent(
+      taskSets(1).tasks(0),
+      FetchFailed(makeBlockManagerId("hostA"), shuffleId, 0L, 0, 0, "ignored"),
+      null))
+    // Verify removeExecutor was NOT called
+    verify(blockManagerMaster, never()).removeExecutor("hostA-exec")
+
+    // Second fetch failure from the same executor - should still NOT mark executor as failed
+    runEvent(makeCompletionEvent(
+      taskSets(1).tasks(1),
+      FetchFailed(makeBlockManagerId("hostA"), shuffleId, 1L, 1, 1, "ignored"),
+      null))
+    // Verify removeExecutor was still NOT called
+    verify(blockManagerMaster, never()).removeExecutor("hostA-exec")
+  }
+
+  test("SPARK-XXXXX: fetch failure threshold - executor marked failed at threshold") {
+    // With threshold of 3, 3rd fetch failure should mark executor as failed
+    conf.set(config.FETCH_FAILURE_EXECUTOR_REMOVAL_THRESHOLD, 3)
+    val shuffleMapRdd = new MyRDD(sc, 3, Nil)
+    val shuffleDep = new ShuffleDependency(shuffleMapRdd, new HashPartitioner(3))
+    val shuffleId = shuffleDep.shuffleId
+    val reduceRdd = new MyRDD(sc, 3, List(shuffleDep), tracker = mapOutputTracker)
+    submit(reduceRdd, Array(0, 1, 2))
+    completeShuffleMapStageSuccessfully(0, 0, reduceRdd.partitions.length)
+
+    // First fetch failure
+    runEvent(makeCompletionEvent(
+      taskSets(1).tasks(0),
+      FetchFailed(makeBlockManagerId("hostA"), shuffleId, 0L, 0, 0, "ignored"),
+      null))
+    verify(blockManagerMaster, never()).removeExecutor("hostA-exec")
+
+    // Second fetch failure
+    runEvent(makeCompletionEvent(
+      taskSets(1).tasks(1),
+      FetchFailed(makeBlockManagerId("hostA"), shuffleId, 1L, 1, 1, "ignored"),
+      null))
+    verify(blockManagerMaster, never()).removeExecutor("hostA-exec")
+
+    // Third fetch failure - should NOW mark executor as failed
+    runEvent(makeCompletionEvent(
+      taskSets(1).tasks(2),
+      FetchFailed(makeBlockManagerId("hostA"), shuffleId, 2L, 2, 2, "ignored"),
+      null))
+    verify(blockManagerMaster, times(1)).removeExecutor("hostA-exec")
+  }
+
+  test("SPARK-XXXXX: fetch failure counter reset on successful ShuffleMapTask") {
+    // Verify that successful ShuffleMapTask completion resets the fetch failure counter
+    conf.set(config.FETCH_FAILURE_EXECUTOR_REMOVAL_THRESHOLD, 3)
+    val shuffleMapRdd = new MyRDD(sc, 2, Nil)
+    val shuffleDep = new ShuffleDependency(shuffleMapRdd, new HashPartitioner(2))
+    val shuffleId = shuffleDep.shuffleId
+    val reduceRdd = new MyRDD(sc, 2, List(shuffleDep), tracker = mapOutputTracker)
+    submit(reduceRdd, Array(0, 1))
+    completeShuffleMapStageSuccessfully(0, 0, reduceRdd.partitions.length)
+
+    // First fetch failure
+    runEvent(makeCompletionEvent(
+      taskSets(1).tasks(0),
+      FetchFailed(makeBlockManagerId("hostA"), shuffleId, 0L, 0, 0, "ignored"),
+      null))
+    verify(blockManagerMaster, never()).removeExecutor("hostA-exec")
+
+    // Second fetch failure - counter is now 2
+    runEvent(makeCompletionEvent(
+      taskSets(1).tasks(1),
+      FetchFailed(makeBlockManagerId("hostA"), shuffleId, 1L, 1, 1, "ignored"),
+      null))
+    verify(blockManagerMaster, never()).removeExecutor("hostA-exec")
+
+    // Resubmit and complete shuffle map stage from hostA - this should reset the counter
+    scheduler.resubmitFailedStages()
+    completeShuffleMapStageSuccessfully(0, 1, reduceRdd.partitions.length, Seq("hostA", "hostA"))
+
+    // Now counter is reset. First fetch failure after reset
+    runEvent(makeCompletionEvent(
+      taskSets(3).tasks(0),
+      FetchFailed(makeBlockManagerId("hostA"), shuffleId, 0L, 0, 0, "ignored"),
+      null))
+    verify(blockManagerMaster, never()).removeExecutor("hostA-exec")
+
+    // Second fetch failure after reset
+    runEvent(makeCompletionEvent(
+      taskSets(3).tasks(1),
+      FetchFailed(makeBlockManagerId("hostA"), shuffleId, 1L, 1, 1, "ignored"),
+      null))
+    // Counter is 2 - still should NOT mark as failed
+    verify(blockManagerMaster, never()).removeExecutor("hostA-exec")
+  }
+
+  test("SPARK-XXXXX: fetch failure threshold of 1 for backward compatibility") {
+    // Set threshold to 1 for backward compatibility (immediate marking)
+    conf.set(config.FETCH_FAILURE_EXECUTOR_REMOVAL_THRESHOLD, 1)
+    val shuffleMapRdd = new MyRDD(sc, 2, Nil)
+    val shuffleDep = new ShuffleDependency(shuffleMapRdd, new HashPartitioner(2))
+    val shuffleId = shuffleDep.shuffleId
+    val reduceRdd = new MyRDD(sc, 2, List(shuffleDep), tracker = mapOutputTracker)
+    submit(reduceRdd, Array(0, 1))
+    completeShuffleMapStageSuccessfully(0, 0, reduceRdd.partitions.length)
+
+    // First fetch failure should immediately mark executor as failed with threshold=1
+    runEvent(makeCompletionEvent(
+      taskSets(1).tasks(0),
+      FetchFailed(makeBlockManagerId("hostA"), shuffleId, 0L, 0, 0, "ignored"),
+      null))
+    verify(blockManagerMaster, times(1)).removeExecutor("hostA-exec")
   }
 
   /**
