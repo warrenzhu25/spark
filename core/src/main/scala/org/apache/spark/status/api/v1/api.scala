@@ -543,3 +543,72 @@ class ProcessSummary private[spark](
      val addTime: Date,
      val removeTime: Option[Date],
      val processLogs: Map[String, String])
+
+// Application Diff API classes
+
+class ApplicationSummary private[spark](
+    val id: String,
+    val name: String,
+    val attemptId: Option[String])
+
+class JobMetricsValues private[spark](
+    val numJobs: Int,
+    val succeededJobs: Int,
+    val failedJobs: Int)
+
+class StageMetricsValues private[spark](
+    val numStages: Int,
+    val completedStages: Int,
+    val failedStages: Int,
+    val skippedStages: Int)
+
+class TaskMetricsValues private[spark](
+    val totalTasks: Long,
+    val completedTasks: Long,
+    val failedTasks: Long,
+    val killedTasks: Long,
+    val skippedTasks: Long)
+
+class ExecutorMetricsValues private[spark](
+    val totalExecutorRunTime: Long,
+    val totalJvmGcTime: Long,
+    val totalInputBytes: Long,
+    val totalShuffleReadBytes: Long,
+    val totalShuffleWriteBytes: Long)
+
+class DurationMetricsValues private[spark](
+    val durationMs: Long)
+
+class JobMetricsComparison private[spark](
+    val app1: JobMetricsValues,
+    val app2: JobMetricsValues,
+    val diff: JobMetricsValues)
+
+class StageMetricsComparison private[spark](
+    val app1: StageMetricsValues,
+    val app2: StageMetricsValues,
+    val diff: StageMetricsValues)
+
+class TaskMetricsComparison private[spark](
+    val app1: TaskMetricsValues,
+    val app2: TaskMetricsValues,
+    val diff: TaskMetricsValues)
+
+class ExecutorMetricsComparison private[spark](
+    val app1: ExecutorMetricsValues,
+    val app2: ExecutorMetricsValues,
+    val diff: ExecutorMetricsValues)
+
+class DurationMetricsComparison private[spark](
+    val app1: DurationMetricsValues,
+    val app2: DurationMetricsValues,
+    val diff: DurationMetricsValues)
+
+class ApplicationDiffInfo private[spark](
+    val app1: ApplicationSummary,
+    val app2: ApplicationSummary,
+    val jobMetrics: JobMetricsComparison,
+    val stageMetrics: StageMetricsComparison,
+    val taskMetrics: TaskMetricsComparison,
+    val executorMetrics: ExecutorMetricsComparison,
+    val durationMetrics: DurationMetricsComparison)

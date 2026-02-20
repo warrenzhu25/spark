@@ -43,6 +43,9 @@ import org.apache.spark.ui.{SparkUI, UIUtils}
 @Path("/v1")
 private[v1] class ApiRootResource extends ApiRequestContext {
 
+  @Path("applications/diff")
+  def applicationDiff(): Class[ApplicationDiffResource] = classOf[ApplicationDiffResource]
+
   @Path("applications")
   def applicationList(): Class[ApplicationListResource] = classOf[ApplicationListResource]
 

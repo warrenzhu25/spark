@@ -318,6 +318,30 @@ abstract class HistoryServerSuite extends SparkFunSuite with BeforeAndAfter with
     getContentAndCode("foobar")._1 should be (HttpServletResponse.SC_NOT_FOUND)
   }
 
+  test("application diff API") {
+    // Test successful diff between two apps
+    val diffResult = getContentAndCode(
+      "applications/diff?appId1=local-1422981780767&appId2=local-1430917381534")
+    diffResult._1 should be (HttpServletResponse.SC_OK)
+    diffResult._2 should be (Symbol("defined"))
+
+    // Test missing appId1
+    val missingAppId1 = getContentAndCode("applications/diff?appId2=local-1422981780767")
+    missingAppId1._1 should be (HttpServletResponse.SC_BAD_REQUEST)
+    missingAppId1._3 should be (Some("appId1 is required"))
+
+    // Test missing appId2
+    val missingAppId2 = getContentAndCode("applications/diff?appId1=local-1422981780767")
+    missingAppId2._1 should be (HttpServletResponse.SC_BAD_REQUEST)
+    missingAppId2._3 should be (Some("appId2 is required"))
+
+    // Test non-existent app
+    val nonExistentApp = getContentAndCode(
+      "applications/diff?appId1=local-1422981780767&appId2=nonexistent")
+    nonExistentApp._1 should be (HttpServletResponse.SC_NOT_FOUND)
+    nonExistentApp._3 should be (Some("no such app: nonexistent"))
+  }
+
   test("automatically retrieve uiRoot from request through Knox") {
     assert(sys.props.get("spark.ui.proxyBase").isEmpty,
       "spark.ui.proxyBase is defined but it should not for this UT")
