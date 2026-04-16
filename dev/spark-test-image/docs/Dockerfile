@@ -30,49 +30,49 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV DEBCONF_NONINTERACTIVE_SEEN=true
 
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    ca-certificates \
-    cmake \
-    curl \
-    gfortran \
-    git \
-    gnupg \
-    libcurl4-openssl-dev \
-    libfontconfig1-dev \
-    libfreetype6-dev \
-    libfribidi-dev \
-    libgit2-dev \
-    libharfbuzz-dev \
-    libjpeg-dev \
-    liblapack-dev \
-    libopenblas-dev \
-    libpng-dev \
-    libpython3-dev \
-    libssl-dev \
-    libtiff5-dev \
-    libwebp-dev \
-    libxml2-dev \
-    nodejs \
-    npm \
-    openjdk-17-jdk-headless \
-    pandoc \
-    pkg-config \
-    qpdf \
-    tzdata \
-    r-base \
-    ruby \
-    ruby-dev \
-    software-properties-common \
-    wget \
-    zlib1g-dev \
-    && rm -rf /var/lib/apt/lists/*
+	    build-essential \
+	    ca-certificates \
+	    cmake \
+	    curl \
+	    gfortran \
+	    git \
+	    gnupg \
+	    libcurl4-openssl-dev \
+	    libfontconfig1-dev \
+	    libfreetype6-dev \
+	    libfribidi-dev \
+	    libgit2-dev \
+	    libharfbuzz-dev \
+	    libjpeg-dev \
+	    liblapack-dev \
+	    libopenblas-dev \
+	    libpng-dev \
+	    libpython3-dev \
+	    libssl-dev \
+	    libtiff5-dev \
+	    libwebp-dev \
+	    libxml2-dev \
+	    nodejs \
+	    npm \
+	    openjdk-17-jdk-headless \
+	    pandoc \
+	    pkg-config \
+	    qpdf \
+	    tzdata \
+	    r-base \
+	    ruby \
+	    ruby-dev \
+	    software-properties-common \
+	    wget \
+	    zlib1g-dev \
+	    && rm -rf /var/lib/apt/lists/*
 
 
 # See more in SPARK-39959, roxygen2 < 7.2.1
-RUN Rscript -e "install.packages(c('devtools', 'knitr', 'markdown', 'rmarkdown', 'testthat', 'remotes'), repos='https://cloud.r-project.org/')" && \
-    Rscript -e "devtools::install_version('roxygen2', version='7.2.0', repos='https://cloud.r-project.org')" && \
-    Rscript -e "devtools::install_version('pkgdown', version='2.0.1', repos='https://cloud.r-project.org')" && \
-    Rscript -e "devtools::install_version('preferably', version='0.4', repos='https://cloud.r-project.org', upgrade='never')"
+RUN Rscript -e "install.packages(c('remotes', 'knitr', 'markdown', 'rmarkdown', 'testthat'), repos='https://cloud.r-project.org/')" && \
+Rscript -e "remotes::install_version('roxygen2', version='7.2.0', repos='https://cloud.r-project.org')" && \
+Rscript -e "remotes::install_version('pkgdown', version='2.0.1', repos='https://cloud.r-project.org')" && \
+Rscript -e "remotes::install_version('preferably', version='0.4', repos='https://cloud.r-project.org', upgrade='never')"
 
 # See more in SPARK-39735
 ENV R_LIBS_SITE="/usr/local/lib/R/site-library:${R_LIBS_SITE}:/usr/lib/R/library"
