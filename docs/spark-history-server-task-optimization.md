@@ -9,13 +9,14 @@ When Spark applications have millions of tasks, the History Server takes excessi
 
 ## Solution Overview
 
-Three complementary optimizations:
+Four complementary optimizations:
 
 | Optimization | Impact | When Applied |
 |--------------|--------|--------------|
 | **1. Batched Task Writes** | Reduce KVStore overhead | During replay |
 | **2. Reduced Index Set** | Faster writes, less memory | During replay |
 | **3. Quantile-Based Filtering** | Keep only important tasks | After replay |
+| **4. UI Load Optimization** | Reduce UI response/render time | During UI access |
 
 **Key Insight**: Compute and cache quantiles **once at stage completion** instead of relying on indices for on-demand calculation. This enables the reduced index set while preserving quantile functionality.
 
@@ -375,6 +376,12 @@ spark.history.task.useLightStorage = true
 # Optimization 3: Quantile-based filtering
 spark.history.task.filterThreshold = 100000
 spark.history.task.importanceQuantile = 0.5
+
+# Optimization 4: UI load optimization
+spark.ui.task.pageSize = 100
+spark.ui.task.maxPageSize = 10000
+spark.ui.task.renderLimit = 1000
+spark.ui.task.showAllThreshold = 10000
 ```
 
 ---
@@ -384,11 +391,14 @@ spark.history.task.importanceQuantile = 0.5
 | File | Action | Description |
 |------|--------|-------------|
 | `internal/config/History.scala` | Modify | Add 4 config options |
-| `status/AppStatusListener.scala` | Modify | Batching, pre-compute quantiles |
-| `status/storeTypes.scala` | Modify | Add TaskDataWrapperLight |
+| `internal/config/UI.scala` | Modify | Add 4 UI config options |
+| `status/AppStatusListener.scala` | Modify | Batching, pre-compute quantiles, task summary |
+| `status/storeTypes.scala` | Modify | Add TaskDataWrapperLight, StageTaskSummary |
 | `status/LiveEntity.scala` | Modify | Support light wrapper |
-| `status/AppStatusStore.scala` | Modify | Use cached quantiles for light storage |
+| `status/AppStatusStore.scala` | Modify | Use cached quantiles, task list pagination |
 | `status/TaskImportanceFilter.scala` | **Create** | Quantile-based filtering |
+| `status/api/v1/StagesResource.scala` | Modify | Pagination defaults, CSV export |
+| `ui/jobs/StagePage.scala` | Modify | Task render limits, warning banner |
 | `deploy/history/FsHistoryProvider.scala` | Modify | Post-replay filtering |
 | `deploy/history/HistoryServerMetrics.scala` | **Create** | Metrics |
 
@@ -400,10 +410,386 @@ spark.history.task.importanceQuantile = 0.5
 Event Log Replay:
   1. Parse events → buffer tasks → batch write TaskDataWrapperLight
   2. On stage completion → load all tasks → compute quantiles → save CachedQuantile
-  3. After replay complete → for large stages → filter using cached quantile thresholds
+  3. On stage completion → compute aggregate stats → save StageTaskSummary
+  4. After replay complete → for large stages → filter using cached quantile thresholds
 
 UI Request (taskSummary):
   - Read pre-computed CachedQuantile directly (no index scan needed)
+
+UI Request (task list):
+  - Apply default pagination (100 tasks)
+  - Use indexed view with skip/max for efficient pagination
+  - Return paginated response with total count from StageTaskSummary
+
+UI Rendering:
+  - Limit rendered rows (default 1000)
+  - Show warning banner if more tasks available
+  - Offer CSV export for full data access
+```
+
+---
+
+## Optimization 4: UI Load Latency Reduction
+
+### Problem
+
+Even with replay optimizations, the Spark UI can be slow when displaying stages with large task counts:
+
+1. **REST API overhead**: Fetching task lists requires KVStore iteration
+2. **No default limits**: UI requests all tasks, causing large JSON responses
+3. **Sorting overhead**: Client-side sorting of millions of tasks is expensive
+4. **Repeated queries**: Each page view re-fetches data from KVStore
+
+### Design
+
+Four sub-optimizations to reduce UI latency:
+
+| Sub-Optimization | Impact | Location |
+|------------------|--------|----------|
+| **4.1 API Pagination Defaults** | Reduce response size | REST API |
+| **4.2 Stage Task Summary Cache** | Avoid repeated aggregation | AppStatusStore |
+| **4.3 Efficient Index Access** | Faster sorting/filtering | KVStore queries |
+| **4.4 Task Count Limits** | Bound UI rendering time | UI components |
+
+---
+
+### 4.1 API Pagination Defaults
+
+Add default limits to task-fetching APIs to prevent unbounded responses.
+
+#### Configuration
+
+```scala
+val UI_TASK_PAGE_SIZE = ConfigBuilder("spark.ui.task.pageSize")
+  .doc("Default page size for task list APIs. Default 100.")
+  .version("4.0.0")
+  .intConf
+  .createWithDefault(100)
+
+val UI_TASK_MAX_PAGE_SIZE = ConfigBuilder("spark.ui.task.maxPageSize")
+  .doc("Maximum allowed page size for task APIs. Default 10000.")
+  .version("4.0.0")
+  .intConf
+  .createWithDefault(10000)
+```
+
+#### Implementation
+
+**File:** `core/src/main/scala/org/apache/spark/status/api/v1/StagesResource.scala`
+
+```scala
+@GET
+@Path("{stageId}/{stageAttemptId}/taskList")
+def taskList(
+    @PathParam("stageId") stageId: Int,
+    @PathParam("stageAttemptId") stageAttemptId: Int,
+    @DefaultValue("0") @QueryParam("offset") offset: Int,
+    @DefaultValue("-1") @QueryParam("length") length: Int,  // -1 means use default
+    @QueryParam("sortBy") sortBy: TaskSorting): Seq[TaskData] = {
+
+  val defaultPageSize = conf.get(UI_TASK_PAGE_SIZE)
+  val maxPageSize = conf.get(UI_TASK_MAX_PAGE_SIZE)
+
+  // Apply defaults and limits
+  val effectiveLength = if (length <= 0) defaultPageSize
+                        else math.min(length, maxPageSize)
+
+  withUI(ui => {
+    ui.store.taskList(stageId, stageAttemptId, offset, effectiveLength,
+      indexName(sortBy), sortBy.toString.startsWith("-"))
+  })
+}
+```
+
+---
+
+### 4.2 Stage Task Summary Cache
+
+Cache aggregated task statistics per stage to avoid repeated computation.
+
+#### Data Structure
+
+**File:** `core/src/main/scala/org/apache/spark/status/storeTypes.scala`
+
+```scala
+/**
+ * Cached summary statistics for a stage's tasks.
+ * Computed once at stage completion, avoids repeated aggregation.
+ */
+@KVIndexParam(value = "id", copy = true)
+private[spark] class StageTaskSummary(
+    val stageId: Int,
+    val stageAttemptId: Int,
+
+    // Aggregate counts
+    val totalTasks: Int,
+    val completedTasks: Int,
+    val failedTasks: Int,
+    val killedTasks: Int,
+    val runningTasks: Int,
+
+    // Aggregate metrics
+    val totalDuration: Long,
+    val totalGcTime: Long,
+    val totalInputBytes: Long,
+    val totalOutputBytes: Long,
+    val totalShuffleReadBytes: Long,
+    val totalShuffleWriteBytes: Long,
+    val totalMemorySpilled: Long,
+    val totalDiskSpilled: Long,
+
+    // Min/Max for quick stats
+    val minDuration: Long,
+    val maxDuration: Long,
+    val minLaunchTime: Long,
+    val maxCompletionTime: Long
+) {
+  @JsonIgnore @KVIndex("id")
+  def id: Array[Int] = Array(stageId, stageAttemptId)
+}
+```
+
+#### Implementation
+
+**File:** `core/src/main/scala/org/apache/spark/status/AppStatusListener.scala`
+
+```scala
+override def onStageCompleted(event: SparkListenerStageCompleted): Unit = {
+  // ... existing code ...
+
+  // Compute and cache task summary (both live and history modes)
+  if (!live || cacheTaskSummary) {
+    computeAndCacheTaskSummary(stage.info.stageId, stage.info.attemptNumber)
+  }
+}
+
+private def computeAndCacheTaskSummary(stageId: Int, stageAttemptId: Int): Unit = {
+  val stageKey = Array(stageId, stageAttemptId)
+  val taskClass = if (useLightStorage) classOf[TaskDataWrapperLight]
+                  else classOf[TaskDataWrapper]
+
+  var total, completed, failed, killed, running = 0
+  var totalDuration, totalGcTime = 0L
+  var totalInput, totalOutput, totalShuffleRead, totalShuffleWrite = 0L
+  var totalMemSpill, totalDiskSpill = 0L
+  var minDuration = Long.MaxValue
+  var maxDuration = 0L
+  var minLaunch = Long.MaxValue
+  var maxCompletion = 0L
+
+  val iter = kvstore.view(taskClass).parent(stageKey).iterator()
+  while (iter.hasNext) {
+    val task = iter.next()
+    total += 1
+
+    task.status match {
+      case "SUCCESS" => completed += 1
+      case "FAILED" => failed += 1
+      case "KILLED" => killed += 1
+      case "RUNNING" => running += 1
+      case _ =>
+    }
+
+    totalDuration += task.duration
+    totalGcTime += task.jvmGcTime
+    totalInput += task.inputBytesRead
+    totalOutput += task.outputBytesWritten
+    totalShuffleRead += task.shuffleBytesRead
+    totalShuffleWrite += task.shuffleBytesWritten
+    totalMemSpill += task.memoryBytesSpilled
+    totalDiskSpill += task.diskBytesSpilled
+
+    minDuration = math.min(minDuration, task.duration)
+    maxDuration = math.max(maxDuration, task.duration)
+    minLaunch = math.min(minLaunch, task.launchTime)
+    if (task.completionTime > 0) {
+      maxCompletion = math.max(maxCompletion, task.completionTime)
+    }
+  }
+
+  val summary = new StageTaskSummary(
+    stageId, stageAttemptId,
+    total, completed, failed, killed, running,
+    totalDuration, totalGcTime,
+    totalInput, totalOutput, totalShuffleRead, totalShuffleWrite,
+    totalMemSpill, totalDiskSpill,
+    if (minDuration == Long.MaxValue) 0 else minDuration, maxDuration,
+    if (minLaunch == Long.MaxValue) 0 else minLaunch, maxCompletion
+  )
+
+  kvstore.write(summary)
+  logDebug(s"Cached task summary for stage $stageId.$stageAttemptId ($total tasks)")
+}
+```
+
+#### Usage in AppStatusStore
+
+**File:** `core/src/main/scala/org/apache/spark/status/AppStatusStore.scala`
+
+```scala
+def stageTaskSummary(stageId: Int, stageAttemptId: Int): Option[StageTaskSummary] = {
+  try {
+    Some(store.read(classOf[StageTaskSummary], Array(stageId, stageAttemptId)))
+  } catch {
+    case _: NoSuchElementException => None
+  }
+}
+
+// Use in stageData() to avoid re-aggregating
+def stageData(stageId: Int, stageAttemptId: Int, details: Boolean): v1.StageData = {
+  val stageInfo = store.read(classOf[StageDataWrapper], ...)
+
+  // Use cached summary if available
+  val taskSummary = stageTaskSummary(stageId, stageAttemptId)
+
+  val numTasks = taskSummary.map(_.totalTasks).getOrElse(
+    // Fallback: count via index (expensive)
+    store.count(classOf[TaskDataWrapper], TaskIndexNames.STAGE, ...)
+  )
+  // ... use taskSummary for other aggregates
+}
+```
+
+---
+
+### 4.3 Efficient Index Access Patterns
+
+Ensure common UI queries use indexed access patterns.
+
+#### Common UI Query Patterns
+
+| Query | Current Index | Optimization |
+|-------|---------------|--------------|
+| Tasks sorted by duration | DURATION | Already indexed |
+| Tasks sorted by launch time | LAUNCH_TIME | Already indexed |
+| Failed tasks only | STATUS | Already indexed |
+| Tasks for executor X | EXECUTOR | Already indexed |
+| Task count per stage | Scan required | Use StageTaskSummary |
+
+#### Pagination Optimization
+
+**File:** `core/src/main/scala/org/apache/spark/status/AppStatusStore.scala`
+
+```scala
+def taskList(
+    stageId: Int,
+    stageAttemptId: Int,
+    offset: Int,
+    length: Int,
+    sortBy: String,
+    descending: Boolean): Seq[v1.TaskData] = {
+
+  val stageKey = Array(stageId, stageAttemptId)
+  val taskClass = if (useLightStorage) classOf[TaskDataWrapperLight]
+                  else classOf[TaskDataWrapper]
+
+  // Use indexed view with skip/max for efficient pagination
+  val view = store.view(taskClass)
+    .parent(stageKey)
+    .index(sortBy)
+    .reverse(descending)
+    .skip(offset)
+    .max(length)
+
+  KVUtils.viewToSeq(view).map(_.toApi)
+}
+```
+
+---
+
+### 4.4 UI Task Count Limits
+
+Limit task rendering in UI components to prevent browser slowdown.
+
+#### Configuration
+
+```scala
+val UI_TASK_RENDER_LIMIT = ConfigBuilder("spark.ui.task.renderLimit")
+  .doc("Maximum tasks to render in UI tables. Show warning if exceeded. Default 1000.")
+  .version("4.0.0")
+  .intConf
+  .createWithDefault(1000)
+
+val UI_TASK_SHOW_ALL_THRESHOLD = ConfigBuilder("spark.ui.task.showAllThreshold")
+  .doc("Show 'Show All' button only if task count below this. Default 10000.")
+  .version("4.0.0")
+  .intConf
+  .createWithDefault(10000)
+```
+
+#### Implementation (UI Changes)
+
+**File:** `core/src/main/scala/org/apache/spark/ui/jobs/StagePage.scala`
+
+```scala
+def renderTaskTable(tasks: Seq[TaskData], totalTasks: Int): NodeSeq = {
+  val renderLimit = conf.get(UI_TASK_RENDER_LIMIT)
+  val showAllThreshold = conf.get(UI_TASK_SHOW_ALL_THRESHOLD)
+
+  val displayTasks = tasks.take(renderLimit)
+  val hasMore = totalTasks > renderLimit
+
+  val warningBanner = if (hasMore) {
+    <div class="alert alert-warning">
+      Showing {renderLimit} of {totalTasks} tasks.
+      {if (totalTasks <= showAllThreshold)
+        <a href="?showAllTasks=true">Show all tasks</a>
+      else
+        <span>Use filters to narrow results or export to CSV for full data.</span>
+      }
+    </div>
+  } else NodeSeq.Empty
+
+  warningBanner ++ renderTaskRows(displayTasks)
+}
+```
+
+#### REST API Task Export
+
+For users needing all task data, provide efficient CSV export.
+
+**File:** `core/src/main/scala/org/apache/spark/status/api/v1/StagesResource.scala`
+
+```scala
+@GET
+@Path("{stageId}/{stageAttemptId}/taskList.csv")
+@Produces(Array("text/csv"))
+def taskListCsv(
+    @PathParam("stageId") stageId: Int,
+    @PathParam("stageAttemptId") stageAttemptId: Int): StreamingOutput = {
+
+  new StreamingOutput {
+    override def write(output: OutputStream): Unit = {
+      val writer = new PrintWriter(output)
+      writer.println("taskId,index,attempt,launchTime,duration,status,executor,...")
+
+      // Stream tasks directly without buffering
+      val iter = store.view(classOf[TaskDataWrapper])
+        .parent(Array(stageId, stageAttemptId))
+        .iterator()
+
+      while (iter.hasNext) {
+        val task = iter.next()
+        writer.println(s"${task.taskId},${task.index},${task.attempt}," +
+          s"${task.launchTime},${task.duration},${task.status},${task.executorId},...")
+      }
+      writer.flush()
+    }
+  }
+}
+```
+
+---
+
+### UI Optimization Summary
+
+```
+Before:
+  UI requests → fetch all tasks → JSON serialize → render all rows → SLOW
+
+After:
+  UI requests → paginated fetch (default 100) → cached summary stats →
+  limited render (default 1000) → warning if more → FAST
 ```
 
 ---
@@ -424,6 +810,15 @@ UI Request (taskSummary):
    - Test failed tasks always kept
    - Test quantile-based filtering
 
+4. **StageTaskSummarySuite**
+   - Test summary computation accuracy
+   - Test summary caching and retrieval
+
+5. **StagesResourceSuite**
+   - Test pagination defaults applied
+   - Test max page size enforced
+   - Test CSV export streaming
+
 ### Integration Test
 
 ```bash
@@ -431,12 +826,31 @@ UI Request (taskSummary):
 ./sbin/start-history-server.sh \
   --conf spark.history.task.writeBatchSize=1000 \
   --conf spark.history.task.useLightStorage=true \
-  --conf spark.history.task.filterThreshold=100000
+  --conf spark.history.task.filterThreshold=100000 \
+  --conf spark.ui.task.pageSize=100 \
+  --conf spark.ui.task.renderLimit=1000
 
 # Expected logs:
 # Pre-computed quantiles for stage 0.0 (500000 tasks)
+# Cached task summary for stage 0.0 (500000 tasks)
 # Stage 0.0: filtered 250000 of 500000 tasks
 # Parsed app-xxx in 45000ms
+```
+
+### UI Load Test
+
+```bash
+# Measure task list API response time
+time curl "http://localhost:18080/api/v1/applications/app-xxx/stages/0/0/taskList"
+# Expected: < 100ms (returns 100 tasks by default)
+
+# Measure with pagination
+time curl "http://localhost:18080/api/v1/applications/app-xxx/stages/0/0/taskList?offset=0&length=1000"
+# Expected: < 500ms
+
+# CSV export for full data
+time curl "http://localhost:18080/api/v1/applications/app-xxx/stages/0/0/taskList.csv" > tasks.csv
+# Streams all tasks, memory-efficient
 ```
 
 ### Performance Targets
@@ -447,3 +861,6 @@ UI Request (taskSummary):
 | Index updates per task | 40+ | 7 | 82% |
 | Memory usage | 8GB | 3GB | 62% |
 | Stored tasks | 1M | 500K | 50% |
+| Stage page load (1M tasks) | 15s | 200ms | 98% |
+| Task list API response | 8s | 50ms | 99% |
+| Task table render time | 10s | 100ms | 99% |
