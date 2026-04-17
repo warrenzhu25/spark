@@ -381,7 +381,7 @@ spark.history.task.importanceQuantile = 0.5
 spark.ui.task.pageSize = 100
 spark.ui.task.maxPageSize = 10000
 spark.ui.task.renderLimit = 1000
-spark.ui.task.showAllThreshold = 10000
+spark.ui.timeline.taskThreshold = 50000
 ```
 
 ---
@@ -395,10 +395,11 @@ spark.ui.task.showAllThreshold = 10000
 | `status/AppStatusListener.scala` | Modify | Batching, pre-compute quantiles, task summary |
 | `status/storeTypes.scala` | Modify | Add TaskDataWrapperLight, StageTaskSummary |
 | `status/LiveEntity.scala` | Modify | Support light wrapper |
-| `status/AppStatusStore.scala` | Modify | Use cached quantiles, task list pagination |
+| `status/AppStatusStore.scala` | Modify | Lazy task construction, KVStore pagination |
+| `status/api/v1/api.scala` | Modify | Add TaskDataLite class |
 | `status/TaskImportanceFilter.scala` | **Create** | Quantile-based filtering |
 | `status/api/v1/StagesResource.scala` | Modify | Pagination defaults, CSV export |
-| `ui/jobs/StagePage.scala` | Modify | Task render limits, warning banner |
+| `ui/jobs/StagePage.scala` | Modify | Optimized timeline, render limits |
 | `deploy/history/FsHistoryProvider.scala` | Modify | Post-replay filtering |
 | `deploy/history/HistoryServerMetrics.scala` | **Create** | Metrics |
 
@@ -417,14 +418,19 @@ UI Request (taskSummary):
   - Read pre-computed CachedQuantile directly (no index scan needed)
 
 UI Request (task list):
-  - Apply default pagination (100 tasks)
-  - Use indexed view with skip/max for efficient pagination
-  - Return paginated response with total count from StageTaskSummary
+  - Apply default pagination (100 tasks) at API level
+  - Use KVStore skip()/max() for efficient index traversal
+  - Return TaskDataLite (no full toApi() deserialization)
+  - Total count from StageTaskSummary (no iteration)
+
+UI Request (timeline):
+  - Check task count vs threshold (default 50K)
+  - If below: use LAUNCH_TIME index for pre-sorted access, limit 1K
+  - If above: show disabled message, skip generation
 
 UI Rendering:
   - Limit rendered rows (default 1000)
-  - Show warning banner if more tasks available
-  - Offer CSV export for full data access
+  - CSV export endpoint for full data access (streaming, no buffering)
 ```
 
 ---
@@ -433,77 +439,281 @@ UI Rendering:
 
 ### Problem
 
-Even with replay optimizations, the Spark UI can be slow when displaying stages with large task counts:
+Even with replay optimizations, the Spark UI can be slow when displaying stages with large task counts.
 
-1. **REST API overhead**: Fetching task lists requires KVStore iteration
-2. **No default limits**: UI requests all tasks, causing large JSON responses
-3. **Sorting overhead**: Client-side sorting of millions of tasks is expensive
-4. **Repeated queries**: Each page view re-fetches data from KVStore
+#### Root Cause Analysis
+
+| Bottleneck | Location | Impact | Description |
+|------------|----------|--------|-------------|
+| **Task deserialization** | `AppStatusStore.scala:822-845` | 40% | `toApi()` called on every task, deserializes all metrics |
+| **Executor log fetching** | `AppStatusStore.scala:828` | 10% | KVStore read per unique executor in `constructTaskDataList()` |
+| **Quantile computation** | `AppStatusStore.scala:253-531` | 30% | 20+ full table scans, one per metric index |
+| **Timeline generation** | `StagePage.scala:249-386` | 15% | Sorts ALL tasks, heavy string interpolation per task |
+| **Computed fields** | `AppStatusUtils` | 5% | `schedulerDelay()`, `gettingResultTime()` per task |
+
+#### Code Evidence
+
+**1. Per-task deserialization in constructTaskDataList (AppStatusStore.scala:822-845):**
+```scala
+def constructTaskDataList(taskDataWrapperIter: Iterable[TaskDataWrapper]): Seq[v1.TaskData] = {
+  taskDataWrapperIter.map { taskDataWrapper =>
+    val taskDataOld: v1.TaskData = taskDataWrapper.toApi  // Expensive deserialization
+    val executorLogs = executorIdToLogs.getOrElseUpdate(taskDataOld.executorId, {
+      executorSummary(taskDataOld.executorId).executorLogs  // KVStore read per executor
+    })
+    // ... creates new TaskData with computed fields
+  }.toSeq
+}
+```
+
+**2. Quantile computation with 20+ scans (AppStatusStore.scala:350-375):**
+```scala
+// Comment in code: "It's also slow, especially with disk stores"
+def scanTasks(index: String)(fn: TaskDataWrapper => Long): IndexedSeq[Double] = {
+  store.view(classOf[TaskDataWrapper])
+    .parent(stageKey)
+    .index(index)  // One full scan per metric index
+    .closeableIterator()
+  // ... iterates all tasks
+}
+```
+
+**3. Timeline sorts ALL tasks before taking top N (StagePage.scala:266):**
+```scala
+tasks.sortBy(-_.launchTime.getTime()).take(MAX_TIMELINE_TASKS).map { ... }
+// Sorts entire dataset even when only taking 1000 tasks
+```
 
 ### Design
 
-Four sub-optimizations to reduce UI latency:
+Six sub-optimizations targeting the actual bottlenecks:
 
-| Sub-Optimization | Impact | Location |
-|------------------|--------|----------|
-| **4.1 API Pagination Defaults** | Reduce response size | REST API |
-| **4.2 Stage Task Summary Cache** | Avoid repeated aggregation | AppStatusStore |
-| **4.3 Efficient Index Access** | Faster sorting/filtering | KVStore queries |
-| **4.4 Task Count Limits** | Bound UI rendering time | UI components |
+| Sub-Optimization | Target Bottleneck | Impact |
+|------------------|-------------------|--------|
+| **4.1 Lazy Task Construction** | Task deserialization | 40% faster |
+| **4.2 KVStore-Level Pagination** | Iteration overhead | 30% faster |
+| **4.3 Pre-computed Quantiles** | Quantile scans | Already in Opt 2 |
+| **4.4 Optimized Timeline** | Timeline generation | 15% faster |
+| **4.5 Stage Task Summary Cache** | Aggregate queries | 5% faster |
+| **4.6 API Pagination Defaults** | Response size | Prevents worst case |
 
 ---
 
-### 4.1 API Pagination Defaults
+### 4.1 Lazy Task Construction
 
-Add default limits to task-fetching APIs to prevent unbounded responses.
+Avoid expensive `toApi()` deserialization until data is actually needed.
 
-#### Configuration
+#### Problem
+
+Current `constructTaskDataList()` eagerly deserializes ALL task metrics even when UI only displays a subset of columns.
+
+#### Implementation
+
+**File:** `core/src/main/scala/org/apache/spark/status/AppStatusStore.scala`
 
 ```scala
-val UI_TASK_PAGE_SIZE = ConfigBuilder("spark.ui.task.pageSize")
-  .doc("Default page size for task list APIs. Default 100.")
-  .version("4.0.0")
-  .intConf
-  .createWithDefault(100)
+/**
+ * Lightweight task data for list display. Only deserializes essential fields.
+ * Full metrics loaded on-demand when user expands task details.
+ */
+def taskListLite(
+    stageId: Int,
+    stageAttemptId: Int,
+    offset: Int,
+    length: Int,
+    sortBy: Option[String],
+    descending: Boolean): Seq[v1.TaskDataLite] = {
 
-val UI_TASK_MAX_PAGE_SIZE = ConfigBuilder("spark.ui.task.maxPageSize")
-  .doc("Maximum allowed page size for task APIs. Default 10000.")
-  .version("4.0.0")
-  .intConf
-  .createWithDefault(10000)
+  val stageKey = Array(stageId, stageAttemptId)
+
+  // Use KVStore skip/max for true pagination (see 4.2)
+  val view = store.view(classOf[TaskDataWrapper])
+    .parent(stageKey)
+    .index(sortBy.getOrElse(TaskIndexNames.TASK_INDEX))
+    .reverse(descending)
+    .skip(offset)
+    .max(length)
+
+  // Only extract fields needed for table display - NO full toApi()
+  KVUtils.viewToSeq(view).map { wrapper =>
+    new v1.TaskDataLite(
+      taskId = wrapper.taskId,
+      index = wrapper.index,
+      attempt = wrapper.attempt,
+      launchTime = wrapper.launchTime,
+      duration = wrapper.duration,
+      status = wrapper.status,
+      executorId = wrapper.executorId,
+      host = wrapper.host,
+      // Omit: full metrics, executor logs, computed fields
+      hasMetrics = true  // Flag to indicate full data available
+    )
+  }
+}
+
+/**
+ * Full task data for single task detail view.
+ * Called only when user clicks on a specific task.
+ */
+def taskData(taskId: Long): Option[v1.TaskData] = {
+  asOption(store.read(classOf[TaskDataWrapper], taskId)).map { wrapper =>
+    constructTaskData(wrapper)  // Full deserialization for single task
+  }
+}
+```
+
+#### New Lite Data Class
+
+**File:** `core/src/main/scala/org/apache/spark/status/api/v1/api.scala`
+
+```scala
+/**
+ * Lightweight task data for list views.
+ * Contains only fields displayed in task table columns.
+ */
+class TaskDataLite(
+    val taskId: Long,
+    val index: Int,
+    val attempt: Int,
+    val launchTime: Date,
+    val duration: Long,
+    val status: String,
+    val executorId: String,
+    val host: String,
+    val hasMetrics: Boolean  // True if full metrics available via taskData()
+)
+```
+
+---
+
+### 4.2 KVStore-Level Pagination
+
+Apply skip/max at KVStore level to avoid iterating skipped records.
+
+#### Problem
+
+Current pagination fetches all tasks then slices in memory:
+```scala
+// Bad: Fetches 100K tasks, returns 100
+KVUtils.viewToSeq(view).slice(offset, offset + length)
 ```
 
 #### Implementation
 
-**File:** `core/src/main/scala/org/apache/spark/status/api/v1/StagesResource.scala`
+**File:** `core/src/main/scala/org/apache/spark/status/AppStatusStore.scala`
 
 ```scala
-@GET
-@Path("{stageId}/{stageAttemptId}/taskList")
 def taskList(
-    @PathParam("stageId") stageId: Int,
-    @PathParam("stageAttemptId") stageAttemptId: Int,
-    @DefaultValue("0") @QueryParam("offset") offset: Int,
-    @DefaultValue("-1") @QueryParam("length") length: Int,  // -1 means use default
-    @QueryParam("sortBy") sortBy: TaskSorting): Seq[TaskData] = {
+    stageId: Int,
+    stageAttemptId: Int,
+    offset: Int,
+    length: Int,
+    sortBy: Option[String],
+    descending: Boolean): Seq[v1.TaskData] = {
 
-  val defaultPageSize = conf.get(UI_TASK_PAGE_SIZE)
-  val maxPageSize = conf.get(UI_TASK_MAX_PAGE_SIZE)
+  val stageKey = Array(stageId, stageAttemptId)
 
-  // Apply defaults and limits
-  val effectiveLength = if (length <= 0) defaultPageSize
-                        else math.min(length, maxPageSize)
+  // Good: KVStore handles skip/max efficiently via index
+  val view = store.view(classOf[TaskDataWrapper])
+    .parent(stageKey)
+    .index(sortBy.getOrElse(TaskIndexNames.TASK_INDEX))
+    .reverse(descending)
+    .skip(offset)   // Skip at KVStore level
+    .max(length)    // Limit at KVStore level
 
-  withUI(ui => {
-    ui.store.taskList(stageId, stageAttemptId, offset, effectiveLength,
-      indexName(sortBy), sortBy.toString.startsWith("-"))
-  })
+  constructTaskDataList(KVUtils.viewToSeq(view))
+}
+```
+
+**Key Change:** `skip()` and `max()` are applied to the KVStore view BEFORE iteration, not after collecting to Seq.
+
+---
+
+### 4.3 Pre-computed Quantiles
+
+**Already addressed in Optimization 2.** The quantile computation bottleneck (20+ full table scans) is solved by pre-computing quantiles at stage completion.
+
+Cross-reference: See "Optimization 2: Reduced Index Set + Pre-computed Quantiles"
+
+---
+
+### 4.4 Optimized Timeline Generation
+
+Avoid sorting all tasks when only top N are needed.
+
+#### Problem
+
+```scala
+// Current: O(n log n) sort of ALL tasks, then take 1000
+tasks.sortBy(-_.launchTime.getTime()).take(MAX_TIMELINE_TASKS)
+```
+
+#### Implementation
+
+**File:** `core/src/main/scala/org/apache/spark/ui/jobs/StagePage.scala`
+
+```scala
+private def makeTimeline(stageId: Int, stageAttemptId: Int): NodeSeq = {
+  // Use KVStore index for pre-sorted access - O(k) where k = MAX_TIMELINE_TASKS
+  val timelineTasks = store.taskList(
+    stageId,
+    stageAttemptId,
+    offset = 0,
+    length = MAX_TIMELINE_TASKS,
+    sortBy = Some(TaskIndexNames.LAUNCH_TIME),
+    descending = true  // Most recent first
+  )
+
+  // Build timeline from already-sorted, limited set
+  buildTimelineJson(timelineTasks)
+}
+
+private def buildTimelineJson(tasks: Seq[TaskData]): String = {
+  // Use StringBuilder for efficient concatenation
+  val sb = new StringBuilder(tasks.size * 500)  // Pre-size estimate
+  sb.append('[')
+
+  var first = true
+  tasks.foreach { task =>
+    if (!first) sb.append(',')
+    first = false
+
+    // Inline JSON building without regex replaceAll
+    sb.append(s"""{"className":"task task-assignment-timeline-object",""")
+    sb.append(s""""group":"${task.executorId}",""")
+    sb.append(s""""start":${task.launchTime.getTime},""")
+    sb.append(s""""end":${task.launchTime.getTime + task.duration}}""")
+  }
+
+  sb.append(']')
+  sb.toString()
+}
+```
+
+#### Alternative: Disable Timeline for Large Stages
+
+```scala
+val TIMELINE_TASK_THRESHOLD = ConfigBuilder("spark.ui.timeline.taskThreshold")
+  .doc("Disable timeline visualization when stage has more tasks than this. Default 50000.")
+  .version("4.0.0")
+  .intConf
+  .createWithDefault(50000)
+
+private def makeTimeline(...): NodeSeq = {
+  val taskCount = store.taskCount(stageId, stageAttemptId)
+  if (taskCount > conf.get(TIMELINE_TASK_THRESHOLD)) {
+    <div class="alert alert-info">
+      Timeline disabled for stages with {taskCount} tasks (threshold: {conf.get(TIMELINE_TASK_THRESHOLD)}).
+    </div>
+  } else {
+    // ... generate timeline
+  }
 }
 ```
 
 ---
 
-### 4.2 Stage Task Summary Cache
+### 4.5 Stage Task Summary Cache
 
 Cache aggregated task statistics per stage to avoid repeated computation.
 
@@ -652,101 +862,41 @@ def stageData(stageId: Int, stageAttemptId: Int, details: Boolean): v1.StageData
 
 ---
 
-### 4.3 Efficient Index Access Patterns
+### 4.6 API Pagination Defaults
 
-Ensure common UI queries use indexed access patterns.
-
-#### Common UI Query Patterns
-
-| Query | Current Index | Optimization |
-|-------|---------------|--------------|
-| Tasks sorted by duration | DURATION | Already indexed |
-| Tasks sorted by launch time | LAUNCH_TIME | Already indexed |
-| Failed tasks only | STATUS | Already indexed |
-| Tasks for executor X | EXECUTOR | Already indexed |
-| Task count per stage | Scan required | Use StageTaskSummary |
-
-#### Pagination Optimization
-
-**File:** `core/src/main/scala/org/apache/spark/status/AppStatusStore.scala`
-
-```scala
-def taskList(
-    stageId: Int,
-    stageAttemptId: Int,
-    offset: Int,
-    length: Int,
-    sortBy: String,
-    descending: Boolean): Seq[v1.TaskData] = {
-
-  val stageKey = Array(stageId, stageAttemptId)
-  val taskClass = if (useLightStorage) classOf[TaskDataWrapperLight]
-                  else classOf[TaskDataWrapper]
-
-  // Use indexed view with skip/max for efficient pagination
-  val view = store.view(taskClass)
-    .parent(stageKey)
-    .index(sortBy)
-    .reverse(descending)
-    .skip(offset)
-    .max(length)
-
-  KVUtils.viewToSeq(view).map(_.toApi)
-}
-```
-
----
-
-### 4.4 UI Task Count Limits
-
-Limit task rendering in UI components to prevent browser slowdown.
+Add default limits to task-fetching APIs to prevent unbounded responses.
 
 #### Configuration
 
 ```scala
+val UI_TASK_PAGE_SIZE = ConfigBuilder("spark.ui.task.pageSize")
+  .doc("Default page size for task list APIs. Default 100.")
+  .version("4.0.0")
+  .intConf
+  .createWithDefault(100)
+
+val UI_TASK_MAX_PAGE_SIZE = ConfigBuilder("spark.ui.task.maxPageSize")
+  .doc("Maximum allowed page size for task APIs. Default 10000.")
+  .version("4.0.0")
+  .intConf
+  .createWithDefault(10000)
+
 val UI_TASK_RENDER_LIMIT = ConfigBuilder("spark.ui.task.renderLimit")
-  .doc("Maximum tasks to render in UI tables. Show warning if exceeded. Default 1000.")
+  .doc("Maximum tasks to render in UI tables. Default 1000.")
   .version("4.0.0")
   .intConf
   .createWithDefault(1000)
 
-val UI_TASK_SHOW_ALL_THRESHOLD = ConfigBuilder("spark.ui.task.showAllThreshold")
-  .doc("Show 'Show All' button only if task count below this. Default 10000.")
+val TIMELINE_TASK_THRESHOLD = ConfigBuilder("spark.ui.timeline.taskThreshold")
+  .doc("Disable timeline for stages exceeding this task count. Default 50000.")
   .version("4.0.0")
   .intConf
-  .createWithDefault(10000)
+  .createWithDefault(50000)
 ```
 
-#### Implementation (UI Changes)
+#### REST API CSV Export
 
-**File:** `core/src/main/scala/org/apache/spark/ui/jobs/StagePage.scala`
-
-```scala
-def renderTaskTable(tasks: Seq[TaskData], totalTasks: Int): NodeSeq = {
-  val renderLimit = conf.get(UI_TASK_RENDER_LIMIT)
-  val showAllThreshold = conf.get(UI_TASK_SHOW_ALL_THRESHOLD)
-
-  val displayTasks = tasks.take(renderLimit)
-  val hasMore = totalTasks > renderLimit
-
-  val warningBanner = if (hasMore) {
-    <div class="alert alert-warning">
-      Showing {renderLimit} of {totalTasks} tasks.
-      {if (totalTasks <= showAllThreshold)
-        <a href="?showAllTasks=true">Show all tasks</a>
-      else
-        <span>Use filters to narrow results or export to CSV for full data.</span>
-      }
-    </div>
-  } else NodeSeq.Empty
-
-  warningBanner ++ renderTaskRows(displayTasks)
-}
-```
-
-#### REST API Task Export
-
-For users needing all task data, provide efficient CSV export.
+For users needing all task data, provide efficient streaming CSV export.
 
 **File:** `core/src/main/scala/org/apache/spark/status/api/v1/StagesResource.scala`
 
@@ -763,7 +913,7 @@ def taskListCsv(
       val writer = new PrintWriter(output)
       writer.println("taskId,index,attempt,launchTime,duration,status,executor,...")
 
-      // Stream tasks directly without buffering
+      // Stream tasks directly without buffering - no toApi() overhead
       val iter = store.view(classOf[TaskDataWrapper])
         .parent(Array(stageId, stageAttemptId))
         .iterator()
@@ -784,12 +934,26 @@ def taskListCsv(
 ### UI Optimization Summary
 
 ```
-Before:
-  UI requests → fetch all tasks → JSON serialize → render all rows → SLOW
+Before (100K tasks stage):
+  Stage page load:
+    1. taskList() → iterate 100K tasks → toApi() each → executor log fetch → 5-10s
+    2. taskSummary() → 20 metric scans × 100K tasks → 15-30s
+    3. makeTimeline() → sort 100K tasks → string build 1K → 2-5s
+    Total: 20-45s
 
 After:
-  UI requests → paginated fetch (default 100) → cached summary stats →
-  limited render (default 1000) → warning if more → FAST
+  Stage page load:
+    1. taskListLite() → skip/max at KVStore → 100 tasks → no toApi() → 50ms
+    2. taskSummary() → read CachedQuantile → 1ms
+    3. stageTaskSummary() → read StageTaskSummary → 1ms
+    4. makeTimeline() → use index sort → limit 1K → StringBuilder → 100ms
+    Total: ~200ms
+
+Key optimizations by bottleneck:
+  - Task deserialization (40%) → Lazy construction, TaskDataLite
+  - Quantile computation (30%) → Pre-computed at stage completion (Opt 2)
+  - Timeline generation (15%) → Index-based sort, disable for large stages
+  - Aggregates (5%) → StageTaskSummary cache
 ```
 
 ---
