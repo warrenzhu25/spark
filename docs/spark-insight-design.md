@@ -2,68 +2,107 @@
 
 ## Overview
 
-Spark Insight is a modern, AI-powered tool for analyzing Apache Spark application history. It provides a beautiful UI, natural language querying via LLM integration, MCP server capabilities, and can run in serverless mode with a single event log.
+Spark Insight is a **drop-in replacement** for the official Apache Spark History Server. It provides SHS-compatible REST APIs, a modern UI, AI-powered analysis, and MCP integration for LLM tools.
 
 ### Goals
 
-1. **Modern Experience** - Beautiful, responsive UI with interactive visualizations
-2. **AI-Powered Analysis** - Natural language queries to understand failures, performance issues
-3. **MCP Integration** - Expose Spark data to LLM tools (Claude, etc.)
-4. **Serverless Mode** - Zero-config analysis of individual event logs
-5. **Comparative Analysis** - Side-by-side diff of application runs
+1. **SHS Compatibility** - Drop-in replacement with same REST API endpoints
+2. **Modern Experience** - Beautiful, responsive UI with interactive visualizations
+3. **AI-Powered Analysis** - Natural language queries to understand failures, performance issues
+4. **MCP Integration** - Expose Spark data to LLM tools (Claude, etc.)
+5. **Unified Architecture** - Single Python service, CLI/UI/MCP all use REST API
+
+### Design Principles
+
+1. **Python Only** - No Rust, no multi-language complexity
+2. **REST API First** - One service hosts all functionality
+3. **SHS Compatible** - Existing tools work without modification
+4. **Simple Deployment** - Single process, single container
 
 ### Deployment Modes
 
 | Mode | Description | Use Case |
 |------|-------------|----------|
-| **CLI** | Single event log, local analysis | Developer debugging |
-| **Service** | Multi-user, upload event logs | Team/org-wide analysis |
-| **MCP** | Expose data to LLM tools | AI-assisted debugging |
+| **Service** | REST API server with UI | Team/org-wide (replaces SHS) |
+| **CLI** | Talks to service via REST API | Developer debugging |
+| **MCP** | Connects to service REST API | AI-assisted debugging |
 
-### Non-Goals
+### Non-Goals (v1.0)
 
-- Replace the official Spark History Server in production clusters
 - Real-time streaming of running applications (focus on completed apps)
 - Modify or write to Spark clusters
+- Kerberos authentication (use SHS proxy mode instead)
+
+### Production Readiness
+
+| Workload | Supported | Notes |
+|----------|-----------|-------|
+| <100 apps/day | ✅ Yes | Direct replacement for SHS |
+| 100-500 apps/day | ✅ Yes | Enable caching, background parsing |
+| 500+ apps/day | ⚠️ Maybe | Test performance, consider SHS proxy mode |
+| Event logs <1GB | ✅ Yes | ~15s parse time |
+| Event logs 1-5GB | ✅ Yes | ~75s parse time, use background parsing |
+| Event logs >5GB | ⚠️ Maybe | Consider sampling or SHS proxy mode |
 
 ---
 
 ## Architecture
 
-### Service Mode (Multi-user with Upload)
+### Unified Service Architecture
+
+All clients (CLI, UI, MCP) communicate with a single REST API service:
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           Web UI (Streamlit)                                │
-│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────────────────┐│
-│  │  Upload     │ │  Dashboard  │ │  Diff View  │ │  AI Chat Interface      ││
-│  │  Event Log  │ │  & Analysis │ │             │ │                         ││
-│  └─────────────┘ └─────────────┘ └─────────────┘ └─────────────────────────┘│
-├─────────────────────────────────────────────────────────────────────────────┤
-│                           API Layer (FastAPI)                               │
-├───────────────┬───────────────┬───────────────┬─────────────────────────────┤
-│  Upload       │    Query      │     LLM       │         MCP                 │
-│  Service      │    Engine     │   Service     │       Server                │
-├───────────────┴───────────────┴───────────────┴─────────────────────────────┤
-│                           Data Layer                                        │
-│  ┌─────────────────────┐  ┌─────────────────────┐  ┌──────────────────────┐ │
-│  │  Event Log Storage  │  │  DuckDB             │  │  Vector Store        │ │
-│  │  (S3 / Local Disk)  │  │  (Per-app Analysis) │  │  (Embeddings)        │ │
-│  └─────────────────────┘  └─────────────────────┘  └──────────────────────┘ │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│                              CLIENTS                                        │
+│  ┌─────────────┐  ┌─────────────────┐  ┌─────────────┐  ┌───────────────┐  │
+│  │  CLI        │  │  Web UI         │  │  MCP Server │  │  Spark Tools  │  │
+│  │  (Python)   │  │  (Streamlit)    │  │  (Python)   │  │  (existing)   │  │
+│  └──────┬──────┘  └────────┬────────┘  └──────┬──────┘  └───────┬───────┘  │
+│         │                  │                  │                  │          │
+│         └──────────────────┼──────────────────┼──────────────────┘          │
+│                            │                  │                             │
+│                            ▼                  ▼                             │
+├────────────────────────────────────────────────────────────────────────────┤
+│                    REST API (FastAPI) - SHS Compatible                      │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │  /api/v1/applications                    (SHS compatible)            │  │
+│  │  /api/v1/applications/{appId}/jobs       (SHS compatible)            │  │
+│  │  /api/v1/applications/{appId}/stages     (SHS compatible)            │  │
+│  │  /api/v1/applications/{appId}/executors  (SHS compatible)            │  │
+│  ├──────────────────────────────────────────────────────────────────────┤  │
+│  │  /api/insight/analyze                    (AI analysis)               │  │
+│  │  /api/insight/diff                       (app comparison)            │  │
+│  │  /api/insight/upload                     (event log upload)          │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+├────────────────────────────────────────────────────────────────────────────┤
+│                           Core Services                                     │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐             │
+│  │  Event Log      │  │  Query Engine   │  │  LLM Service    │             │
+│  │  Parser         │  │  (DuckDB)       │  │  (Claude API)   │             │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘             │
+├────────────────────────────────────────────────────────────────────────────┤
+│                           Storage Layer                                     │
+│  ┌────────────────────────────────────┐  ┌─────────────────────────────┐   │
+│  │  Event Log Storage                 │  │  Parsed Data Cache          │   │
+│  │  (Local / S3 / HDFS)               │  │  (DuckDB per app)           │   │
+│  └────────────────────────────────────┘  └─────────────────────────────┘   │
+└────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### CLI Mode (Single Event Log)
+### Client Architecture
 
 ```
-┌──────────────────────────────────────────┐
-│          spark-insight CLI               │
-├──────────────────────────────────────────┤
-│  serve   → Streamlit UI (localhost)      │
-│  ask     → LLM Q&A in terminal           │
-│  mcp     → MCP server for Claude         │
-│  diff    → Compare two apps              │
-└──────────────────────────────────────────┘
+CLI                          UI                           MCP
+ │                            │                            │
+ │  spark-insight apps        │  Browser → Streamlit       │  Claude Desktop
+ │  spark-insight jobs app1   │  → Renders REST data       │  → Calls MCP tools
+ │  spark-insight ask "..."   │  → AI chat interface       │  → query_spark_data
+ │                            │                            │  → analyze_failures
+ └───────────────┬────────────┴─────────────┬──────────────┘
+                 │                          │
+                 ▼                          ▼
+         REST API (http://localhost:18080/api/v1/...)
 ```
 
 ---
@@ -72,52 +111,45 @@ Spark Insight is a modern, AI-powered tool for analyzing Apache Spark applicatio
 
 | Layer | Technology | Rationale |
 |-------|------------|-----------|
-| **Core Parser** | Rust | Handles GB-scale files, streaming, type-safe |
-| **Python Bindings** | PyO3 | Call Rust from Python seamlessly |
+| **API Server** | FastAPI | Async, auto-docs, SHS-compatible routes |
+| **Parser** | Polars | Rust-based, 3-4x faster than pure Python |
+| **Query Engine** | DuckDB | Analytical queries, zero-config, fast |
 | **Frontend** | Streamlit | Python-native, rapid iteration |
-| **Charts** | Plotly (via Streamlit) | Interactive, built-in Streamlit support |
-| **Backend** | FastAPI (Python) | Async, great for LLM integration |
-| **Database** | DuckDB | Analytical queries, zero-config, fast |
-| **Storage** | S3 / Local disk | Event log storage for service mode |
+| **Charts** | Plotly | Interactive, built-in Streamlit support |
+| **Storage** | Local / S3 / HDFS | Event log storage |
 | **LLM** | Claude API / Ollama | Cloud or local LLM options |
 | **MCP** | mcp-python SDK | Official MCP implementation |
 
-### Why Rust Core + Python UI?
+### Why Python Only?
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                   Streamlit UI (Python)                     │
-│              (LLM integration, visualization)               │
-├─────────────────────────────────────────────────────────────┤
-│                     Python API Layer                        │
-│                    (FastAPI, thin layer)                    │
-├─────────────────────────────────────────────────────────────┤
-│                spark-insight-core (Rust)                    │
-│    ┌──────────────┐  ┌──────────────┐  ┌─────────────────┐ │
-│    │  Event Log   │  │   DuckDB     │  │    Parquet      │ │
-│    │   Parser     │  │   Writer     │  │    Export       │ │
-│    │ (streaming)  │  │              │  │                 │ │
-│    └──────────────┘  └──────────────┘  └─────────────────┘ │
-│                    (PyO3 Python bindings)                   │
-└─────────────────────────────────────────────────────────────┘
-```
+**Complexity vs Performance Trade-off:**
 
-| Concern | Solution |
-|---------|----------|
-| **GB-scale parsing** | Rust streaming parser - processes 1GB in ~5 seconds |
-| **Memory efficiency** | Rust zero-copy parsing, never loads full file |
-| **Type safety** | Rust core is fully typed, Python gets typed data via Pydantic |
-| **LLM ecosystem** | Python has best LLM libraries (anthropic, langchain) |
-| **UI development** | Streamlit - fast iteration, no frontend expertise needed |
-| **Maintainability** | Rust catches bugs at compile time, Python layer is thin |
+| Approach | Parsing 1GB | Dev Complexity | Maintenance |
+|----------|-------------|----------------|-------------|
+| Rust + Python | ~5s | High (2 languages, PyO3, maturin) | Hard |
+| Python (pure) | ~60s | Low (1 language) | Easy |
+| **Python + Polars** | **~15s** | **Low (1 language)** | **Easy** |
 
-### Performance Comparison
+**Polars** is a Rust-based DataFrame library with Python bindings. We get Rust performance with Python simplicity:
+- Single language (Python) for development
+- Rust-speed parsing under the hood
+- No build complexity (just `pip install polars`)
+- Well-maintained, production-ready library
 
-| Event Log Size | Python (naive) | Python (streaming) | Rust (streaming) |
-|----------------|----------------|--------------------|--------------------|
-| 100 MB | 30s | 10s | 0.5s |
-| 1 GB | 5 min | 90s | 5s |
-| 10 GB | OOM crash | 15 min | 50s |
+### Performance with Polars + Parquet Cache
+
+| Event Log Size | Cold Parse | Cache Write | Cached Load | SQL Query |
+|----------------|------------|-------------|-------------|-----------|
+| 100 MB | <2s | <0.5s | <0.2s | <50ms |
+| 1 GB | ~15s | ~2s | <1s | <100ms |
+| 5 GB | ~75s | ~10s | ~3s | <100ms |
+| 10 GB | ~2.5 min | ~20s | ~5s | <100ms |
+
+**Key optimizations:**
+1. **Polars NDJSON reader** - Rust-based, uses SIMD instructions
+2. **Parquet cache** - Parse once, load instantly forever (~6x compression)
+3. **DuckDB queries** - Zero-copy from Parquet via Arrow
+4. **Background parsing** - Parse on upload, not on request
 
 ### Why Streamlit for UI?
 
@@ -135,526 +167,719 @@ For a data analysis tool, Streamlit provides 90% of the functionality with 10% o
 
 ## Core Features
 
-### 0. Rust Core Library (`spark-insight-core`)
+### 0. SHS-Compatible REST API
 
-The performance-critical parsing is done in Rust, exposed to Python via PyO3.
+The core of Spark Insight is a FastAPI server that implements the same REST API as Apache Spark History Server. This means **existing tools and integrations work without modification**.
 
-**Cargo.toml:**
-```toml
-[package]
-name = "spark-insight-core"
-version = "0.1.0"
-edition = "2021"
+**SHS API Compatibility:**
 
-[lib]
-crate-type = ["cdylib"]  # For Python bindings
+| Endpoint | SHS | Spark Insight | Notes |
+|----------|-----|---------------|-------|
+| `GET /api/v1/applications` | ✅ | ✅ | List all applications |
+| `GET /api/v1/applications/{appId}` | ✅ | ✅ | Application details |
+| `GET /api/v1/applications/{appId}/jobs` | ✅ | ✅ | List jobs |
+| `GET /api/v1/applications/{appId}/jobs/{jobId}` | ✅ | ✅ | Job details |
+| `GET /api/v1/applications/{appId}/stages` | ✅ | ✅ | List stages |
+| `GET /api/v1/applications/{appId}/stages/{stageId}` | ✅ | ✅ | Stage details |
+| `GET /api/v1/applications/{appId}/executors` | ✅ | ✅ | List executors |
+| `GET /api/v1/applications/{appId}/environment` | ✅ | ✅ | Spark config |
+| **Extended API** | | | |
+| `POST /api/insight/analyze` | ❌ | ✅ | AI analysis |
+| `POST /api/insight/diff` | ❌ | ✅ | Compare apps |
+| `POST /api/insight/upload` | ❌ | ✅ | Upload event log |
 
-[dependencies]
-pyo3 = { version = "0.20", features = ["extension-module"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-duckdb = "0.9"
-flate2 = "1.0"          # gzip support
-lz4 = "1.24"            # lz4 support
-rayon = "1.8"           # parallel processing
-thiserror = "1.0"       # error handling
-chrono = { version = "0.4", features = ["serde"] }
-```
-
-**Rust Data Models (fully typed):**
-```rust
-use chrono::{DateTime, Utc};
-use pyo3::prelude::*;
-use serde::{Deserialize, Serialize};
-
-#[pyclass]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SparkApplication {
-    #[pyo3(get)]
-    pub app_id: String,
-    #[pyo3(get)]
-    pub app_name: String,
-    #[pyo3(get)]
-    pub start_time: i64,  // epoch ms
-    #[pyo3(get)]
-    pub end_time: i64,
-    #[pyo3(get)]
-    pub duration_ms: i64,
-    #[pyo3(get)]
-    pub spark_version: String,
-    #[pyo3(get)]
-    pub user: String,
-}
-
-#[pyclass]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Job {
-    #[pyo3(get)]
-    pub job_id: i32,
-    #[pyo3(get)]
-    pub submission_time: i64,
-    #[pyo3(get)]
-    pub completion_time: Option<i64>,
-    #[pyo3(get)]
-    pub status: String,  // SUCCEEDED, FAILED, RUNNING
-    #[pyo3(get)]
-    pub num_stages: i32,
-    #[pyo3(get)]
-    pub num_tasks: i32,
-    #[pyo3(get)]
-    pub failure_reason: Option<String>,
-}
-
-#[pyclass]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Stage {
-    #[pyo3(get)]
-    pub stage_id: i32,
-    #[pyo3(get)]
-    pub attempt_id: i32,
-    #[pyo3(get)]
-    pub name: String,
-    #[pyo3(get)]
-    pub status: String,
-    #[pyo3(get)]
-    pub num_tasks: i32,
-    #[pyo3(get)]
-    pub input_bytes: i64,
-    #[pyo3(get)]
-    pub output_bytes: i64,
-    #[pyo3(get)]
-    pub shuffle_read_bytes: i64,
-    #[pyo3(get)]
-    pub shuffle_write_bytes: i64,
-    #[pyo3(get)]
-    pub executor_run_time: i64,
-    #[pyo3(get)]
-    pub executor_cpu_time: i64,
-    #[pyo3(get)]
-    pub jvm_gc_time: i64,
-    #[pyo3(get)]
-    pub failure_reason: Option<String>,
-}
-
-#[pyclass]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Task {
-    #[pyo3(get)]
-    pub task_id: i64,
-    #[pyo3(get)]
-    pub stage_id: i32,
-    #[pyo3(get)]
-    pub attempt: i32,
-    #[pyo3(get)]
-    pub executor_id: String,
-    #[pyo3(get)]
-    pub host: String,
-    #[pyo3(get)]
-    pub status: String,
-    #[pyo3(get)]
-    pub duration: i64,
-    #[pyo3(get)]
-    pub gc_time: i64,
-    #[pyo3(get)]
-    pub peak_memory: i64,
-    #[pyo3(get)]
-    pub error_message: Option<String>,
-}
-
-#[pyclass]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Executor {
-    #[pyo3(get)]
-    pub executor_id: String,
-    #[pyo3(get)]
-    pub host: String,
-    #[pyo3(get)]
-    pub add_time: i64,
-    #[pyo3(get)]
-    pub remove_time: Option<i64>,
-    #[pyo3(get)]
-    pub remove_reason: Option<String>,
-    #[pyo3(get)]
-    pub total_cores: i32,
-    #[pyo3(get)]
-    pub max_memory: i64,
-}
-```
-
-**Streaming Parser (handles GB files efficiently):**
-```rust
-use std::fs::File;
-use std::io::{BufRead, BufReader};
-use std::path::Path;
-use flate2::read::GzDecoder;
-use thiserror::Error;
-
-#[derive(Error, Debug)]
-pub enum ParseError {
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("Invalid event log format")]
-    InvalidFormat,
-}
-
-pub struct EventLogParser {
-    app: SparkApplication,
-    jobs: Vec<Job>,
-    stages: Vec<Stage>,
-    tasks: Vec<Task>,
-    executors: Vec<Executor>,
-}
-
-impl EventLogParser {
-    /// Parse event log with streaming - never loads full file into memory
-    pub fn parse<P: AsRef<Path>>(path: P) -> Result<Self, ParseError> {
-        let file = File::open(&path)?;
-        let reader: Box<dyn BufRead> = if path.as_ref()
-            .extension()
-            .map_or(false, |e| e == "gz")
-        {
-            Box::new(BufReader::new(GzDecoder::new(file)))
-        } else {
-            Box::new(BufReader::new(file))
-        };
-
-        let mut parser = Self::new();
-
-        // Stream line by line - constant memory usage
-        for line in reader.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            parser.parse_event(&line)?;
-        }
-
-        parser.finalize();
-        Ok(parser)
-    }
-
-    fn parse_event(&mut self, line: &str) -> Result<(), ParseError> {
-        let event: serde_json::Value = serde_json::from_str(line)?;
-
-        match event["Event"].as_str() {
-            Some("SparkListenerApplicationStart") => {
-                self.app.app_id = event["App ID"].as_str()
-                    .unwrap_or_default().to_string();
-                self.app.app_name = event["App Name"].as_str()
-                    .unwrap_or_default().to_string();
-                self.app.start_time = event["Timestamp"].as_i64().unwrap_or(0);
-                self.app.spark_version = event["Spark Version"].as_str()
-                    .unwrap_or_default().to_string();
-            }
-            Some("SparkListenerApplicationEnd") => {
-                self.app.end_time = event["Timestamp"].as_i64().unwrap_or(0);
-                self.app.duration_ms = self.app.end_time - self.app.start_time;
-            }
-            Some("SparkListenerJobStart") => {
-                self.jobs.push(Job {
-                    job_id: event["Job ID"].as_i64().unwrap_or(0) as i32,
-                    submission_time: event["Submission Time"].as_i64().unwrap_or(0),
-                    completion_time: None,
-                    status: "RUNNING".to_string(),
-                    num_stages: event["Stage IDs"].as_array()
-                        .map(|a| a.len()).unwrap_or(0) as i32,
-                    num_tasks: 0,
-                    failure_reason: None,
-                });
-            }
-            Some("SparkListenerJobEnd") => {
-                let job_id = event["Job ID"].as_i64().unwrap_or(0) as i32;
-                if let Some(job) = self.jobs.iter_mut().find(|j| j.job_id == job_id) {
-                    job.completion_time = Some(
-                        event["Completion Time"].as_i64().unwrap_or(0)
-                    );
-                    job.status = event["Job Result"]["Result"].as_str()
-                        .unwrap_or("UNKNOWN").to_string();
-                }
-            }
-            Some("SparkListenerStageCompleted") => {
-                let stage_info = &event["Stage Info"];
-                self.stages.push(Stage {
-                    stage_id: stage_info["Stage ID"].as_i64().unwrap_or(0) as i32,
-                    attempt_id: stage_info["Stage Attempt ID"].as_i64().unwrap_or(0) as i32,
-                    name: stage_info["Stage Name"].as_str()
-                        .unwrap_or_default().to_string(),
-                    status: stage_info["Failure Reason"].as_str()
-                        .map_or("COMPLETE", |_| "FAILED").to_string(),
-                    num_tasks: stage_info["Number of Tasks"].as_i64().unwrap_or(0) as i32,
-                    // ... extract metrics
-                    input_bytes: 0,
-                    output_bytes: 0,
-                    shuffle_read_bytes: 0,
-                    shuffle_write_bytes: 0,
-                    executor_run_time: 0,
-                    executor_cpu_time: 0,
-                    jvm_gc_time: 0,
-                    failure_reason: stage_info["Failure Reason"].as_str()
-                        .map(|s| s.to_string()),
-                });
-            }
-            Some("SparkListenerTaskEnd") => {
-                let task_info = &event["Task Info"];
-                let task_metrics = &event["Task Metrics"];
-                self.tasks.push(Task {
-                    task_id: task_info["Task ID"].as_i64().unwrap_or(0),
-                    stage_id: event["Stage ID"].as_i64().unwrap_or(0) as i32,
-                    attempt: task_info["Attempt"].as_i64().unwrap_or(0) as i32,
-                    executor_id: task_info["Executor ID"].as_str()
-                        .unwrap_or_default().to_string(),
-                    host: task_info["Host"].as_str()
-                        .unwrap_or_default().to_string(),
-                    status: task_info["Failed"].as_bool()
-                        .map_or("SUCCESS", |f| if f { "FAILED" } else { "SUCCESS" })
-                        .to_string(),
-                    duration: task_info["Finish Time"].as_i64().unwrap_or(0)
-                        - task_info["Launch Time"].as_i64().unwrap_or(0),
-                    gc_time: task_metrics["JVM GC Time"].as_i64().unwrap_or(0),
-                    peak_memory: task_metrics["Peak Execution Memory"].as_i64().unwrap_or(0),
-                    error_message: event["Task End Reason"]["Full Stack Trace"].as_str()
-                        .map(|s| s.to_string()),
-                });
-            }
-            Some("SparkListenerExecutorAdded") => {
-                self.executors.push(Executor {
-                    executor_id: event["Executor ID"].as_str()
-                        .unwrap_or_default().to_string(),
-                    host: event["Executor Info"]["Host"].as_str()
-                        .unwrap_or_default().to_string(),
-                    add_time: event["Timestamp"].as_i64().unwrap_or(0),
-                    remove_time: None,
-                    remove_reason: None,
-                    total_cores: event["Executor Info"]["Total Cores"]
-                        .as_i64().unwrap_or(0) as i32,
-                    max_memory: 0,
-                });
-            }
-            Some("SparkListenerExecutorRemoved") => {
-                let exec_id = event["Executor ID"].as_str().unwrap_or_default();
-                if let Some(exec) = self.executors.iter_mut()
-                    .find(|e| e.executor_id == exec_id)
-                {
-                    exec.remove_time = Some(event["Timestamp"].as_i64().unwrap_or(0));
-                    exec.remove_reason = event["Removed Reason"].as_str()
-                        .map(|s| s.to_string());
-                }
-            }
-            _ => {} // Ignore other events
-        }
-        Ok(())
-    }
-}
-```
-
-**PyO3 Python Bindings:**
-```rust
-use pyo3::prelude::*;
-
-#[pyfunction]
-fn parse_eventlog(path: &str) -> PyResult<ParsedApplication> {
-    let parser = EventLogParser::parse(path)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-
-    Ok(ParsedApplication {
-        app: parser.app,
-        jobs: parser.jobs,
-        stages: parser.stages,
-        tasks: parser.tasks,
-        executors: parser.executors,
-    })
-}
-
-#[pyfunction]
-fn parse_eventlog_to_duckdb(path: &str, db_path: &str) -> PyResult<()> {
-    let parser = EventLogParser::parse(path)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-
-    // Write directly to DuckDB
-    let conn = duckdb::Connection::open(db_path)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-
-    // Create tables and insert data...
-    // (DuckDB bulk insert is very fast)
-
-    Ok(())
-}
-
-#[pymodule]
-fn spark_insight_core(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(parse_eventlog, m)?)?;
-    m.add_function(wrap_pyfunction!(parse_eventlog_to_duckdb, m)?)?;
-    m.add_class::<SparkApplication>()?;
-    m.add_class::<Job>()?;
-    m.add_class::<Stage>()?;
-    m.add_class::<Task>()?;
-    m.add_class::<Executor>()?;
-    Ok(())
-}
-```
-
-**Usage from Python:**
-```python
-# Install: pip install spark-insight-core
-import spark_insight_core as core
-
-# Parse event log (returns typed Python objects)
-app = core.parse_eventlog("/path/to/eventlog.json.gz")
-
-print(f"App: {app.app.app_name}")
-print(f"Duration: {app.app.duration_ms}ms")
-print(f"Jobs: {len(app.jobs)}")
-print(f"Stages: {len(app.stages)}")
-print(f"Tasks: {len(app.tasks)}")
-
-# Or parse directly to DuckDB for faster queries
-core.parse_eventlog_to_duckdb("/path/to/eventlog.json.gz", "/tmp/app.duckdb")
-```
-
-**Build & Distribution:**
-```bash
-# Build with maturin (Rust + Python packaging)
-pip install maturin
-maturin develop  # Local development
-maturin build    # Build wheel
-
-# Resulting wheel works on Linux, macOS, Windows
-# Pre-built wheels can be uploaded to PyPI
-```
-
-### 1. Event Log Parsing
-
-Parse Spark event logs (JSON format) into structured data.
+**FastAPI Server Implementation:**
 
 ```python
-# Core data models
-@dataclass
-class SparkApplication:
-    app_id: str
-    app_name: str
-    start_time: datetime
-    end_time: datetime
-    duration_ms: int
-    spark_version: str
-    user: str
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from pydantic import BaseModel
+from typing import List, Optional
+import duckdb
 
-@dataclass
-class Job:
-    job_id: int
-    submission_time: datetime
-    completion_time: datetime
-    status: JobStatus  # SUCCEEDED, FAILED, RUNNING
-    num_stages: int
-    num_tasks: int
-    failure_reason: Optional[str]
+app = FastAPI(title="Spark Insight", version="1.0.0")
 
-@dataclass
-class Stage:
-    stage_id: int
+# ============= SHS-Compatible Endpoints =============
+
+@app.get("/api/v1/applications")
+async def list_applications(
+    status: Optional[str] = None,
+    minDate: Optional[str] = None,
+    maxDate: Optional[str] = None,
+    limit: int = 100
+) -> List[ApplicationInfo]:
+    """List all applications (SHS compatible)."""
+    return app_service.list_applications(status, minDate, maxDate, limit)
+
+
+@app.get("/api/v1/applications/{app_id}")
+async def get_application(app_id: str) -> ApplicationInfo:
+    """Get application details (SHS compatible)."""
+    app = app_service.get_application(app_id)
+    if not app:
+        raise HTTPException(404, f"Application {app_id} not found")
+    return app
+
+
+@app.get("/api/v1/applications/{app_id}/jobs")
+async def list_jobs(
+    app_id: str,
+    status: Optional[str] = None
+) -> List[JobData]:
+    """List jobs for an application (SHS compatible)."""
+    return app_service.get_jobs(app_id, status)
+
+
+@app.get("/api/v1/applications/{app_id}/jobs/{job_id}")
+async def get_job(app_id: str, job_id: int) -> JobData:
+    """Get job details (SHS compatible)."""
+    return app_service.get_job(app_id, job_id)
+
+
+@app.get("/api/v1/applications/{app_id}/stages")
+async def list_stages(
+    app_id: str,
+    status: Optional[str] = None
+) -> List[StageData]:
+    """List stages for an application (SHS compatible)."""
+    return app_service.get_stages(app_id, status)
+
+
+@app.get("/api/v1/applications/{app_id}/stages/{stage_id}/{attempt_id}")
+async def get_stage(
+    app_id: str,
+    stage_id: int,
     attempt_id: int
-    name: str
-    status: StageStatus
-    num_tasks: int
-    input_bytes: int
-    output_bytes: int
-    shuffle_read_bytes: int
-    shuffle_write_bytes: int
-    executor_run_time: int
-    failure_reason: Optional[str]
+) -> StageData:
+    """Get stage details (SHS compatible)."""
+    return app_service.get_stage(app_id, stage_id, attempt_id)
 
-@dataclass
-class Executor:
-    executor_id: str
-    host: str
-    add_time: datetime
-    remove_time: Optional[datetime]
-    remove_reason: Optional[str]
-    total_cores: int
-    max_memory: int
-    total_tasks: int
-    failed_tasks: int
-    total_duration: int
-    total_gc_time: int
 
-@dataclass
-class Task:
-    task_id: int
-    stage_id: int
-    executor_id: str
-    status: TaskStatus
-    duration: int
-    gc_time: int
-    error_message: Optional[str]
+@app.get("/api/v1/applications/{app_id}/stages/{stage_id}/{attempt_id}/taskList")
+async def get_task_list(
+    app_id: str,
+    stage_id: int,
+    attempt_id: int,
+    offset: int = 0,
+    length: int = 100,
+    sortBy: str = "taskId"
+) -> List[TaskData]:
+    """Get tasks for a stage (SHS compatible)."""
+    return app_service.get_tasks(app_id, stage_id, attempt_id, offset, length, sortBy)
+
+
+@app.get("/api/v1/applications/{app_id}/executors")
+async def list_executors(app_id: str) -> List[ExecutorSummary]:
+    """List executors for an application (SHS compatible)."""
+    return app_service.get_executors(app_id)
+
+
+@app.get("/api/v1/applications/{app_id}/environment")
+async def get_environment(app_id: str) -> EnvironmentInfo:
+    """Get Spark configuration (SHS compatible)."""
+    return app_service.get_environment(app_id)
+
+
+# ============= Extended API (Spark Insight specific) =============
+
+@app.post("/api/insight/analyze")
+async def analyze_application(
+    app_id: str,
+    question: str
+) -> AnalysisResult:
+    """AI-powered analysis of application."""
+    return await llm_service.analyze(app_id, question)
+
+
+@app.post("/api/insight/diff")
+async def diff_applications(
+    app_id_1: str,
+    app_id_2: str
+) -> DiffResult:
+    """Compare two applications."""
+    return diff_service.compare(app_id_1, app_id_2)
+
+
+@app.post("/api/insight/upload")
+async def upload_eventlog(
+    file: UploadFile = File(...)
+) -> ApplicationInfo:
+    """Upload and parse an event log."""
+    return await upload_service.upload(file)
+
+
+# ============= Health & Info =============
+
+@app.get("/api/v1/version")
+async def get_version():
+    """Get Spark Insight version."""
+    return {"spark-insight": "1.0.0"}
 ```
 
-**Event Types to Parse:**
+### 1. Event Log Parsing (Python)
+
+Streaming parser for Spark event logs using pure Python with optimizations.
+
+**Data Models (Pydantic):**
+
+```python
+from pydantic import BaseModel
+from typing import Optional, List
+from datetime import datetime
+from enum import Enum
+
+class JobStatus(str, Enum):
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+class StageStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    COMPLETE = "COMPLETE"
+    FAILED = "FAILED"
+    PENDING = "PENDING"
+    SKIPPED = "SKIPPED"
+
+class ApplicationInfo(BaseModel):
+    """SHS-compatible application info."""
+    id: str
+    name: str
+    attempts: List["ApplicationAttemptInfo"]
+
+class ApplicationAttemptInfo(BaseModel):
+    attemptId: Optional[str] = None
+    startTime: str
+    endTime: str
+    lastUpdated: str
+    duration: int
+    sparkUser: str
+    completed: bool
+    appSparkVersion: str
+
+class JobData(BaseModel):
+    """SHS-compatible job data."""
+    jobId: int
+    name: str
+    submissionTime: Optional[str]
+    completionTime: Optional[str]
+    stageIds: List[int]
+    status: str
+    numTasks: int
+    numActiveTasks: int
+    numCompletedTasks: int
+    numSkippedTasks: int
+    numFailedTasks: int
+    numKilledTasks: int
+    numActiveStages: int
+    numCompletedStages: int
+    numSkippedStages: int
+    numFailedStages: int
+
+class StageData(BaseModel):
+    """SHS-compatible stage data."""
+    status: str
+    stageId: int
+    attemptId: int
+    numTasks: int
+    numActiveTasks: int
+    numCompleteTasks: int
+    numFailedTasks: int
+    numKilledTasks: int
+    executorRunTime: int
+    executorCpuTime: int
+    inputBytes: int
+    inputRecords: int
+    outputBytes: int
+    outputRecords: int
+    shuffleReadBytes: int
+    shuffleReadRecords: int
+    shuffleWriteBytes: int
+    shuffleWriteRecords: int
+    memoryBytesSpilled: int
+    diskBytesSpilled: int
+    name: str
+    details: str
+    schedulingPool: str
+
+class ExecutorSummary(BaseModel):
+    """SHS-compatible executor summary."""
+    id: str
+    hostPort: str
+    isActive: bool
+    rddBlocks: int
+    memoryUsed: int
+    diskUsed: int
+    totalCores: int
+    maxTasks: int
+    activeTasks: int
+    failedTasks: int
+    completedTasks: int
+    totalTasks: int
+    totalDuration: int
+    totalGCTime: int
+    totalInputBytes: int
+    totalShuffleRead: int
+    totalShuffleWrite: int
+    maxMemory: int
+    addTime: str
+    removeTime: Optional[str] = None
+    removeReason: Optional[str] = None
+```
+
+**Polars-Based Parser (Rust speed, Python simplicity):**
+
+```python
+import polars as pl
+import gzip
+import tempfile
+from pathlib import Path
+from typing import Optional
+import duckdb
+
+
+class EventLogParser:
+    """
+    Fast event log parser using Polars (Rust-based).
+
+    Performance: ~15s for 1GB event log (vs ~60s pure Python, ~5s pure Rust)
+    """
+
+    def parse(self, path: str) -> "ParsedApplication":
+        """Parse event log file using Polars."""
+        # Decompress if needed
+        path = self._ensure_decompressed(path)
+
+        # Read all events with Polars (Rust-fast NDJSON reader)
+        events = pl.read_ndjson(path)
+
+        # Extract data by event type (all done in Rust/Polars)
+        app_info = self._extract_app_info(events)
+        jobs = self._extract_jobs(events)
+        stages = self._extract_stages(events)
+        tasks = self._extract_tasks(events)
+        executors = self._extract_executors(events)
+        environment = self._extract_environment(events)
+
+        return ParsedApplication(
+            app_info=app_info,
+            jobs=jobs,
+            stages=stages,
+            tasks=tasks,
+            executors=executors,
+            environment=environment,
+        )
+
+    def parse_to_duckdb(self, path: str, db_path: str) -> duckdb.DuckDBPyConnection:
+        """Parse event log directly into DuckDB for fast queries."""
+        path = self._ensure_decompressed(path)
+        events = pl.read_ndjson(path)
+
+        conn = duckdb.connect(db_path)
+
+        # Register Polars DataFrames directly with DuckDB (zero-copy)
+        conn.register("jobs", self._extract_jobs_df(events))
+        conn.register("stages", self._extract_stages_df(events))
+        conn.register("tasks", self._extract_tasks_df(events))
+        conn.register("executors", self._extract_executors_df(events))
+
+        # Create persistent tables
+        conn.execute("CREATE TABLE jobs AS SELECT * FROM jobs")
+        conn.execute("CREATE TABLE stages AS SELECT * FROM stages")
+        conn.execute("CREATE TABLE tasks AS SELECT * FROM tasks")
+        conn.execute("CREATE TABLE executors AS SELECT * FROM executors")
+
+        return conn
+
+    def _ensure_decompressed(self, path: str) -> str:
+        """Decompress gzip/lz4 if needed, return path to plain JSON."""
+        p = Path(path)
+        if p.suffix == '.gz':
+            # Decompress to temp file
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.json')
+            with gzip.open(path, 'rb') as f_in:
+                tmp.write(f_in.read())
+            tmp.close()
+            return tmp.name
+        return path
+
+    def _extract_jobs_df(self, events: pl.DataFrame) -> pl.DataFrame:
+        """Extract jobs from events as Polars DataFrame."""
+        # Filter to job events
+        job_starts = events.filter(
+            pl.col("Event") == "SparkListenerJobStart"
+        ).select([
+            pl.col("Job ID").alias("jobId"),
+            pl.col("Submission Time").alias("submissionTime"),
+            pl.col("Stage IDs").alias("stageIds"),
+        ])
+
+        job_ends = events.filter(
+            pl.col("Event") == "SparkListenerJobEnd"
+        ).select([
+            pl.col("Job ID").alias("jobId"),
+            pl.col("Completion Time").alias("completionTime"),
+            pl.col("Job Result").struct.field("Result").alias("status"),
+        ])
+
+        # Join start and end events
+        return job_starts.join(job_ends, on="jobId", how="left")
+
+    def _extract_tasks_df(self, events: pl.DataFrame) -> pl.DataFrame:
+        """Extract tasks from events as Polars DataFrame."""
+        return events.filter(
+            pl.col("Event") == "SparkListenerTaskEnd"
+        ).select([
+            pl.col("Task Info").struct.field("Task ID").alias("taskId"),
+            pl.col("Stage ID").alias("stageId"),
+            pl.col("Stage Attempt ID").alias("attemptId"),
+            pl.col("Task Info").struct.field("Executor ID").alias("executorId"),
+            pl.col("Task Info").struct.field("Host").alias("host"),
+            pl.col("Task Info").struct.field("Launch Time").alias("launchTime"),
+            pl.col("Task Info").struct.field("Finish Time").alias("finishTime"),
+            (pl.col("Task Info").struct.field("Finish Time") -
+             pl.col("Task Info").struct.field("Launch Time")).alias("duration"),
+            pl.col("Task Info").struct.field("Failed").alias("failed"),
+            pl.col("Task Metrics").struct.field("JVM GC Time").alias("gcTime"),
+            pl.col("Task Metrics").struct.field("Peak Execution Memory").alias("peakMemory"),
+        ])
+
+    def _extract_stages_df(self, events: pl.DataFrame) -> pl.DataFrame:
+        """Extract stages from events as Polars DataFrame."""
+        return events.filter(
+            pl.col("Event") == "SparkListenerStageCompleted"
+        ).select([
+            pl.col("Stage Info").struct.field("Stage ID").alias("stageId"),
+            pl.col("Stage Info").struct.field("Stage Attempt ID").alias("attemptId"),
+            pl.col("Stage Info").struct.field("Stage Name").alias("name"),
+            pl.col("Stage Info").struct.field("Number of Tasks").alias("numTasks"),
+            pl.col("Stage Info").struct.field("Failure Reason").alias("failureReason"),
+        ]).with_columns([
+            pl.when(pl.col("failureReason").is_null())
+              .then(pl.lit("COMPLETE"))
+              .otherwise(pl.lit("FAILED"))
+              .alias("status")
+        ])
+
+    def _extract_executors_df(self, events: pl.DataFrame) -> pl.DataFrame:
+        """Extract executors from events as Polars DataFrame."""
+        added = events.filter(
+            pl.col("Event") == "SparkListenerExecutorAdded"
+        ).select([
+            pl.col("Executor ID").alias("id"),
+            pl.col("Executor Info").struct.field("Host").alias("hostPort"),
+            pl.col("Executor Info").struct.field("Total Cores").alias("totalCores"),
+            pl.col("Timestamp").alias("addTime"),
+        ])
+
+        removed = events.filter(
+            pl.col("Event") == "SparkListenerExecutorRemoved"
+        ).select([
+            pl.col("Executor ID").alias("id"),
+            pl.col("Timestamp").alias("removeTime"),
+            pl.col("Removed Reason").alias("removeReason"),
+        ])
+
+        return added.join(removed, on="id", how="left").with_columns([
+            pl.col("removeTime").is_null().alias("isActive")
+        ])
+
+    def _extract_app_info(self, events: pl.DataFrame) -> dict:
+        """Extract application info."""
+        start = events.filter(
+            pl.col("Event") == "SparkListenerApplicationStart"
+        ).to_dicts()
+
+        end = events.filter(
+            pl.col("Event") == "SparkListenerApplicationEnd"
+        ).to_dicts()
+
+        start_event = start[0] if start else {}
+        end_event = end[0] if end else {}
+
+        return {
+            "id": start_event.get("App ID", ""),
+            "name": start_event.get("App Name", ""),
+            "startTime": start_event.get("Timestamp", 0),
+            "endTime": end_event.get("Timestamp", 0),
+            "sparkUser": start_event.get("User", ""),
+            "appSparkVersion": start_event.get("Spark Version", ""),
+            "completed": bool(end_event),
+        }
+
+    def _extract_environment(self, events: pl.DataFrame) -> dict:
+        """Extract Spark configuration."""
+        env = events.filter(
+            pl.col("Event") == "SparkListenerEnvironmentUpdate"
+        ).to_dicts()
+
+        if env:
+            return env[0].get("Spark Properties", {})
+        return {}
+```
+
+**Why Polars is fast:**
+- Written in Rust, uses Apache Arrow memory format
+- SIMD-accelerated JSON parsing
+- Zero-copy integration with DuckDB
+- Lazy evaluation - only computes what's needed
+
+**Event Types Parsed:**
 - `SparkListenerApplicationStart/End`
 - `SparkListenerJobStart/End`
 - `SparkListenerStageSubmitted/Completed`
-- `SparkListenerTaskStart/End`
+- `SparkListenerTaskEnd`
 - `SparkListenerExecutorAdded/Removed`
-- `SparkListenerBlockManagerAdded/Removed`
 - `SparkListenerEnvironmentUpdate`
 
-### 2. Query Engine
+### 2. Caching & Query Engine
 
-SQL-like queries over parsed data using DuckDB.
+**Hybrid approach:** Parquet for storage, DuckDB for queries. Zero-copy via Apache Arrow.
+
+```
+Event Log (.json.gz)
+        │
+        ▼ parse (Polars)
+   Polars DataFrames
+        │
+        ▼ cache (Parquet)
+   ~/.spark-insight/cache/{app_id}/
+        ├── jobs.parquet
+        ├── stages.parquet
+        ├── tasks.parquet
+        └── executors.parquet
+        │
+        ▼ query (DuckDB)
+   DuckDB (in-memory, reads Parquet directly)
+        │
+        ▼
+   Query Results (Polars DataFrame)
+```
+
+**Cache Manager:**
+
+```python
+from pathlib import Path
+from hashlib import sha256
+import polars as pl
+import duckdb
+
+
+class CacheManager:
+    """
+    Parquet-based cache with DuckDB query engine.
+
+    - Parquet: Fast storage, compressed, Polars-native
+    - DuckDB: Powerful SQL queries, zero-copy from Parquet
+    """
+
+    def __init__(self, cache_dir: str = "~/.spark-insight/cache"):
+        self.cache_dir = Path(cache_dir).expanduser()
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def get_cache_path(self, eventlog_path: str) -> Path:
+        """Get cache directory for an event log."""
+        # Hash the path + mtime for cache key
+        p = Path(eventlog_path)
+        mtime = p.stat().st_mtime if p.exists() else 0
+        key = sha256(f"{eventlog_path}:{mtime}".encode()).hexdigest()[:16]
+        return self.cache_dir / key
+
+    def is_cached(self, eventlog_path: str) -> bool:
+        """Check if event log is already parsed and cached."""
+        cache_path = self.get_cache_path(eventlog_path)
+        return (cache_path / "jobs.parquet").exists()
+
+    def cache_parsed(self, eventlog_path: str, parsed: "ParsedApplication"):
+        """Save parsed data to Parquet cache."""
+        cache_path = self.get_cache_path(eventlog_path)
+        cache_path.mkdir(parents=True, exist_ok=True)
+
+        # Write Polars DataFrames to Parquet (fast, compressed)
+        parsed.jobs.write_parquet(cache_path / "jobs.parquet")
+        parsed.stages.write_parquet(cache_path / "stages.parquet")
+        parsed.tasks.write_parquet(cache_path / "tasks.parquet")
+        parsed.executors.write_parquet(cache_path / "executors.parquet")
+
+        # Save app info as JSON (small)
+        import json
+        with open(cache_path / "app_info.json", "w") as f:
+            json.dump(parsed.app_info, f)
+
+    def load_cached(self, eventlog_path: str) -> "ParsedApplication":
+        """Load parsed data from Parquet cache."""
+        cache_path = self.get_cache_path(eventlog_path)
+
+        import json
+        with open(cache_path / "app_info.json") as f:
+            app_info = json.load(f)
+
+        return ParsedApplication(
+            app_info=app_info,
+            jobs=pl.read_parquet(cache_path / "jobs.parquet"),
+            stages=pl.read_parquet(cache_path / "stages.parquet"),
+            tasks=pl.read_parquet(cache_path / "tasks.parquet"),
+            executors=pl.read_parquet(cache_path / "executors.parquet"),
+        )
+
+    def get_or_parse(self, eventlog_path: str) -> "ParsedApplication":
+        """Get from cache or parse and cache."""
+        if self.is_cached(eventlog_path):
+            return self.load_cached(eventlog_path)
+
+        # Parse (slow, but only once)
+        parser = EventLogParser()
+        parsed = parser.parse(eventlog_path)
+
+        # Cache for next time
+        self.cache_parsed(eventlog_path, parsed)
+
+        return parsed
+
+    def cleanup(self, max_age_days: int = 30):
+        """Remove old cache entries."""
+        import time
+        cutoff = time.time() - (max_age_days * 86400)
+
+        for cache_path in self.cache_dir.iterdir():
+            if cache_path.is_dir():
+                mtime = cache_path.stat().st_mtime
+                if mtime < cutoff:
+                    import shutil
+                    shutil.rmtree(cache_path)
+```
+
+**Query Engine (DuckDB + Parquet):**
 
 ```python
 class QueryEngine:
-    def __init__(self, db_path: str = ":memory:"):
-        self.conn = duckdb.connect(db_path)
+    """
+    SQL query engine using DuckDB.
 
-    def load_application(self, app: SparkApplication):
-        """Load parsed application data into DuckDB tables."""
-        pass
+    Reads directly from Parquet cache (zero-copy via Arrow).
+    """
 
-    def query(self, sql: str) -> pd.DataFrame:
-        """Execute SQL query and return results."""
+    def __init__(self, cache_path: Path):
+        self.cache_path = cache_path
+        self.conn = duckdb.connect()  # In-memory
+        self._load_tables()
+
+    def _load_tables(self):
+        """Load Parquet files as DuckDB tables (zero-copy)."""
+        tables = ["jobs", "stages", "tasks", "executors"]
+        for table in tables:
+            parquet_path = self.cache_path / f"{table}.parquet"
+            if parquet_path.exists():
+                self.conn.execute(f"""
+                    CREATE OR REPLACE VIEW {table} AS
+                    SELECT * FROM read_parquet('{parquet_path}')
+                """)
+
+    def query(self, sql: str) -> pl.DataFrame:
+        """Execute SQL query, return Polars DataFrame."""
+        return self.conn.execute(sql).pl()
+
+    def query_pandas(self, sql: str):
+        """Execute SQL query, return Pandas DataFrame."""
         return self.conn.execute(sql).fetchdf()
 
-    # Pre-built analytical queries
-    def get_failed_tasks_summary(self) -> pd.DataFrame:
+    # ============= Pre-built Analytical Queries =============
+
+    def get_failed_tasks_summary(self) -> pl.DataFrame:
         return self.query("""
             SELECT
-                error_message,
+                COALESCE(errorMessage, 'Unknown') as error,
                 COUNT(*) as count,
-                AVG(duration) as avg_duration
+                AVG(duration) as avg_duration_ms,
+                MAX(duration) as max_duration_ms
             FROM tasks
-            WHERE status = 'FAILED'
-            GROUP BY error_message
+            WHERE failed = true
+            GROUP BY errorMessage
             ORDER BY count DESC
+            LIMIT 20
         """)
 
-    def get_executor_removal_reasons(self) -> pd.DataFrame:
+    def get_executor_stats(self) -> pl.DataFrame:
         return self.query("""
             SELECT
-                remove_reason,
-                COUNT(*) as count,
-                AVG(EXTRACT(EPOCH FROM (remove_time - add_time))) as avg_lifetime_sec
-            FROM executors
-            WHERE remove_reason IS NOT NULL
-            GROUP BY remove_reason
-            ORDER BY count DESC
+                e.id,
+                e.hostPort,
+                e.totalCores,
+                e.isActive,
+                e.removeReason,
+                COUNT(t.taskId) as totalTasks,
+                SUM(CASE WHEN t.failed THEN 1 ELSE 0 END) as failedTasks,
+                SUM(t.duration) as totalDuration,
+                SUM(t.gcTime) as totalGcTime,
+                ROUND(SUM(t.gcTime) * 100.0 / NULLIF(SUM(t.duration), 0), 2) as gcPercent
+            FROM executors e
+            LEFT JOIN tasks t ON e.id = t.executorId
+            GROUP BY e.id, e.hostPort, e.totalCores, e.isActive, e.removeReason
+            ORDER BY totalTasks DESC
         """)
 
-    def get_stage_skew_analysis(self) -> pd.DataFrame:
+    def get_stage_skew_analysis(self) -> pl.DataFrame:
         return self.query("""
             SELECT
-                stage_id,
-                name,
-                MIN(duration) as min_task_duration,
-                MAX(duration) as max_task_duration,
-                AVG(duration) as avg_task_duration,
-                MAX(duration) / NULLIF(AVG(duration), 0) as skew_ratio
+                stageId,
+                attemptId,
+                COUNT(*) as numTasks,
+                MIN(duration) as minDuration,
+                MAX(duration) as maxDuration,
+                AVG(duration) as avgDuration,
+                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY duration) as medianDuration,
+                PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY duration) as p99Duration,
+                ROUND(MAX(duration) / NULLIF(AVG(duration), 0), 2) as skewRatio
             FROM tasks
-            GROUP BY stage_id, name
+            GROUP BY stageId, attemptId
             HAVING COUNT(*) > 1
-            ORDER BY skew_ratio DESC
+            ORDER BY skewRatio DESC
+        """)
+
+    def get_shuffle_stats(self) -> pl.DataFrame:
+        return self.query("""
+            SELECT
+                stageId,
+                name,
+                SUM(shuffleReadBytes) as totalShuffleRead,
+                SUM(shuffleWriteBytes) as totalShuffleWrite,
+                SUM(inputBytes) as totalInput,
+                SUM(outputBytes) as totalOutput
+            FROM stages
+            GROUP BY stageId, name
+            ORDER BY totalShuffleRead + totalShuffleWrite DESC
+        """)
+
+    def get_timeline(self) -> pl.DataFrame:
+        """Get task timeline for visualization."""
+        return self.query("""
+            SELECT
+                taskId,
+                stageId,
+                executorId,
+                launchTime,
+                finishTime,
+                duration,
+                failed
+            FROM tasks
+            ORDER BY launchTime
         """)
 ```
+
+**Performance comparison:**
+
+| Operation | First Access | Cached Access |
+|-----------|--------------|---------------|
+| Parse 1GB log | ~15s | - |
+| Write to Parquet | ~2s | - |
+| Load from Parquet | - | <1s |
+| Complex SQL query | - | <100ms |
+
+**Cache storage:**
+
+| Log Size | Parquet Cache Size | Compression |
+|----------|-------------------|-------------|
+| 100 MB | ~15 MB | 6-7x |
+| 1 GB | ~150 MB | 6-7x |
+| 5 GB | ~750 MB | 6-7x |
 
 ### 3. LLM Service
 
@@ -732,138 +957,230 @@ class LLMService:
 - "Compare shuffle performance between stage 3 and stage 7"
 - "What configuration changes would improve this job?"
 
-### 4. MCP Server
+### 4. MCP Server (REST API Client)
 
-Expose Spark data via Model Context Protocol for integration with Claude and other tools.
+The MCP server connects to the Spark Insight REST API, exposing Spark data to LLM tools like Claude.
 
 ```python
 from mcp import Server, Resource, Tool
+import httpx
 
 class SparkInsightMCPServer:
-    def __init__(self, query_engine: QueryEngine):
+    """MCP server that proxies requests to Spark Insight REST API."""
+
+    def __init__(self, server_url: str = "http://localhost:18080"):
         self.server = Server("spark-insight")
-        self.query_engine = query_engine
+        self.api = httpx.AsyncClient(base_url=server_url)
         self._register_resources()
         self._register_tools()
 
     def _register_resources(self):
         """Register MCP resources for Spark data."""
 
-        @self.server.resource("spark://application/summary")
-        async def get_app_summary() -> Resource:
-            summary = self.query_engine.get_application_summary()
+        @self.server.resource("spark://applications")
+        async def list_applications() -> Resource:
+            """List all Spark applications."""
+            resp = await self.api.get("/api/v1/applications")
             return Resource(
-                uri="spark://application/summary",
-                name="Application Summary",
+                uri="spark://applications",
+                name="Applications",
                 mimeType="application/json",
-                content=summary.to_json()
+                content=resp.text
             )
 
-        @self.server.resource("spark://jobs")
-        async def get_jobs() -> Resource:
-            jobs = self.query_engine.query("SELECT * FROM jobs")
+        @self.server.resource("spark://applications/{app_id}")
+        async def get_application(app_id: str) -> Resource:
+            """Get application details."""
+            resp = await self.api.get(f"/api/v1/applications/{app_id}")
             return Resource(
-                uri="spark://jobs",
-                name="Jobs",
+                uri=f"spark://applications/{app_id}",
+                name=f"Application {app_id}",
                 mimeType="application/json",
-                content=jobs.to_json()
+                content=resp.text
             )
 
-        @self.server.resource("spark://stages")
-        async def get_stages() -> Resource:
-            stages = self.query_engine.query("SELECT * FROM stages")
+        @self.server.resource("spark://applications/{app_id}/jobs")
+        async def get_jobs(app_id: str) -> Resource:
+            """Get jobs for an application."""
+            resp = await self.api.get(f"/api/v1/applications/{app_id}/jobs")
             return Resource(
-                uri="spark://stages",
-                name="Stages",
+                uri=f"spark://applications/{app_id}/jobs",
+                name=f"Jobs for {app_id}",
                 mimeType="application/json",
-                content=stages.to_json()
+                content=resp.text
             )
 
-        @self.server.resource("spark://executors")
-        async def get_executors() -> Resource:
-            executors = self.query_engine.query("SELECT * FROM executors")
+        @self.server.resource("spark://applications/{app_id}/stages")
+        async def get_stages(app_id: str) -> Resource:
+            """Get stages for an application."""
+            resp = await self.api.get(f"/api/v1/applications/{app_id}/stages")
             return Resource(
-                uri="spark://executors",
-                name="Executors",
+                uri=f"spark://applications/{app_id}/stages",
+                name=f"Stages for {app_id}",
                 mimeType="application/json",
-                content=executors.to_json()
+                content=resp.text
             )
 
-        @self.server.resource("spark://failures")
-        async def get_failures() -> Resource:
-            failures = self.query_engine.get_failed_tasks_summary()
+        @self.server.resource("spark://applications/{app_id}/executors")
+        async def get_executors(app_id: str) -> Resource:
+            """Get executors for an application."""
+            resp = await self.api.get(f"/api/v1/applications/{app_id}/executors")
             return Resource(
-                uri="spark://failures",
-                name="Failure Summary",
+                uri=f"spark://applications/{app_id}/executors",
+                name=f"Executors for {app_id}",
                 mimeType="application/json",
-                content=failures.to_json()
+                content=resp.text
             )
 
     def _register_tools(self):
         """Register MCP tools for Spark analysis."""
 
-        @self.server.tool("query_spark_data")
-        async def query_spark_data(sql: str) -> str:
-            """Execute SQL query against Spark application data.
+        @self.server.tool("list_spark_applications")
+        async def list_spark_applications() -> str:
+            """List all Spark applications available for analysis."""
+            resp = await self.api.get("/api/v1/applications")
+            apps = resp.json()
+            lines = ["# Spark Applications", ""]
+            for app in apps:
+                attempt = app["attempts"][0] if app.get("attempts") else {}
+                status = "✓ Completed" if attempt.get("completed") else "⋯ Running"
+                lines.append(f"- **{app['id']}**: {app['name']} ({status})")
+            return "\n".join(lines)
 
-            Tables available: jobs, stages, tasks, executors, environment
+        @self.server.tool("get_spark_jobs")
+        async def get_spark_jobs(app_id: str) -> str:
+            """Get all jobs for a Spark application.
+
+            Args:
+                app_id: The application ID (e.g., app-20240101120000-0001)
             """
-            try:
-                result = self.query_engine.query(sql)
-                return result.to_markdown()
-            except Exception as e:
-                return f"Query error: {str(e)}"
+            resp = await self.api.get(f"/api/v1/applications/{app_id}/jobs")
+            jobs = resp.json()
+            lines = [f"# Jobs for {app_id}", ""]
+            for job in jobs:
+                lines.append(f"## Job {job['jobId']}: {job['name']}")
+                lines.append(f"- Status: {job['status']}")
+                lines.append(f"- Tasks: {job['numCompletedTasks']}/{job['numTasks']}")
+                lines.append(f"- Stages: {job['stageIds']}")
+                lines.append("")
+            return "\n".join(lines)
 
-        @self.server.tool("analyze_failures")
-        async def analyze_failures() -> str:
-            """Analyze task and stage failures in the application."""
-            failed_tasks = self.query_engine.get_failed_tasks_summary()
-            failed_stages = self.query_engine.query(
-                "SELECT * FROM stages WHERE status = 'FAILED'"
+        @self.server.tool("get_spark_stages")
+        async def get_spark_stages(app_id: str) -> str:
+            """Get all stages for a Spark application.
+
+            Args:
+                app_id: The application ID
+            """
+            resp = await self.api.get(f"/api/v1/applications/{app_id}/stages")
+            stages = resp.json()
+            lines = [f"# Stages for {app_id}", ""]
+            for stage in stages:
+                lines.append(f"## Stage {stage['stageId']}.{stage['attemptId']}: {stage['name']}")
+                lines.append(f"- Status: {stage['status']}")
+                lines.append(f"- Tasks: {stage['numCompleteTasks']}/{stage['numTasks']}")
+                lines.append(f"- Input: {stage['inputBytes']} bytes")
+                lines.append(f"- Shuffle Read/Write: {stage['shuffleReadBytes']}/{stage['shuffleWriteBytes']}")
+                lines.append("")
+            return "\n".join(lines)
+
+        @self.server.tool("get_spark_executors")
+        async def get_spark_executors(app_id: str) -> str:
+            """Get all executors for a Spark application.
+
+            Args:
+                app_id: The application ID
+            """
+            resp = await self.api.get(f"/api/v1/applications/{app_id}/executors")
+            executors = resp.json()
+            lines = [f"# Executors for {app_id}", ""]
+            for ex in executors:
+                status = "Active" if ex["isActive"] else f"Removed: {ex.get('removeReason', '')}"
+                lines.append(f"## Executor {ex['id']} ({ex['hostPort']})")
+                lines.append(f"- Status: {status}")
+                lines.append(f"- Cores: {ex['totalCores']}")
+                lines.append(f"- Tasks: {ex['completedTasks']}/{ex['totalTasks']}")
+                lines.append(f"- GC Time: {ex['totalGCTime']}ms")
+                lines.append("")
+            return "\n".join(lines)
+
+        @self.server.tool("analyze_spark_app")
+        async def analyze_spark_app(app_id: str, question: str) -> str:
+            """Ask an AI question about a Spark application.
+
+            Args:
+                app_id: The application ID to analyze
+                question: Your question (e.g., "What caused task failures?")
+            """
+            resp = await self.api.post(
+                "/api/insight/analyze",
+                params={"app_id": app_id, "question": question}
             )
-            return f"## Failed Tasks\n{failed_tasks.to_markdown()}\n\n## Failed Stages\n{failed_stages.to_markdown()}"
+            return resp.json()["answer"]
 
-        @self.server.tool("analyze_performance")
-        async def analyze_performance() -> str:
-            """Analyze performance metrics including skew, GC, and shuffle."""
-            skew = self.query_engine.get_stage_skew_analysis()
-            gc = self.query_engine.query("""
-                SELECT executor_id, SUM(gc_time) as total_gc,
-                       SUM(duration) as total_duration,
-                       SUM(gc_time) * 100.0 / SUM(duration) as gc_percent
-                FROM tasks GROUP BY executor_id ORDER BY gc_percent DESC
-            """)
-            return f"## Data Skew\n{skew.to_markdown()}\n\n## GC Analysis\n{gc.to_markdown()}"
+        @self.server.tool("compare_spark_apps")
+        async def compare_spark_apps(app_id_1: str, app_id_2: str) -> str:
+            """Compare two Spark applications.
 
-        @self.server.tool("compare_stages")
-        async def compare_stages(stage_id_1: int, stage_id_2: int) -> str:
-            """Compare metrics between two stages."""
-            comparison = self.query_engine.query(f"""
-                SELECT
-                    stage_id,
-                    name,
-                    num_tasks,
-                    input_bytes,
-                    shuffle_read_bytes,
-                    shuffle_write_bytes,
-                    executor_run_time
-                FROM stages
-                WHERE stage_id IN ({stage_id_1}, {stage_id_2})
-            """)
-            return comparison.to_markdown()
+            Args:
+                app_id_1: First application ID
+                app_id_2: Second application ID
+            """
+            resp = await self.api.post(
+                "/api/insight/diff",
+                params={"app_id_1": app_id_1, "app_id_2": app_id_2}
+            )
+            result = resp.json()
+            lines = [
+                f"# Comparison: {app_id_1} vs {app_id_2}",
+                "",
+                f"**Duration Change:** {result['duration_diff_ms']}ms",
+                "",
+                "## Key Differences:",
+            ]
+            for diff in result.get("key_differences", []):
+                lines.append(f"- {diff}")
+            return "\n".join(lines)
 
     async def run(self, transport: str = "stdio"):
         """Run the MCP server."""
         await self.server.run(transport)
+
+
+# CLI command to run MCP server
+@cli.command()
+@click.option('--server', '-s', default='http://localhost:18080',
+              help='Spark Insight server URL')
+def mcp(server: str):
+    """Run MCP server for Claude integration."""
+    import asyncio
+    mcp_server = SparkInsightMCPServer(server_url=server)
+    console.print(f"[bold green]Starting MCP server[/bold green]")
+    console.print(f"  Connecting to: {server}")
+    asyncio.run(mcp_server.run())
 ```
 
 **MCP Configuration (claude_desktop_config.json):**
+
 ```json
 {
   "mcpServers": {
     "spark-insight": {
       "command": "spark-insight",
-      "args": ["mcp", "--eventlog", "/path/to/eventlog"]
+      "args": ["mcp", "--server", "http://localhost:18080"]
+    }
+  }
+}
+```
+
+**For remote Spark Insight server:**
+
+```json
+{
+  "mcpServers": {
+    "spark-insight": {
+      "command": "spark-insight",
+      "args": ["mcp", "--server", "http://spark-insight.corp:18080"]
     }
   }
 }
@@ -962,256 +1279,512 @@ class DiffEngine:
         return sorted(diffs, key=lambda d: abs(d.duration_change_percent), reverse=True)
 ```
 
-### 6. Service Mode (Multi-user with Upload)
+### 6. Application Service (with Caching)
 
-Deploy as a shared service where users can upload event logs.
+The application service integrates parsing, caching, and queries.
 
 ```python
 import os
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Optional, List
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import UploadFile, HTTPException
 from pydantic import BaseModel
 
-class UploadedApp(BaseModel):
-    id: str
-    filename: str
-    upload_time: datetime
-    app_name: str
-    app_id: str
-    duration_ms: int
-    status: str  # "processing", "ready", "failed"
 
-class StorageService:
-    def __init__(self, storage_path: str = "./data/eventlogs"):
-        self.storage_path = Path(storage_path)
-        self.storage_path.mkdir(parents=True, exist_ok=True)
-        self.metadata_db = DuckDB(self.storage_path / "metadata.db")
+class ApplicationService:
+    """
+    Main service for managing Spark applications.
 
-    async def save_eventlog(self, file: UploadFile) -> UploadedApp:
-        """Save uploaded event log and parse it."""
-        upload_id = str(uuid.uuid4())[:8]
-        file_path = self.storage_path / f"{upload_id}_{file.filename}"
+    Handles:
+    - Event log discovery (from log directory)
+    - Event log upload
+    - Parsing with caching
+    - Query execution
+    """
 
+    def __init__(
+        self,
+        log_dir: str = "./data/eventlogs",
+        cache_dir: str = "./data/cache"
+    ):
+        self.log_dir = Path(log_dir)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.cache = CacheManager(cache_dir)
+        self._app_index: dict[str, Path] = {}  # app_id -> eventlog path
+
+    def refresh_index(self):
+        """Scan log directory for event logs."""
+        self._app_index.clear()
+
+        for path in self.log_dir.glob("**/*"):
+            if path.is_file() and self._is_eventlog(path):
+                app_id = self._extract_app_id(path)
+                if app_id:
+                    self._app_index[app_id] = path
+
+    def list_applications(
+        self,
+        status: Optional[str] = None,
+        limit: int = 100
+    ) -> List[ApplicationInfo]:
+        """List all applications (SHS compatible)."""
+        self.refresh_index()
+        apps = []
+
+        for app_id, path in list(self._app_index.items())[:limit]:
+            try:
+                parsed = self.cache.get_or_parse(str(path))
+                apps.append(self._to_application_info(parsed))
+            except Exception:
+                continue  # Skip unparseable logs
+
+        return apps
+
+    def get_application(self, app_id: str) -> ApplicationInfo:
+        """Get application details (SHS compatible)."""
+        path = self._app_index.get(app_id)
+        if not path:
+            raise HTTPException(404, f"Application {app_id} not found")
+
+        parsed = self.cache.get_or_parse(str(path))
+        return self._to_application_info(parsed)
+
+    def get_query_engine(self, app_id: str) -> QueryEngine:
+        """Get query engine for an application."""
+        path = self._app_index.get(app_id)
+        if not path:
+            raise HTTPException(404, f"Application {app_id} not found")
+
+        # Ensure cached
+        if not self.cache.is_cached(str(path)):
+            self.cache.get_or_parse(str(path))
+
+        cache_path = self.cache.get_cache_path(str(path))
+        return QueryEngine(cache_path)
+
+    def get_jobs(self, app_id: str) -> List[JobData]:
+        """Get jobs for an application."""
+        engine = self.get_query_engine(app_id)
+        df = engine.query("SELECT * FROM jobs ORDER BY jobId")
+        return [JobData(**row) for row in df.to_dicts()]
+
+    def get_stages(self, app_id: str) -> List[StageData]:
+        """Get stages for an application."""
+        engine = self.get_query_engine(app_id)
+        df = engine.query("SELECT * FROM stages ORDER BY stageId, attemptId")
+        return [StageData(**row) for row in df.to_dicts()]
+
+    def get_executors(self, app_id: str) -> List[ExecutorSummary]:
+        """Get executors for an application."""
+        engine = self.get_query_engine(app_id)
+        df = engine.get_executor_stats()
+        return [ExecutorSummary(**row) for row in df.to_dicts()]
+
+    async def upload_eventlog(self, file: UploadFile) -> ApplicationInfo:
+        """Upload and parse an event log."""
         # Save file
+        upload_id = str(uuid.uuid4())[:8]
+        filename = file.filename or "eventlog"
+        file_path = self.log_dir / f"{upload_id}_{filename}"
+
         content = await file.read()
         with open(file_path, "wb") as f:
             f.write(content)
 
-        # Parse and extract metadata
+        # Parse and cache
         try:
-            app = parse_eventlog(file_path)
-            uploaded = UploadedApp(
-                id=upload_id,
-                filename=file.filename,
-                upload_time=datetime.now(),
-                app_name=app.name,
-                app_id=app.app_id,
-                duration_ms=app.duration_ms,
-                status="ready"
-            )
+            parsed = self.cache.get_or_parse(str(file_path))
+            app_id = parsed.app_info.get("id", upload_id)
+            self._app_index[app_id] = file_path
+            return self._to_application_info(parsed)
         except Exception as e:
-            uploaded = UploadedApp(
-                id=upload_id,
-                filename=file.filename,
-                upload_time=datetime.now(),
-                app_name="Unknown",
-                app_id="Unknown",
-                duration_ms=0,
-                status="failed"
-            )
+            file_path.unlink()  # Clean up on failure
+            raise HTTPException(400, f"Failed to parse event log: {e}")
 
-        # Store metadata
-        self.metadata_db.insert("uploads", uploaded)
-        return uploaded
+    def _is_eventlog(self, path: Path) -> bool:
+        """Check if file is a Spark event log."""
+        name = path.name.lower()
+        return (
+            name.startswith("app-") or
+            name.startswith("application_") or
+            "eventlog" in name
+        ) and (
+            name.endswith(".json") or
+            name.endswith(".json.gz") or
+            name.endswith(".json.lz4") or
+            not path.suffix  # Spark often writes without extension
+        )
 
-    def list_uploads(self) -> List[UploadedApp]:
-        """List all uploaded event logs."""
-        return self.metadata_db.query("SELECT * FROM uploads ORDER BY upload_time DESC")
+    def _extract_app_id(self, path: Path) -> Optional[str]:
+        """Extract app ID from event log path or content."""
+        name = path.stem.replace(".json", "")
+        if name.startswith("app-") or name.startswith("application_"):
+            return name
+        # TODO: Read first line to get app ID
+        return name
 
-    def get_eventlog_path(self, upload_id: str) -> Path:
-        """Get path to event log file."""
-        matches = list(self.storage_path.glob(f"{upload_id}_*"))
-        if not matches:
-            raise HTTPException(404, f"Event log {upload_id} not found")
-        return matches[0]
+    def _to_application_info(self, parsed: ParsedApplication) -> ApplicationInfo:
+        """Convert parsed data to SHS-compatible ApplicationInfo."""
+        info = parsed.app_info
+        return ApplicationInfo(
+            id=info.get("id", "unknown"),
+            name=info.get("name", "unknown"),
+            attempts=[
+                ApplicationAttemptInfo(
+                    startTime=self._format_time(info.get("startTime", 0)),
+                    endTime=self._format_time(info.get("endTime", 0)),
+                    lastUpdated=self._format_time(info.get("endTime", 0)),
+                    duration=info.get("endTime", 0) - info.get("startTime", 0),
+                    sparkUser=info.get("sparkUser", ""),
+                    completed=info.get("completed", False),
+                    appSparkVersion=info.get("appSparkVersion", ""),
+                )
+            ]
+        )
 
-    def delete_eventlog(self, upload_id: str):
-        """Delete an uploaded event log."""
-        path = self.get_eventlog_path(upload_id)
-        path.unlink()
-        self.metadata_db.execute(f"DELETE FROM uploads WHERE id = '{upload_id}'")
-
-
-# FastAPI routes for upload
-app = FastAPI()
-storage = StorageService()
-
-@app.post("/api/upload")
-async def upload_eventlog(file: UploadFile = File(...)) -> UploadedApp:
-    """Upload a Spark event log for analysis."""
-    if not file.filename:
-        raise HTTPException(400, "No file provided")
-
-    return await storage.save_eventlog(file)
-
-@app.get("/api/uploads")
-async def list_uploads() -> List[UploadedApp]:
-    """List all uploaded event logs."""
-    return storage.list_uploads()
-
-@app.delete("/api/uploads/{upload_id}")
-async def delete_upload(upload_id: str):
-    """Delete an uploaded event log."""
-    storage.delete_eventlog(upload_id)
-    return {"status": "deleted"}
-
-@app.get("/api/uploads/{upload_id}/analyze")
-async def analyze_upload(upload_id: str, question: str) -> AnalysisResult:
-    """Ask a question about an uploaded event log."""
-    path = storage.get_eventlog_path(upload_id)
-    engine = load_eventlog(path)
-    llm = LLMService(engine)
-    return await llm.analyze(question)
+    @staticmethod
+    def _format_time(ts: int) -> str:
+        """Format timestamp for SHS API."""
+        if ts:
+            return datetime.fromtimestamp(ts / 1000).isoformat()
+        return ""
 ```
 
-**Cloud Storage Support (S3):**
+**Storage Backends:**
 
 ```python
-import boto3
-from urllib.parse import urlparse
+from abc import ABC, abstractmethod
 
-class S3StorageService(StorageService):
-    def __init__(self, bucket: str, prefix: str = "eventlogs/"):
+
+class StorageBackend(ABC):
+    """Abstract storage backend for event logs."""
+
+    @abstractmethod
+    def list_eventlogs(self) -> List[Path]:
+        """List all event logs in storage."""
+        pass
+
+    @abstractmethod
+    def read_eventlog(self, path: str) -> Path:
+        """Read event log, return local path (may download)."""
+        pass
+
+
+class LocalStorage(StorageBackend):
+    """Local filesystem storage."""
+
+    def __init__(self, log_dir: str):
+        self.log_dir = Path(log_dir)
+
+    def list_eventlogs(self) -> List[Path]:
+        return list(self.log_dir.glob("**/*"))
+
+    def read_eventlog(self, path: str) -> Path:
+        return Path(path)  # Already local
+
+
+class S3Storage(StorageBackend):
+    """AWS S3 storage backend."""
+
+    def __init__(self, bucket: str, prefix: str = ""):
+        import boto3
         self.s3 = boto3.client("s3")
         self.bucket = bucket
         self.prefix = prefix
+        self.local_cache = Path("/tmp/spark-insight-s3")
+        self.local_cache.mkdir(exist_ok=True)
 
-    async def save_eventlog(self, file: UploadFile) -> UploadedApp:
-        upload_id = str(uuid.uuid4())[:8]
-        key = f"{self.prefix}{upload_id}_{file.filename}"
+    def list_eventlogs(self) -> List[Path]:
+        """List event logs in S3 bucket."""
+        paths = []
+        paginator = self.s3.get_paginator("list_objects_v2")
 
-        content = await file.read()
-        self.s3.put_object(Bucket=self.bucket, Key=key, Body=content)
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=self.prefix):
+            for obj in page.get("Contents", []):
+                paths.append(Path(obj["Key"]))
 
-        # Download to temp for parsing
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            tmp.write(content)
-            app = parse_eventlog(tmp.name)
+        return paths
 
-        return UploadedApp(
-            id=upload_id,
-            filename=file.filename,
-            upload_time=datetime.now(),
-            app_name=app.name,
-            app_id=app.app_id,
-            duration_ms=app.duration_ms,
-            status="ready"
-        )
+    def read_eventlog(self, path: str) -> Path:
+        """Download event log from S3 to local cache."""
+        local_path = self.local_cache / path.replace("/", "_")
 
-    def load_from_s3_url(self, s3_url: str) -> QueryEngine:
-        """Load event log directly from S3 URL."""
-        parsed = urlparse(s3_url)
-        bucket = parsed.netloc
-        key = parsed.path.lstrip("/")
+        if not local_path.exists():
+            self.s3.download_file(self.bucket, path, str(local_path))
 
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            self.s3.download_file(bucket, key, tmp.name)
-            return load_eventlog(tmp.name)
+        return local_path
 ```
 
-### 7. CLI Mode
+### 7. CLI (REST API Client)
 
-Run analysis on a single event log without any setup.
+The CLI is a thin client that talks to the Spark Insight REST API service.
 
 ```python
-# CLI interface
+import click
+import httpx
+from rich.console import Console
+from rich.table import Table
+
+console = Console()
+
+# Default service URL (can be overridden with --server)
+DEFAULT_SERVER = "http://localhost:18080"
+
+
 @click.group()
-def cli():
-    """Spark Insight - AI-powered Spark analysis."""
-    pass
+@click.option('--server', '-s', default=DEFAULT_SERVER, envvar='SPARK_INSIGHT_SERVER',
+              help='Spark Insight server URL')
+@click.pass_context
+def cli(ctx, server: str):
+    """Spark Insight CLI - Query Spark applications via REST API."""
+    ctx.ensure_object(dict)
+    ctx.obj['server'] = server
+    ctx.obj['client'] = httpx.Client(base_url=server)
+
+
+# ============= Application Commands =============
+
+@cli.command()
+@click.option('--status', type=click.Choice(['completed', 'running']))
+@click.option('--limit', default=20)
+@click.pass_context
+def apps(ctx, status: str, limit: int):
+    """List all applications (like SHS)."""
+    client = ctx.obj['client']
+    params = {"limit": limit}
+    if status:
+        params["status"] = status
+
+    resp = client.get("/api/v1/applications", params=params)
+    resp.raise_for_status()
+
+    table = Table(title="Applications")
+    table.add_column("App ID")
+    table.add_column("Name")
+    table.add_column("Status")
+    table.add_column("Duration")
+    table.add_column("Start Time")
+
+    for app in resp.json():
+        attempt = app["attempts"][0] if app.get("attempts") else {}
+        table.add_row(
+            app["id"],
+            app["name"],
+            "✓" if attempt.get("completed") else "⋯",
+            f"{attempt.get('duration', 0) / 1000:.1f}s",
+            attempt.get("startTime", "")[:19]
+        )
+
+    console.print(table)
+
+
+@cli.command()
+@click.argument('app_id')
+@click.pass_context
+def jobs(ctx, app_id: str):
+    """List jobs for an application."""
+    client = ctx.obj['client']
+    resp = client.get(f"/api/v1/applications/{app_id}/jobs")
+    resp.raise_for_status()
+
+    table = Table(title=f"Jobs for {app_id}")
+    table.add_column("Job ID")
+    table.add_column("Name")
+    table.add_column("Status")
+    table.add_column("Tasks")
+    table.add_column("Stages")
+
+    for job in resp.json():
+        status_icon = {"SUCCEEDED": "✓", "FAILED": "✗", "RUNNING": "⋯"}.get(
+            job["status"], "?"
+        )
+        table.add_row(
+            str(job["jobId"]),
+            job["name"][:40],
+            status_icon,
+            f"{job['numCompletedTasks']}/{job['numTasks']}",
+            f"{job['numCompletedStages']}/{len(job['stageIds'])}"
+        )
+
+    console.print(table)
+
+
+@cli.command()
+@click.argument('app_id')
+@click.pass_context
+def stages(ctx, app_id: str):
+    """List stages for an application."""
+    client = ctx.obj['client']
+    resp = client.get(f"/api/v1/applications/{app_id}/stages")
+    resp.raise_for_status()
+
+    table = Table(title=f"Stages for {app_id}")
+    table.add_column("Stage")
+    table.add_column("Name")
+    table.add_column("Status")
+    table.add_column("Tasks")
+    table.add_column("Input")
+    table.add_column("Shuffle R/W")
+
+    for stage in resp.json():
+        table.add_row(
+            f"{stage['stageId']}.{stage['attemptId']}",
+            stage["name"][:30],
+            stage["status"],
+            f"{stage['numCompleteTasks']}/{stage['numTasks']}",
+            _format_bytes(stage["inputBytes"]),
+            f"{_format_bytes(stage['shuffleReadBytes'])}/{_format_bytes(stage['shuffleWriteBytes'])}"
+        )
+
+    console.print(table)
+
+
+@cli.command()
+@click.argument('app_id')
+@click.pass_context
+def executors(ctx, app_id: str):
+    """List executors for an application."""
+    client = ctx.obj['client']
+    resp = client.get(f"/api/v1/applications/{app_id}/executors")
+    resp.raise_for_status()
+
+    table = Table(title=f"Executors for {app_id}")
+    table.add_column("ID")
+    table.add_column("Host")
+    table.add_column("Status")
+    table.add_column("Cores")
+    table.add_column("Tasks")
+    table.add_column("GC Time")
+
+    for exec in resp.json():
+        table.add_row(
+            exec["id"],
+            exec["hostPort"],
+            "Active" if exec["isActive"] else exec.get("removeReason", "Removed"),
+            str(exec["totalCores"]),
+            f"{exec['completedTasks']}/{exec['totalTasks']}",
+            f"{exec['totalGCTime'] / 1000:.1f}s"
+        )
+
+    console.print(table)
+
+
+# ============= Analysis Commands =============
+
+@cli.command()
+@click.argument('app_id')
+@click.argument('question')
+@click.pass_context
+def ask(ctx, app_id: str, question: str):
+    """Ask AI a question about an application."""
+    client = ctx.obj['client']
+    resp = client.post(
+        "/api/insight/analyze",
+        params={"app_id": app_id, "question": question}
+    )
+    resp.raise_for_status()
+
+    result = resp.json()
+    console.print(f"\n[bold]Answer:[/bold]\n{result['answer']}\n")
+
+
+@cli.command()
+@click.argument('app_id_1')
+@click.argument('app_id_2')
+@click.pass_context
+def diff(ctx, app_id_1: str, app_id_2: str):
+    """Compare two applications."""
+    client = ctx.obj['client']
+    resp = client.post(
+        "/api/insight/diff",
+        params={"app_id_1": app_id_1, "app_id_2": app_id_2}
+    )
+    resp.raise_for_status()
+
+    result = resp.json()
+    console.print(f"\n[bold]Comparison: {app_id_1} vs {app_id_2}[/bold]")
+    console.print(f"Duration change: {result['duration_diff_ms'] / 1000:+.1f}s")
+    console.print(f"\n[bold]Key Differences:[/bold]")
+    for diff in result['key_differences']:
+        console.print(f"  • {diff}")
+
 
 @cli.command()
 @click.argument('eventlog', type=click.Path(exists=True))
-@click.option('--port', default=8080, help='Web UI port')
-@click.option('--no-browser', is_flag=True, help='Do not open browser')
-def serve(eventlog: str, port: int, no_browser: bool):
-    """Start web UI for analyzing an event log."""
-    app = create_app(eventlog)
+@click.pass_context
+def upload(ctx, eventlog: str):
+    """Upload an event log to the server."""
+    client = ctx.obj['client']
+    with open(eventlog, 'rb') as f:
+        resp = client.post(
+            "/api/insight/upload",
+            files={"file": f}
+        )
+    resp.raise_for_status()
 
-    if not no_browser:
-        webbrowser.open(f"http://localhost:{port}")
+    app = resp.json()
+    console.print(f"[green]Uploaded:[/green] {app['id']} - {app['name']}")
 
-    uvicorn.run(app, host="0.0.0.0", port=port)
 
-@cli.command()
-@click.argument('eventlog', type=click.Path(exists=True))
-@click.option('--question', '-q', help='Question to ask about the application')
-def ask(eventlog: str, question: str):
-    """Ask a question about a Spark application (CLI mode)."""
-    engine = load_eventlog(eventlog)
-    llm = LLMService(engine)
-
-    if question:
-        result = asyncio.run(llm.analyze(question))
-        click.echo(result.answer)
-    else:
-        # Interactive mode
-        while True:
-            question = click.prompt("Ask about your Spark app")
-            result = asyncio.run(llm.analyze(question))
-            click.echo(f"\n{result.answer}\n")
+# ============= Server Commands =============
 
 @cli.command()
-@click.argument('eventlog', type=click.Path(exists=True))
-def mcp(eventlog: str):
-    """Run as MCP server for LLM integration."""
-    engine = load_eventlog(eventlog)
-    server = SparkInsightMCPServer(engine)
-    asyncio.run(server.run())
+@click.option('--port', default=18080, help='Server port')
+@click.option('--host', default='0.0.0.0', help='Server host')
+@click.option('--log-dir', type=click.Path(), help='Event log directory')
+def serve(port: int, host: str, log_dir: str):
+    """Start Spark Insight server (REST API + UI)."""
+    import uvicorn
+    from spark_insight.server import create_app
 
-@cli.command()
-@click.argument('eventlog1', type=click.Path(exists=True))
-@click.argument('eventlog2', type=click.Path(exists=True))
-@click.option('--output', '-o', type=click.Path(), help='Output file for diff report')
-def diff(eventlog1: str, eventlog2: str, output: str):
-    """Compare two Spark applications."""
-    app1 = load_eventlog(eventlog1)
-    app2 = load_eventlog(eventlog2)
+    app = create_app(log_dir=log_dir)
+    console.print(f"[bold green]Starting Spark Insight server[/bold green]")
+    console.print(f"  REST API: http://{host}:{port}/api/v1/")
+    console.print(f"  Web UI:   http://{host}:{port}/")
 
-    diff_engine = DiffEngine()
-    result = diff_engine.compare(app1, app2)
+    uvicorn.run(app, host=host, port=port)
 
-    report = generate_diff_report(result)
 
-    if output:
-        with open(output, 'w') as f:
-            f.write(report)
-    else:
-        click.echo(report)
+def _format_bytes(b: int) -> str:
+    """Format bytes for display."""
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if abs(b) < 1024:
+            return f"{b:.1f}{unit}"
+        b /= 1024
+    return f"{b:.1f}PB"
 ```
 
 **Usage Examples:**
+
 ```bash
-# Start web UI for single event log
-spark-insight serve /path/to/eventlog
+# Start the server (required for all other commands)
+spark-insight serve --port 18080 --log-dir /path/to/eventlogs
 
-# Ask a question via CLI
-spark-insight ask /path/to/eventlog -q "What caused task failures?"
+# List applications
+spark-insight apps
+spark-insight apps --status completed --limit 10
 
-# Interactive Q&A mode
-spark-insight ask /path/to/eventlog
+# View jobs/stages/executors for an app
+spark-insight jobs app-20240101120000-0001
+spark-insight stages app-20240101120000-0001
+spark-insight executors app-20240101120000-0001
 
-# Run as MCP server
-spark-insight mcp /path/to/eventlog
+# Ask AI questions
+spark-insight ask app-20240101120000-0001 "What caused task failures?"
+spark-insight ask app-20240101120000-0001 "Why is stage 5 slow?"
 
 # Compare two applications
-spark-insight diff /path/to/eventlog1 /path/to/eventlog2
+spark-insight diff app-20240101-0001 app-20240102-0001
 
-# Generate diff report
-spark-insight diff app1.log app2.log -o diff-report.md
+# Upload an event log
+spark-insight upload /path/to/eventlog.json.gz
+
+# Use a different server
+spark-insight --server http://spark-insight.corp:18080 apps
+SPARK_INSIGHT_SERVER=http://remote:18080 spark-insight apps
 ```
 
 ---
@@ -1526,121 +2099,163 @@ spark-insight serve /path/to/eventlog
 
 ## API Design
 
-### REST Endpoints
+### SHS-Compatible REST Endpoints (drop-in replacement)
+
+These endpoints match the official Spark History Server API exactly:
 
 ```yaml
-# Application
-GET  /api/application              # Get application summary
-GET  /api/application/environment  # Get environment/config
-
-# Jobs
-GET  /api/jobs                     # List all jobs
-GET  /api/jobs/{jobId}             # Get job details
-
-# Stages
-GET  /api/stages                   # List all stages
-GET  /api/stages/{stageId}         # Get stage details
-GET  /api/stages/{stageId}/tasks   # Get tasks for stage
-
-# Executors
-GET  /api/executors                # List all executors
-GET  /api/executors/{executorId}   # Get executor details
-
-# Analysis
-POST /api/analyze                  # LLM analysis endpoint
-     body: { "question": "string" }
-
-GET  /api/insights                 # Pre-computed insights
-GET  /api/insights/failures        # Failure analysis
-GET  /api/insights/performance     # Performance analysis
-GET  /api/insights/recommendations # Optimization recommendations
-
-# Diff
-POST /api/diff                     # Compare two applications
-     body: { "eventlog1": "path", "eventlog2": "path" }
+# Applications
+GET  /api/v1/applications                                    # List all apps
+GET  /api/v1/applications/{appId}                           # App details
+GET  /api/v1/applications/{appId}/jobs                      # List jobs
+GET  /api/v1/applications/{appId}/jobs/{jobId}              # Job details
+GET  /api/v1/applications/{appId}/stages                    # List stages
+GET  /api/v1/applications/{appId}/stages/{stageId}/{attemptId}      # Stage details
+GET  /api/v1/applications/{appId}/stages/{stageId}/{attemptId}/taskList  # Tasks
+GET  /api/v1/applications/{appId}/stages/{stageId}/{attemptId}/taskSummary
+GET  /api/v1/applications/{appId}/executors                 # List executors
+GET  /api/v1/applications/{appId}/allexecutors              # All executors (incl. removed)
+GET  /api/v1/applications/{appId}/storage/rdd               # RDD storage info
+GET  /api/v1/applications/{appId}/environment               # Spark config
+GET  /api/v1/applications/{appId}/logs                      # Driver logs
+GET  /api/v1/version                                         # API version
 ```
 
-### WebSocket
+### Extended REST Endpoints (Spark Insight specific)
 
 ```yaml
-WS /ws/analyze    # Streaming LLM responses
+# AI Analysis
+POST /api/insight/analyze                  # LLM analysis
+     params: app_id, question
+
+# Application Comparison
+POST /api/insight/diff                     # Compare two apps
+     params: app_id_1, app_id_2
+
+# Event Log Upload
+POST /api/insight/upload                   # Upload event log
+     body: multipart/form-data (file)
+
+# Insights (pre-computed analysis)
+GET  /api/insight/{appId}/summary          # Quick insights
+GET  /api/insight/{appId}/failures         # Failure analysis
+GET  /api/insight/{appId}/performance      # Performance analysis
+GET  /api/insight/{appId}/recommendations  # Optimization tips
+```
+
+### WebSocket (for streaming LLM responses)
+
+```yaml
+WS /ws/insight/analyze    # Streaming LLM responses
+   params: app_id, question
 ```
 
 ---
 
 ## Deployment Options
 
-### 1. Local CLI (Development / Single User)
+### 1. Local Development
 
 ```bash
 # Install via pip
 pip install spark-insight
 
-# Run with local event log
-spark-insight serve /path/to/eventlog
+# Start the server (REST API + UI)
+spark-insight serve --port 18080 --log-dir /path/to/eventlogs
 
-# Or interactive Q&A
-spark-insight ask /path/to/eventlog
+# Server exposes:
+#   - REST API: http://localhost:18080/api/v1/
+#   - Web UI:   http://localhost:18080/
 ```
 
-### 2. Docker (Recommended for Service Mode)
+### 2. Docker (Recommended)
 
 ```dockerfile
 FROM python:3.11-slim
 
 WORKDIR /app
-COPY . .
-RUN pip install -e .
 
-# Create data directory for uploads
-RUN mkdir -p /data/eventlogs
+# Install dependencies
+COPY pyproject.toml .
+RUN pip install .
 
-ENV STORAGE_PATH=/data/eventlogs
-EXPOSE 8501
+# Create data directory
+RUN mkdir -p /data/eventlogs /data/cache
 
-# Run Streamlit
-CMD ["streamlit", "run", "src/spark_insight/app.py", \
-     "--server.port=8501", "--server.address=0.0.0.0"]
+ENV LOG_DIR=/data/eventlogs
+ENV CACHE_DIR=/data/cache
+EXPOSE 18080
+
+# Run the unified server (REST API + UI)
+CMD ["spark-insight", "serve", "--host", "0.0.0.0", "--port", "18080"]
+```
+
+**docker-compose.yml:**
+
+```yaml
+version: '3.8'
+
+services:
+  spark-insight:
+    build: .
+    ports:
+      - "18080:18080"
+    volumes:
+      - ./eventlogs:/data/eventlogs
+      - spark-insight-cache:/data/cache
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - LOG_DIR=/data/eventlogs
+    restart: unless-stopped
+
+volumes:
+  spark-insight-cache:
 ```
 
 ```bash
-# Run as service with persistent storage
-docker run -d \
-  -p 8501:8501 \
-  -v /path/to/storage:/data/eventlogs \
-  -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
-  spark-insight
+# Run with Docker Compose
+docker-compose up -d
 
-# Or with S3 storage
+# Or run directly
 docker run -d \
-  -p 8501:8501 \
-  -e STORAGE_TYPE=s3 \
-  -e S3_BUCKET=my-spark-logs \
+  -p 18080:18080 \
+  -v /path/to/eventlogs:/data/eventlogs \
+  -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
+  spark-insight:latest
+```
+
+### 3. Drop-in SHS Replacement
+
+Since Spark Insight implements the same REST API as SHS, you can use it as a drop-in replacement:
+
+```bash
+# Instead of:
+# $SPARK_HOME/sbin/start-history-server.sh
+
+# Use:
+spark-insight serve --port 18080 --log-dir hdfs:///spark-logs
+
+# Or with Docker:
+docker run -d \
+  -p 18080:18080 \
+  -e LOG_DIR=s3://my-bucket/spark-logs \
   -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \
   -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
-  -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
-  spark-insight
+  spark-insight:latest
 ```
 
-### 3. Streamlit Cloud (Easiest for Sharing)
+**Update existing Spark configs:**
 
-```bash
-# 1. Push to GitHub
-git push origin main
+```properties
+# spark-defaults.conf
+spark.eventLog.enabled=true
+spark.eventLog.dir=s3://my-bucket/spark-logs
 
-# 2. Go to share.streamlit.io
-# 3. Connect your repo
-# 4. Set secrets (ANTHROPIC_API_KEY, etc.)
-# 5. Deploy!
+# Point to Spark Insight instead of SHS
+spark.yarn.historyServer.address=spark-insight.corp:18080
 ```
 
-Streamlit Cloud provides:
-- Free hosting for public apps
-- Automatic HTTPS
-- Easy sharing via URL
-- Secrets management
-
-### 4. Kubernetes (Production)
+### 4. Kubernetes
 
 ```yaml
 apiVersion: apps/v1
@@ -1661,26 +2276,44 @@ spec:
       - name: spark-insight
         image: spark-insight:latest
         ports:
-        - containerPort: 8501
+        - containerPort: 18080
         env:
-        - name: STORAGE_TYPE
-          value: "s3"
-        - name: S3_BUCKET
+        - name: LOG_DIR
+          value: "s3://my-bucket/spark-logs"
+        - name: AWS_ACCESS_KEY_ID
           valueFrom:
-            configMapKeyRef:
-              name: spark-insight-config
-              key: s3_bucket
+            secretKeyRef:
+              name: aws-credentials
+              key: access_key
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: secret_key
         - name: ANTHROPIC_API_KEY
           valueFrom:
             secretKeyRef:
               name: spark-insight-secrets
               key: anthropic_api_key
-        volumeMounts:
-        - name: cache
-          mountPath: /tmp/cache
-      volumes:
-      - name: cache
-        emptyDir: {}
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        livenessProbe:
+          httpGet:
+            path: /api/v1/version
+            port: 18080
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /api/v1/version
+            port: 18080
+          initialDelaySeconds: 5
+          periodSeconds: 10
 ---
 apiVersion: v1
 kind: Service
@@ -1691,19 +2324,21 @@ spec:
     app: spark-insight
   ports:
   - port: 80
-    targetPort: 8501
+    targetPort: 18080
   type: LoadBalancer
 ```
 
-### 5. AWS/GCP/Azure (Managed Services)
+### 5. Cloud Platforms
 
-| Platform | Service | Notes |
-|----------|---------|-------|
-| **AWS** | ECS Fargate / App Runner | Serverless containers |
-| **GCP** | Cloud Run | Serverless, scales to zero |
-| **Azure** | Container Apps | Serverless containers |
+| Platform | Service | Command |
+|----------|---------|---------|
+| **AWS** | ECS Fargate | `aws ecs create-service ...` |
+| **AWS** | App Runner | Auto-deploy from ECR |
+| **GCP** | Cloud Run | `gcloud run deploy spark-insight` |
+| **Azure** | Container Apps | `az containerapp create` |
 
-Example for Google Cloud Run:
+**Example: Google Cloud Run:**
+
 ```bash
 # Build and push
 gcloud builds submit --tag gcr.io/PROJECT/spark-insight
@@ -1712,8 +2347,9 @@ gcloud builds submit --tag gcr.io/PROJECT/spark-insight
 gcloud run deploy spark-insight \
   --image gcr.io/PROJECT/spark-insight \
   --platform managed \
-  --allow-unauthenticated \
-  --set-env-vars ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
+  --port 18080 \
+  --set-env-vars "LOG_DIR=gs://my-bucket/spark-logs" \
+  --set-secrets "ANTHROPIC_API_KEY=anthropic-key:latest"
 ```
 
 ---
@@ -1723,157 +2359,267 @@ gcloud run deploy spark-insight \
 ```
 spark-insight/
 ├── README.md
+├── pyproject.toml                 # Single Python package
 ├── Dockerfile
+├── docker-compose.yml
 │
-├── core/                          # Rust core library
-│   ├── Cargo.toml
-│   ├── pyproject.toml             # maturin config for Python bindings
-│   └── src/
-│       ├── lib.rs                 # PyO3 module definition
-│       ├── parser.rs              # Streaming event log parser
-│       ├── models.rs              # Typed data models
-│       ├── duckdb.rs              # DuckDB writer
-│       └── error.rs               # Error types
-│
-├── python/                        # Python package
-│   ├── pyproject.toml
-│   └── spark_insight/
-│       ├── __init__.py
-│       ├── cli.py                 # CLI commands (click)
-│       ├── app.py                 # Streamlit UI (~300 lines)
-│       ├── query/
-│       │   ├── __init__.py
-│       │   └── engine.py          # DuckDB query engine
-│       ├── storage/
-│       │   ├── __init__.py
-│       │   ├── local.py           # Local file storage
-│       │   └── s3.py              # S3 storage
-│       ├── llm/
-│       │   ├── __init__.py
-│       │   ├── service.py         # LLM service
-│       │   └── prompts.py         # System prompts
-│       ├── mcp/
-│       │   ├── __init__.py
-│       │   └── server.py          # MCP server
-│       └── diff/
-│           ├── __init__.py
-│           └── engine.py          # Diff engine (uses Rust core)
-│
+└── src/spark_insight/
+    ├── __init__.py
+    ├── __main__.py               # Entry point: python -m spark_insight
+    │
+    ├── cli.py                    # CLI commands (click + rich)
+    │
+    ├── server/                   # REST API Server
+    │   ├── __init__.py
+    │   ├── app.py               # FastAPI app factory
+    │   ├── routes/
+    │   │   ├── __init__.py
+    │   │   ├── shs.py           # SHS-compatible endpoints
+    │   │   └── insight.py       # Extended API (analyze, diff, upload)
+    │   └── deps.py              # Dependency injection
+    │
+    ├── core/                     # Core business logic
+    │   ├── __init__.py
+    │   ├── parser.py            # Event log parser (Polars)
+    │   ├── cache.py             # Parquet cache manager
+    │   ├── query.py             # DuckDB query engine
+    │   ├── models.py            # Pydantic models (SHS-compatible)
+    │   └── diff.py              # Application diff engine
+    │
+    ├── storage/                  # Storage backends
+    │   ├── __init__.py
+    │   ├── base.py              # Abstract storage interface
+    │   ├── local.py             # Local filesystem
+    │   ├── s3.py                # AWS S3
+    │   └── hdfs.py              # HDFS (optional)
+    │
+    ├── llm/                      # LLM integration
+    │   ├── __init__.py
+    │   ├── service.py           # LLM analysis service
+    │   └── prompts.py           # System prompts
+    │
+    ├── mcp/                      # MCP server
+    │   ├── __init__.py
+    │   └── server.py            # MCP server (REST API client)
+    │
+    └── ui/                       # Streamlit UI
+        ├── __init__.py
+        ├── app.py               # Main Streamlit app
+        └── pages/               # Multi-page Streamlit
+            ├── 1_dashboard.py
+            ├── 2_jobs.py
+            ├── 3_stages.py
+            ├── 4_executors.py
+            ├── 5_ai_analysis.py
+            └── 6_compare.py
+
 ├── tests/
-│   ├── rust/                      # Rust tests
-│   │   └── test_parser.rs
-│   └── python/                    # Python tests
-│       ├── test_query.py
-│       ├── test_llm.py
-│       └── test_mcp.py
+│   ├── conftest.py              # Pytest fixtures
+│   ├── test_parser.py
+│   ├── test_query.py
+│   ├── test_api.py
+│   ├── test_llm.py
+│   └── test_mcp.py
 │
 └── examples/
-    └── eventlogs/                 # Sample event logs for testing
-        ├── small_app.json         # ~1MB
-        └── large_app.json.gz      # ~100MB compressed
+    └── eventlogs/               # Sample event logs for testing
+        ├── small_app.json       # ~1MB
+        └── large_app.json.gz    # ~100MB compressed
 ```
 
-### Build Process
+### Installation
 
 ```bash
-# 1. Build Rust core (creates Python wheel)
-cd core
-maturin build --release
+# Install from PyPI
+pip install spark-insight
 
-# 2. Install Python package (includes Rust core)
-cd ../python
+# Install from source
 pip install -e .
-pip install ../core/target/wheels/spark_insight_core-*.whl
 
-# Or combined with maturin develop
-cd core && maturin develop && cd ../python && pip install -e .
+# Install with optional dependencies
+pip install spark-insight[s3]     # S3 storage support
+pip install spark-insight[hdfs]   # HDFS storage support
+pip install spark-insight[all]    # All optional dependencies
 ```
 
 ### Development Workflow
 
 ```bash
-# Rust core changes
-cd core
-cargo test                    # Run Rust tests
-maturin develop              # Rebuild Python bindings
+# Install in development mode
+pip install -e ".[dev]"
 
-# Python changes (hot reload)
-cd python
-streamlit run spark_insight/app.py  # UI auto-reloads on save
-pytest tests/                # Run Python tests
+# Run tests
+pytest
+
+# Run linting
+ruff check src/
+mypy src/
+
+# Run the server
+spark-insight serve --port 18080
+
+# Run Streamlit UI separately (for development)
+streamlit run src/spark_insight/ui/app.py
+
+# Format code
+ruff format src/
+```
+
+### Dependencies (pyproject.toml)
+
+```toml
+[project]
+name = "spark-insight"
+version = "1.0.0"
+description = "Next-generation Spark History Server with AI analysis"
+requires-python = ">=3.10"
+dependencies = [
+    # API & Web
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.20",
+    "httpx>=0.24",
+    "pydantic>=2.0",
+    # Data Processing (Polars = Rust speed)
+    "polars>=0.20",
+    "duckdb>=0.9",
+    # CLI
+    "click>=8.0",
+    "rich>=13.0",
+    # UI
+    "streamlit>=1.30",
+    "plotly>=5.0",
+    # LLM
+    "anthropic>=0.20",
+    "mcp>=0.1",
+]
+
+[project.optional-dependencies]
+s3 = ["boto3>=1.28"]
+hdfs = ["pyarrow>=14.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.1",
+    "mypy>=1.0",
+]
+all = ["spark-insight[s3,hdfs]"]
+
+[project.scripts]
+spark-insight = "spark_insight.cli:cli"
 ```
 
 ---
 
 ## Implementation Roadmap
 
-### Phase 1: Rust Core Parser (Week 1-2)
-- [ ] Rust project setup with maturin
-- [ ] Data models (Application, Job, Stage, Task, Executor)
-- [ ] Streaming JSON parser (handles .json, .gz, .lz4)
-- [ ] DuckDB writer for parsed data
-- [ ] PyO3 bindings for Python
-- [ ] Benchmarks (target: 1GB in <10s)
+### Phase 1: Core Foundation (Week 1)
+- [ ] Project setup (pyproject.toml, structure)
+- [ ] Pydantic models (SHS-compatible)
+- [ ] Streaming event log parser (orjson + gzip/lz4)
+- [ ] DuckDB query engine
+- [ ] Basic tests
 
-### Phase 2: Python Foundation + Streamlit UI (Week 3)
-- [ ] Python package structure
-- [ ] DuckDB query engine wrapper
-- [ ] CLI commands (`serve`, `ask`, `mcp`)
-- [ ] Streamlit dashboard with metrics and charts
-- [ ] Jobs/Stages/Executors views
+### Phase 2: REST API Server (Week 2)
+- [ ] FastAPI application
+- [ ] SHS-compatible endpoints (all /api/v1/* routes)
+- [ ] Application service (list, get, query)
+- [ ] Storage backend (local filesystem)
+- [ ] API tests
 
-### Phase 3: LLM Integration (Week 4)
+### Phase 3: CLI Client (Week 3)
+- [ ] Click CLI with rich output
+- [ ] All SHS query commands (apps, jobs, stages, executors)
+- [ ] Upload command
+- [ ] Server command
+- [ ] CLI tests
+
+### Phase 4: Streamlit UI (Week 4)
+- [ ] Dashboard page
+- [ ] Jobs/Stages/Executors pages
+- [ ] Compare page
+- [ ] File upload
+- [ ] Connection to REST API
+
+### Phase 5: LLM Integration (Week 5)
 - [ ] LLM service with Claude API
-- [ ] AI chat tab in Streamlit
-- [ ] Pre-built insights generation
-- [ ] Suggested questions
+- [ ] Analysis endpoint (/api/insight/analyze)
+- [ ] AI chat in Streamlit
+- [ ] CLI ask command
+- [ ] Prompts and context building
 
-### Phase 4: Service Mode + Storage (Week 5)
-- [ ] File upload in Streamlit
-- [ ] Local storage backend
-- [ ] S3 storage backend
-- [ ] Multi-app management
-- [ ] Docker deployment
+### Phase 6: MCP Server + Release (Week 6)
+- [ ] MCP server (REST API client)
+- [ ] MCP resources and tools
+- [ ] Diff engine (/api/insight/diff)
+- [ ] Docker image
+- [ ] PyPI release
+- [ ] Documentation
 
-### Phase 5: MCP Server (Week 6)
-- [ ] MCP resources (application, jobs, stages, etc.)
-- [ ] MCP tools (query, analyze)
-- [ ] Documentation for Claude Desktop integration
+### Estimated Total: 6 weeks
 
-### Phase 6: Diff Engine & Release (Week 7)
-- [ ] Diff comparison logic (in Rust)
-- [ ] Diff view in Streamlit
-- [ ] PyPI + crates.io packages
-- [ ] Documentation & examples
+| Component | Lines of Code (est.) |
+|-----------|---------------------|
+| Core (parser, models, query) | ~800 |
+| REST API server | ~500 |
+| CLI client | ~400 |
+| Streamlit UI | ~600 |
+| LLM service | ~300 |
+| MCP server | ~300 |
+| Storage backends | ~200 |
+| Tests | ~800 |
+| **Total** | **~4,000** |
 
-### Estimated Total: 7 weeks
+### Comparison with Previous Design
 
-| Component | Language | Lines of Code (est.) |
-|-----------|----------|---------------------|
-| Rust core | Rust | ~2,000 |
-| Python layer | Python | ~1,500 |
-| Streamlit UI | Python | ~500 |
-| Tests | Both | ~1,000 |
-| **Total** | | **~5,000** |
+| Aspect | Rust + Python | Python + Polars |
+|--------|---------------|-----------------|
+| Lines of code | ~5,000 | ~4,000 |
+| Languages | 2 (Rust, Python) | 1 (Python) |
+| Build complexity | High (maturin, PyO3) | Low (`pip install`) |
+| Parse 1GB | ~5s | ~15s |
+| Parse 5GB | ~25s | ~75s |
+| Development time | 7 weeks | 6 weeks |
+| Maintenance | Harder | Easier |
+
+**Trade-off:** ~3x slower parsing for significantly simpler development. Polars gives us Rust performance under the hood while keeping everything in Python. For production workloads (event logs up to 5GB), this is acceptable.
 
 ---
 
 ## Future Enhancements
 
-1. **Multi-app support** - Load multiple event logs, browse history
-2. **S3/HDFS integration** - Read event logs directly from cloud storage
+1. **HDFS/S3 streaming** - Parse directly from cloud storage without download
+2. **In-progress app support** - Tail event logs for running applications
 3. **Alerts & anomaly detection** - Flag unusual patterns automatically
 4. **Collaboration** - Share analysis links, annotations
 5. **Custom dashboards** - User-defined metrics and views
 6. **Plugin system** - Extend with custom analyzers
 7. **Ollama support** - Local LLM for air-gapped environments
+8. **Metrics export** - Prometheus/Grafana integration
+9. **SHS proxy mode** - Augment existing SHS with AI features
+
+---
+
+## Summary: Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| **Language** | Python only | Simpler dev, maintenance |
+| **Parser** | Polars (Rust-based) | ~15s/GB, no build complexity |
+| **Cache** | Parquet files | Fast, compressed, Polars-native |
+| **Query** | DuckDB | SQL queries, zero-copy from Parquet |
+| **Architecture** | Single REST API service | One service to deploy, maintain |
+| **API** | SHS-compatible | Drop-in replacement, existing tools work |
+| **Clients** | CLI, UI, MCP all via REST | Consistent behavior, testable |
+| **UI** | Streamlit | Python-native, fast iteration |
 
 ---
 
 ## References
 
-- [Spark Event Log Format](https://spark.apache.org/docs/latest/monitoring.html)
+- [Spark History Server REST API](https://spark.apache.org/docs/latest/monitoring.html#rest-api)
+- [Spark Event Log Format](https://spark.apache.org/docs/latest/monitoring.html#viewing-after-the-fact)
 - [Model Context Protocol](https://modelcontextprotocol.io/)
 - [DuckDB Documentation](https://duckdb.org/docs/)
-- [shadcn/ui Components](https://ui.shadcn.com/)
+- [FastAPI Documentation](https://fastapi.tiangolo.com/)
+- [Streamlit Documentation](https://docs.streamlit.io/)
 - [Claude API Documentation](https://docs.anthropic.com/)
