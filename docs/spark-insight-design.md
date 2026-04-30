@@ -1033,84 +1033,68 @@ class SparkInsightMCPServer:
             )
 
     def _register_tools(self):
-        """Register MCP tools for Spark analysis."""
+        """Register MCP tools - all use AI-optimized endpoints."""
 
-        @self.server.tool("list_spark_applications")
-        async def list_spark_applications() -> str:
-            """List all Spark applications available for analysis."""
-            resp = await self.api.get("/api/v1/applications")
+        @self.server.tool("list_spark_apps")
+        async def list_spark_apps() -> str:
+            """List all Spark applications."""
+            resp = await self.api.get("/api/v1/applications", params={"limit": 20})
             apps = resp.json()
             lines = ["# Spark Applications", ""]
             for app in apps:
                 attempt = app["attempts"][0] if app.get("attempts") else {}
-                status = "✓ Completed" if attempt.get("completed") else "⋯ Running"
-                lines.append(f"- **{app['id']}**: {app['name']} ({status})")
+                status = "✓" if attempt.get("completed") else "⋯"
+                dur = f"{attempt.get('duration', 0) // 1000}s"
+                lines.append(f"- `{app['id']}`: {app['name']} ({status}, {dur})")
             return "\n".join(lines)
 
-        @self.server.tool("get_spark_jobs")
-        async def get_spark_jobs(app_id: str) -> str:
-            """Get all jobs for a Spark application.
+        @self.server.tool("get_spark_summary")
+        async def get_spark_summary(app_id: str) -> str:
+            """Get application summary with key metrics.
 
             Args:
-                app_id: The application ID (e.g., app-20240101120000-0001)
+                app_id: The application ID
             """
-            resp = await self.api.get(f"/api/v1/applications/{app_id}/jobs")
-            jobs = resp.json()
-            lines = [f"# Jobs for {app_id}", ""]
-            for job in jobs:
-                lines.append(f"## Job {job['jobId']}: {job['name']}")
-                lines.append(f"- Status: {job['status']}")
-                lines.append(f"- Tasks: {job['numCompletedTasks']}/{job['numTasks']}")
-                lines.append(f"- Stages: {job['stageIds']}")
-                lines.append("")
-            return "\n".join(lines)
+            resp = await self.api.get(f"/api/ai/{app_id}/summary")
+            return resp.text  # Already markdown
+
+        @self.server.tool("get_spark_problems")
+        async def get_spark_problems(app_id: str) -> str:
+            """Get problems/issues for an application (failures, skew, GC).
+
+            Args:
+                app_id: The application ID
+            """
+            resp = await self.api.get(f"/api/ai/{app_id}/problems")
+            return resp.text  # Already markdown
 
         @self.server.tool("get_spark_stages")
         async def get_spark_stages(app_id: str) -> str:
-            """Get all stages for a Spark application.
+            """Get stage summary table.
 
             Args:
                 app_id: The application ID
             """
-            resp = await self.api.get(f"/api/v1/applications/{app_id}/stages")
-            stages = resp.json()
-            lines = [f"# Stages for {app_id}", ""]
-            for stage in stages:
-                lines.append(f"## Stage {stage['stageId']}.{stage['attemptId']}: {stage['name']}")
-                lines.append(f"- Status: {stage['status']}")
-                lines.append(f"- Tasks: {stage['numCompleteTasks']}/{stage['numTasks']}")
-                lines.append(f"- Input: {stage['inputBytes']} bytes")
-                lines.append(f"- Shuffle Read/Write: {stage['shuffleReadBytes']}/{stage['shuffleWriteBytes']}")
-                lines.append("")
-            return "\n".join(lines)
+            resp = await self.api.get(f"/api/ai/{app_id}/stages")
+            return resp.text  # Already markdown
 
         @self.server.tool("get_spark_executors")
         async def get_spark_executors(app_id: str) -> str:
-            """Get all executors for a Spark application.
+            """Get executor health summary.
 
             Args:
                 app_id: The application ID
             """
-            resp = await self.api.get(f"/api/v1/applications/{app_id}/executors")
-            executors = resp.json()
-            lines = [f"# Executors for {app_id}", ""]
-            for ex in executors:
-                status = "Active" if ex["isActive"] else f"Removed: {ex.get('removeReason', '')}"
-                lines.append(f"## Executor {ex['id']} ({ex['hostPort']})")
-                lines.append(f"- Status: {status}")
-                lines.append(f"- Cores: {ex['totalCores']}")
-                lines.append(f"- Tasks: {ex['completedTasks']}/{ex['totalTasks']}")
-                lines.append(f"- GC Time: {ex['totalGCTime']}ms")
-                lines.append("")
-            return "\n".join(lines)
+            resp = await self.api.get(f"/api/ai/{app_id}/executors")
+            return resp.text  # Already markdown
 
         @self.server.tool("analyze_spark_app")
         async def analyze_spark_app(app_id: str, question: str) -> str:
-            """Ask an AI question about a Spark application.
+            """Ask a question about an application (uses LLM).
 
             Args:
-                app_id: The application ID to analyze
-                question: Your question (e.g., "What caused task failures?")
+                app_id: The application ID
+                question: Your question (e.g., "Why did tasks fail?")
             """
             resp = await self.api.post(
                 "/api/insight/analyze",
@@ -1120,7 +1104,7 @@ class SparkInsightMCPServer:
 
         @self.server.tool("compare_spark_apps")
         async def compare_spark_apps(app_id_1: str, app_id_2: str) -> str:
-            """Compare two Spark applications.
+            """Compare two applications side by side.
 
             Args:
                 app_id_1: First application ID
@@ -1130,17 +1114,7 @@ class SparkInsightMCPServer:
                 "/api/insight/diff",
                 params={"app_id_1": app_id_1, "app_id_2": app_id_2}
             )
-            result = resp.json()
-            lines = [
-                f"# Comparison: {app_id_1} vs {app_id_2}",
-                "",
-                f"**Duration Change:** {result['duration_diff_ms']}ms",
-                "",
-                "## Key Differences:",
-            ]
-            for diff in result.get("key_differences", []):
-                lines.append(f"- {diff}")
-            return "\n".join(lines)
+            return resp.text  # Already markdown
 
     async def run(self, transport: str = "stdio"):
         """Run the MCP server."""
@@ -1672,7 +1646,29 @@ def executors(ctx, app_id: str):
     console.print(table)
 
 
-# ============= Analysis Commands =============
+# ============= AI-Optimized Commands (compact output) =============
+
+@cli.command()
+@click.argument('app_id')
+@click.pass_context
+def summary(ctx, app_id: str):
+    """Show application summary (compact, AI-friendly)."""
+    client = ctx.obj['client']
+    resp = client.get(f"/api/ai/{app_id}/summary")
+    resp.raise_for_status()
+    console.print(Markdown(resp.text))
+
+
+@cli.command()
+@click.argument('app_id')
+@click.pass_context
+def problems(ctx, app_id: str):
+    """Show problems only (failures, skew, GC issues)."""
+    client = ctx.obj['client']
+    resp = client.get(f"/api/ai/{app_id}/problems")
+    resp.raise_for_status()
+    console.print(Markdown(resp.text))
+
 
 @cli.command()
 @click.argument('app_id')
@@ -1686,9 +1682,7 @@ def ask(ctx, app_id: str, question: str):
         params={"app_id": app_id, "question": question}
     )
     resp.raise_for_status()
-
-    result = resp.json()
-    console.print(f"\n[bold]Answer:[/bold]\n{result['answer']}\n")
+    console.print(Markdown(resp.json()["answer"]))
 
 
 @cli.command()
@@ -1703,13 +1697,7 @@ def diff(ctx, app_id_1: str, app_id_2: str):
         params={"app_id_1": app_id_1, "app_id_2": app_id_2}
     )
     resp.raise_for_status()
-
-    result = resp.json()
-    console.print(f"\n[bold]Comparison: {app_id_1} vs {app_id_2}[/bold]")
-    console.print(f"Duration change: {result['duration_diff_ms'] / 1000:+.1f}s")
-    console.print(f"\n[bold]Key Differences:[/bold]")
-    for diff in result['key_differences']:
-        console.print(f"  • {diff}")
+    console.print(Markdown(resp.text))
 
 
 @cli.command()
@@ -1767,7 +1755,13 @@ spark-insight serve --port 18080 --log-dir /path/to/eventlogs
 spark-insight apps
 spark-insight apps --status completed --limit 10
 
-# View jobs/stages/executors for an app
+# Quick summary (AI-optimized, compact output)
+spark-insight summary app-20240101120000-0001
+
+# Show problems only (failures, skew, GC)
+spark-insight problems app-20240101120000-0001
+
+# Detailed views (verbose, for debugging)
 spark-insight jobs app-20240101120000-0001
 spark-insight stages app-20240101120000-0001
 spark-insight executors app-20240101120000-0001
@@ -2135,19 +2129,172 @@ POST /api/insight/diff                     # Compare two apps
 # Event Log Upload
 POST /api/insight/upload                   # Upload event log
      body: multipart/form-data (file)
-
-# Insights (pre-computed analysis)
-GET  /api/insight/{appId}/summary          # Quick insights
-GET  /api/insight/{appId}/failures         # Failure analysis
-GET  /api/insight/{appId}/performance      # Performance analysis
-GET  /api/insight/{appId}/recommendations  # Optimization tips
 ```
 
-### WebSocket (for streaming LLM responses)
+### AI-Optimized Endpoints (Compact for LLM/CLI/MCP)
+
+SHS API returns verbose JSON (~10K tokens per app). These endpoints return **compact markdown** (~1K tokens) - used by CLI, MCP, and LLM analysis.
 
 ```yaml
-WS /ws/insight/analyze    # Streaming LLM responses
-   params: app_id, question
+# Compact summaries - markdown format, <2K tokens each
+GET /api/ai/{appId}/summary      # App overview + key metrics
+GET /api/ai/{appId}/problems     # Only failures, skew, issues
+GET /api/ai/{appId}/stages       # Stage summary table
+GET /api/ai/{appId}/executors    # Executor health summary
+GET /api/ai/{appId}/config       # Key Spark configs only
+```
+
+**Design principles:**
+1. **Markdown output** - Structured text, not verbose JSON
+2. **Problems first** - Surface issues prominently
+3. **Token budget** - Each endpoint <2000 tokens
+4. **Truncate intelligently** - Error messages capped at 200 chars
+
+**Implementation:**
+
+```python
+@app.get("/api/ai/{app_id}/summary")
+async def get_summary_ai(app_id: str) -> PlainTextResponse:
+    """App summary - compact markdown for AI/CLI/MCP."""
+    engine = app_service.get_query_engine(app_id)
+    info = app_service.get_application(app_id)
+    attempt = info.attempts[0] if info.attempts else None
+
+    stats = engine.query("""
+        SELECT
+            (SELECT COUNT(*) FROM jobs) as jobs,
+            (SELECT COUNT(*) FROM jobs WHERE status='FAILED') as failed_jobs,
+            (SELECT COUNT(*) FROM stages) as stages,
+            (SELECT COUNT(*) FROM tasks) as tasks,
+            (SELECT SUM(CASE WHEN failed THEN 1 ELSE 0 END) FROM tasks) as failed_tasks,
+            (SELECT SUM(inputBytes) FROM stages) as input_bytes,
+            (SELECT SUM(shuffleReadBytes + shuffleWriteBytes) FROM stages) as shuffle_bytes
+    """).to_dicts()[0]
+
+    return PlainTextResponse(f"""# {info.name}
+
+| Metric | Value |
+|--------|-------|
+| App ID | `{app_id}` |
+| Duration | {attempt.duration // 1000}s |
+| Status | {'✓ Completed' if attempt.completed else '⋯ Running'} |
+| Jobs | {stats['jobs']} ({stats['failed_jobs']} failed) |
+| Stages | {stats['stages']} |
+| Tasks | {stats['tasks']:,} ({stats['failed_tasks']} failed) |
+| Input | {_fmt_bytes(stats['input_bytes'])} |
+| Shuffle | {_fmt_bytes(stats['shuffle_bytes'])} |
+""")
+
+
+@app.get("/api/ai/{app_id}/problems")
+async def get_problems_ai(app_id: str) -> PlainTextResponse:
+    """Problems only - what's wrong with this app."""
+    engine = app_service.get_query_engine(app_id)
+    sections = []
+
+    # Failed tasks
+    failed = engine.query("""
+        SELECT COUNT(*) as n,
+               SUBSTR(COALESCE(errorMessage, 'Unknown'), 1, 200) as error
+        FROM tasks WHERE failed GROUP BY error
+        ORDER BY n DESC LIMIT 5
+    """).to_dicts()
+    if failed:
+        sections.append("## Failed Tasks")
+        for f in failed:
+            sections.append(f"- **{f['n']}x**: {f['error']}")
+
+    # Data skew (max/avg > 5x)
+    skew = engine.query("""
+        SELECT stageId, name,
+               ROUND(MAX(duration)*1.0 / AVG(duration), 1) as ratio
+        FROM tasks GROUP BY stageId, name
+        HAVING ratio > 5 AND COUNT(*) > 10
+        ORDER BY ratio DESC LIMIT 5
+    """).to_dicts()
+    if skew:
+        sections.append("\n## Data Skew")
+        for s in skew:
+            sections.append(f"- Stage {s['stageId']}: {s['ratio']}x skew ({s['name'][:40]})")
+
+    # Executor removals
+    removed = engine.query("""
+        SELECT id, SUBSTR(removeReason, 1, 100) as reason
+        FROM executors WHERE removeReason IS NOT NULL LIMIT 5
+    """).to_dicts()
+    if removed:
+        sections.append("\n## Executor Failures")
+        for r in removed:
+            sections.append(f"- {r['id']}: {r['reason']}")
+
+    # GC issues (>20% time in GC)
+    gc = engine.query("""
+        SELECT executorId,
+               ROUND(SUM(gcTime)*100.0 / SUM(duration), 0) as pct
+        FROM tasks GROUP BY executorId
+        HAVING pct > 20 ORDER BY pct DESC LIMIT 3
+    """).to_dicts()
+    if gc:
+        sections.append("\n## High GC")
+        for g in gc:
+            sections.append(f"- Executor {g['executorId']}: {g['pct']:.0f}% GC time")
+
+    if not sections:
+        return PlainTextResponse("# No Problems\n\nNo significant issues detected.")
+
+    return PlainTextResponse("# Problems\n\n" + "\n".join(sections))
+
+
+@app.get("/api/ai/{app_id}/stages")
+async def get_stages_ai(app_id: str) -> PlainTextResponse:
+    """Stage summary table - compact."""
+    engine = app_service.get_query_engine(app_id)
+
+    stages = engine.query("""
+        SELECT stageId, status, name, numTasks,
+               inputBytes, shuffleReadBytes, shuffleWriteBytes
+        FROM stages ORDER BY stageId LIMIT 50
+    """).to_dicts()
+
+    lines = ["# Stages", "",
+             "| ID | Status | Tasks | Input | Shuffle | Name |",
+             "|---:|--------|------:|------:|--------:|------|"]
+    for s in stages:
+        status = "✓" if s['status'] == 'COMPLETE' else "✗" if s['status'] == 'FAILED' else "⋯"
+        lines.append(
+            f"| {s['stageId']} | {status} | {s['numTasks']} | "
+            f"{_fmt_bytes(s['inputBytes'])} | {_fmt_bytes(s['shuffleReadBytes'])} | "
+            f"{s['name'][:30]} |"
+        )
+
+    return PlainTextResponse("\n".join(lines))
+```
+
+**Token comparison:**
+
+| Endpoint | SHS API | AI API | Reduction |
+|----------|---------|--------|-----------|
+| App details | ~10,000 | ~500 | **20x** |
+| All stages | ~20,000 | ~1,000 | **20x** |
+| Problems | N/A | ~800 | **New** |
+
+**Usage from CLI:**
+```bash
+# Compact output by default
+spark-insight summary app-123      # calls /api/ai/{id}/summary
+spark-insight problems app-123     # calls /api/ai/{id}/problems
+
+# Verbose JSON if needed
+spark-insight jobs app-123 --json  # calls /api/v1/.../jobs
+```
+
+**Usage from MCP:**
+```python
+@self.server.tool("get_spark_summary")
+async def get_spark_summary(app_id: str) -> str:
+    """Get compact app summary."""
+    resp = await self.api.get(f"/api/ai/{app_id}/summary")
+    return resp.text  # Already markdown, ready for LLM
 ```
 
 ---
