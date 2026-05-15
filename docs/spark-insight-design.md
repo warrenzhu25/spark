@@ -57,7 +57,7 @@ All clients (CLI, UI, MCP) communicate with a single REST API service:
 │                              CLIENTS                                        │
 │  ┌─────────────┐  ┌─────────────────┐  ┌─────────────┐  ┌───────────────┐  │
 │  │  CLI        │  │  Web UI         │  │  MCP Server │  │  Spark Tools  │  │
-│  │  (Python)   │  │  (Streamlit)    │  │  (Python)   │  │  (existing)   │  │
+│  │  (Python)   │  │  (Dash/Streamlit)│  │  (Python)   │  │  (existing)   │  │
 │  └──────┬──────┘  └────────┬────────┘  └──────┬──────┘  └───────┬───────┘  │
 │         │                  │                  │                  │          │
 │         └──────────────────┼──────────────────┼──────────────────┘          │
@@ -95,7 +95,7 @@ All clients (CLI, UI, MCP) communicate with a single REST API service:
 ```
 CLI                          UI                           MCP
  │                            │                            │
- │  spark-insight apps        │  Browser → Streamlit       │  Claude Desktop
+ │  spark-insight apps        │  Browser → Dash/Streamlit  │  Claude Desktop
  │  spark-insight jobs app1   │  → Renders REST data       │  → Calls MCP tools
  │  spark-insight ask "..."   │  → AI chat interface       │  → query_spark_data
  │                            │                            │  → analyze_failures
@@ -114,8 +114,8 @@ CLI                          UI                           MCP
 | **API Server** | FastAPI | Async, auto-docs, SHS-compatible routes |
 | **Parser** | Polars | Rust-based, 3-4x faster than pure Python |
 | **Query Engine** | DuckDB | Analytical queries, zero-config, fast |
-| **Frontend** | Streamlit | Python-native, rapid iteration |
-| **Charts** | Plotly | Interactive, built-in Streamlit support |
+| **Frontend** | Dash (prod) / Streamlit (proto) | Python-native, no frontend skills needed |
+| **Charts** | Plotly | Interactive, works with both Dash and Streamlit |
 | **Storage** | Local / S3 / HDFS | Event log storage |
 | **LLM** | Claude API / Ollama | Cloud or local LLM options |
 | **MCP** | mcp-python SDK | Official MCP implementation |
@@ -151,17 +151,35 @@ CLI                          UI                           MCP
 3. **DuckDB queries** - Zero-copy from Parquet via Arrow
 4. **Background parsing** - Parse on upload, not on request
 
-### Why Streamlit for UI?
+### Why Dash for UI?
 
-| Aspect | Streamlit | React/Next.js |
-|--------|-----------|---------------|
-| **Learning curve** | Hours (Python only) | Weeks (JS, React, CSS) |
-| **Development speed** | Very fast | Slower |
-| **Code complexity** | ~500 lines | ~5000+ lines |
-| **Maintenance** | Easy | Requires frontend expertise |
-| **Deployment** | Simple | More complex |
+**Framework Comparison:**
 
-For a data analysis tool, Streamlit provides 90% of the functionality with 10% of the effort.
+| Aspect | Dash | Streamlit | React/Next.js |
+|--------|------|-----------|---------------|
+| **Learning curve** | 1-2 days (Python only) | Hours (Python only) | Weeks (JS, React, CSS) |
+| **Development speed** | Fast | Very fast | Slower |
+| **Code complexity** | ~800 lines | ~500 lines | ~5000+ lines |
+| **Maintenance** | Easy | Easy | Requires frontend expertise |
+| **Deployment** | Simple (Gunicorn/WSGI) | Simple | More complex |
+| **Production scalability** | ✅ Excellent | ⚠️ Limited | ✅ Excellent |
+| **Concurrent users** | 100s | 10-50 | 1000s |
+| **State management** | Callback-based (efficient) | Full re-run (inefficient) | Full control |
+
+**Why Dash over Streamlit for Production:**
+
+1. **Callback-based updates** - Streamlit re-runs the entire script on every interaction; Dash only executes the specific callback affected
+2. **Better scalability** - Dash handles 100s of concurrent users; Streamlit struggles beyond 50
+3. **Production-proven** - Used by Fortune 500 companies for enterprise dashboards
+4. **Standard deployment** - Works with Gunicorn, standard WSGI patterns, no special runtime
+5. **DataTable component** - Built-in sortable, filterable, paginated tables with server-side support for large datasets
+
+**Streamlit Advantages (for prototyping):**
+- Slightly faster initial development
+- Less boilerplate code
+- Great for internal tools with <10 users
+
+**Recommendation:** Use **Dash** for the production UI. The additional development effort (~1-2 days) pays off significantly in scalability and maintainability.
 
 ---
 
@@ -184,8 +202,9 @@ The core of Spark Insight is a FastAPI server that implements the same REST API 
 | `GET /api/v1/applications/{appId}/executors` | ✅ | ✅ | List executors |
 | `GET /api/v1/applications/{appId}/environment` | ✅ | ✅ | Spark config |
 | **Extended API** | | | |
-| `POST /api/insight/analyze` | ❌ | ✅ | AI analysis |
-| `POST /api/insight/diff` | ❌ | ✅ | Compare apps |
+| `POST /api/insight/analyze` | ❌ | ✅ | AI analysis with visualization |
+| `POST /api/insight/diff` | ❌ | ✅ | Compare apps (no LLM, instant) |
+| `POST /api/insight/diff/analyze` | ❌ | ✅ | AI diff analysis (token-efficient) |
 | `POST /api/insight/upload` | ❌ | ✅ | Upload event log |
 
 **FastAPI Server Implementation:**
@@ -281,13 +300,32 @@ async def get_environment(app_id: str) -> EnvironmentInfo:
 
 # ============= Extended API (Spark Insight specific) =============
 
-@app.post("/api/insight/analyze")
-async def analyze_application(
-    app_id: str,
+class AnalyzeRequest(BaseModel):
+    app_id: str
     question: str
-) -> AnalysisResult:
-    """AI-powered analysis of application."""
-    return await llm_service.analyze(app_id, question)
+
+class AnalysisResult(BaseModel):
+    """Structured LLM response with visualization spec."""
+    summary: str
+    visualization: Literal["table", "bar_chart", "line_chart", "pie_chart", "none"]
+    data: list[dict] = []
+    x_column: str | None = None
+    y_column: str | None = None
+
+@app.post("/api/insight/analyze")
+async def analyze_application(request: AnalyzeRequest) -> AnalysisResult:
+    """AI-powered analysis with structured visualization output.
+
+    Example response:
+    {
+        "summary": "Job 5 failed due to OOM in stage 3...",
+        "visualization": "table",
+        "data": [{"stage": 3, "task": 142, "error": "OOM"}],
+        "x_column": null,
+        "y_column": null
+    }
+    """
+    return await llm_service.analyze(request.app_id, request.question)
 
 
 @app.post("/api/insight/diff")
@@ -295,8 +333,33 @@ async def diff_applications(
     app_id_1: str,
     app_id_2: str
 ) -> DiffResult:
-    """Compare two applications."""
+    """Compare two applications. Returns structured diff (no LLM, instant)."""
     return diff_service.compare(app_id_1, app_id_2)
+
+
+class DiffAnalyzeRequest(BaseModel):
+    app_id_1: str
+    app_id_2: str
+    question: str
+
+@app.post("/api/insight/diff/analyze")
+async def analyze_diff(request: DiffAnalyzeRequest) -> AnalysisResult:
+    """AI analysis of app diff with token-efficient context.
+
+    Pre-computes diff (~instant), converts to compact format (~300 tokens),
+    then sends to LLM. 90% fewer tokens than naive approach.
+
+    Example response:
+    {
+        "summary": "25% slowdown caused by stage 5 shuffle increase...",
+        "visualization": "bar_chart",
+        "data": [{"stage": "Stage 5", "before": 120, "after": 336}],
+        "x_column": "stage",
+        "y_column": "after"
+    }
+    """
+    diff = diff_service.compare(request.app_id_1, request.app_id_2)
+    return await llm_service.analyze_diff(diff, request.question)
 
 
 @app.post("/api/insight/upload")
@@ -893,12 +956,15 @@ class LLMService:
         self.model = model
 
     async def analyze(self, question: str) -> AnalysisResult:
-        """Answer natural language questions about Spark application."""
+        """Answer natural language questions about Spark application.
+
+        Returns structured output with optional visualization spec.
+        """
 
         # Build context from application data
         context = self._build_context()
 
-        # System prompt with Spark expertise
+        # System prompt with Spark expertise + visualization guidance
         system_prompt = """You are a Spark performance expert. Analyze the provided
         Spark application data and answer the user's question.
 
@@ -908,7 +974,23 @@ class LLMService:
         - Resource utilization issues
         - Actionable recommendations
 
-        Be specific and reference actual data (job IDs, stage IDs, executor IDs)."""
+        Be specific and reference actual data (job IDs, stage IDs, executor IDs).
+
+        IMPORTANT: Return your response as JSON matching this schema:
+        {
+            "summary": "Your analysis in plain text",
+            "visualization": "table" | "bar_chart" | "line_chart" | "pie_chart" | "none",
+            "data": [{"col1": val1, "col2": val2}, ...],  // Data for visualization
+            "x_column": "column_name",  // For charts: X axis column
+            "y_column": "column_name"   // For charts: Y axis column
+        }
+
+        Choose visualization based on the question:
+        - Use "table" for detailed listings (failed tasks, executor details)
+        - Use "bar_chart" for comparisons (stage durations, task counts)
+        - Use "line_chart" for time series (executor memory over time)
+        - Use "pie_chart" for proportions (failure reasons, task status distribution)
+        - Use "none" for simple text answers"""
 
         response = await self.client.messages.create(
             model=self.model,
@@ -916,13 +998,12 @@ class LLMService:
             messages=[
                 {"role": "user", "content": f"Application Data:\n{context}\n\nQuestion: {question}"}
             ],
-            max_tokens=2000
+            max_tokens=4000
         )
 
-        return AnalysisResult(
-            answer=response.content[0].text,
-            relevant_data=self._extract_relevant_data(question)
-        )
+        # Parse structured response
+        result_json = json.loads(response.content[0].text)
+        return AnalysisResult(**result_json)
 
     def _build_context(self) -> str:
         """Build context string from application data."""
@@ -956,6 +1037,143 @@ class LLMService:
 - "What's causing the long GC pauses?"
 - "Compare shuffle performance between stage 3 and stage 7"
 - "What configuration changes would improve this job?"
+
+#### Structured Output Model
+
+```python
+from pydantic import BaseModel
+from typing import Literal
+
+class AnalysisResult(BaseModel):
+    """LLM analysis result with optional visualization."""
+    summary: str                          # Text explanation
+    visualization: Literal[
+        "table", "bar_chart", "line_chart", "pie_chart", "none"
+    ]
+    data: list[dict] = []                 # Data rows for visualization
+    x_column: str | None = None           # X axis column (for charts)
+    y_column: str | None = None           # Y axis column (for charts)
+```
+
+#### UI Rendering (Dash)
+
+The UI receives structured output from LLM and renders appropriate visualization:
+
+```python
+from dash import html, dcc, dash_table, callback, Output, Input, State
+import plotly.express as px
+import pandas as pd
+
+@callback(
+    Output('ai-result', 'children'),
+    Input('ask-btn', 'n_clicks'),
+    State('question-input', 'value'),
+    State('app-id', 'data'),
+    prevent_initial_call=True
+)
+def handle_ai_question(n_clicks, question, app_id):
+    """Process question and render LLM response with visualization."""
+
+    # Call LLM service via REST API
+    response = httpx.post(
+        f"{API_URL}/api/insight/analyze",
+        json={"app_id": app_id, "question": question}
+    )
+    result = AnalysisResult(**response.json())
+
+    # Build output components
+    components = [
+        html.H4("Analysis"),
+        html.P(result.summary, className="analysis-summary")
+    ]
+
+    # Render visualization based on type
+    if result.visualization == "none" or not result.data:
+        pass  # Text-only response
+
+    elif result.visualization == "table":
+        components.append(dash_table.DataTable(
+            data=result.data,
+            columns=[{"name": k, "id": k} for k in result.data[0].keys()],
+            sort_action="native",
+            filter_action="native",
+            page_size=10,
+            style_table={"overflowX": "auto"},
+            style_cell={"textAlign": "left"},
+            style_data_conditional=[
+                {"if": {"filter_query": "{status} = FAILED"},
+                 "backgroundColor": "#ffebee"}
+            ]
+        ))
+
+    elif result.visualization == "bar_chart":
+        df = pd.DataFrame(result.data)
+        fig = px.bar(df, x=result.x_column, y=result.y_column,
+                     title=f"{result.y_column} by {result.x_column}")
+        components.append(dcc.Graph(figure=fig))
+
+    elif result.visualization == "line_chart":
+        df = pd.DataFrame(result.data)
+        fig = px.line(df, x=result.x_column, y=result.y_column,
+                      title=f"{result.y_column} over {result.x_column}")
+        components.append(dcc.Graph(figure=fig))
+
+    elif result.visualization == "pie_chart":
+        df = pd.DataFrame(result.data)
+        fig = px.pie(df, names=result.x_column, values=result.y_column,
+                     title=f"{result.y_column} Distribution")
+        components.append(dcc.Graph(figure=fig))
+
+    return html.Div(components)
+```
+
+#### Example Flow
+
+```
+User: "Why did job 5 fail?"
+    ↓
+LLM receives context: jobs, stages, tasks, errors
+    ↓
+LLM returns:
+{
+    "summary": "Job 5 failed due to OutOfMemoryError in stage 3. Task 142 on
+               executor 7 exceeded the 8GB memory limit while processing a
+               7.2GB shuffle block. Recommendation: Increase
+               spark.executor.memory or add more partitions to reduce
+               partition size.",
+    "visualization": "table",
+    "data": [
+        {"stage": 3, "task": 142, "executor": "exec-7", "error": "OOM", "memory": "8GB"},
+        {"stage": 3, "task": 156, "executor": "exec-7", "error": "OOM", "memory": "8GB"}
+    ],
+    "x_column": null,
+    "y_column": null
+}
+    ↓
+Dash renders: Summary text + sortable/filterable DataTable
+```
+
+```
+User: "Show stage durations"
+    ↓
+LLM returns:
+{
+    "summary": "Stage 3 took 45% of total execution time (12.5 min).
+               Consider optimizing the shuffle in this stage.",
+    "visualization": "bar_chart",
+    "data": [
+        {"stage": "Stage 0", "duration_min": 2.1},
+        {"stage": "Stage 1", "duration_min": 3.4},
+        {"stage": "Stage 2", "duration_min": 5.2},
+        {"stage": "Stage 3", "duration_min": 12.5},
+        {"stage": "Stage 4", "duration_min": 4.3}
+    ],
+    "x_column": "stage",
+    "y_column": "duration_min"
+}
+    ↓
+Dash renders: Summary text + interactive bar chart
+```
 
 ### 4. MCP Server (REST API Client)
 
@@ -1251,6 +1469,160 @@ class DiffEngine:
                 ))
 
         return sorted(diffs, key=lambda d: abs(d.duration_change_percent), reverse=True)
+```
+
+#### Token-Efficient Diff Analysis
+
+Comparing two apps naively would double the token usage. Instead, pre-compute the diff and send only deltas to the LLM.
+
+**Token Comparison:**
+
+| Approach | Input Tokens | Output Tokens | Total |
+|----------|--------------|---------------|-------|
+| Naive (full data × 2) | ~10,000 | ~500 | ~10,500 |
+| **Pre-computed diff** | **~500** | **~500** | **~1,000** |
+
+**90% reduction** in token usage.
+
+**Compact Diff Format for LLM:**
+
+```python
+def diff_to_compact_context(diff: DiffResult) -> str:
+    """Convert pre-computed diff to minimal token representation (~300-500 tokens)."""
+
+    lines = [
+        f"## App Comparison: {diff.app1.app_id} → {diff.app2.app_id}",
+        f"Duration: {diff.duration_diff/1000:+.1f}s ({diff.duration_diff/diff.app1.duration_ms*100:+.0f}%)",
+        f"Jobs: {diff.job_count_diff:+d}, Stages: {diff.stage_count_diff:+d}",
+        f"Performance: {diff.performance_change}",
+        "",
+        "## Significant Stage Changes (>10%):"
+    ]
+
+    # Only top 5 most changed stages
+    significant = [s for s in diff.stage_diffs if abs(s.duration_change_percent) > 10]
+    for s in significant[:5]:
+        lines.append(
+            f"- {s.stage_name}: {s.duration_change_percent:+.0f}% duration, "
+            f"{s.shuffle_change_percent:+.0f}% shuffle"
+        )
+
+    # Config changes
+    if diff.config_diffs:
+        lines.append("\n## Config Changes:")
+        for c in diff.config_diffs[:5]:
+            lines.append(f"- {c.key}: {c.old_value} → {c.new_value}")
+
+    # Pre-computed warnings
+    if diff.key_differences:
+        lines.append("\n## Key Differences:")
+        for kd in diff.key_differences:
+            lines.append(f"- {kd}")
+
+    return "\n".join(lines)
+```
+
+**Example compact output (~250 tokens):**
+```
+## App Comparison: app-20240115-001 → app-20240116-001
+Duration: +45.2s (+25%)
+Jobs: +0, Stages: +0
+Performance: degraded
+
+## Significant Stage Changes (>10%):
+- AggregateExec (stage 5): +180% duration, +250% shuffle
+- SortMergeJoin (stage 3): +45% duration, +12% shuffle
+- HashAggregate (stage 8): -30% duration, -25% shuffle
+
+## Config Changes:
+- spark.executor.memory: 4g → 8g
+- spark.sql.shuffle.partitions: 200 → 100
+
+## Key Differences:
+- Stage 5 shuffle increased 3x (possible data skew)
+- Fewer partitions may cause memory pressure
+```
+
+**LLM Analysis with Compact Context:**
+
+```python
+async def analyze_diff_with_llm(
+    diff: DiffResult,
+    question: str
+) -> AnalysisResult:
+    """LLM interprets pre-computed diff using minimal tokens."""
+
+    # Convert to compact format (~300 tokens instead of ~10K)
+    context = diff_to_compact_context(diff)
+
+    response = await client.messages.create(
+        model="claude-sonnet-4-20250514",
+        system="""You are a Spark performance expert analyzing a pre-computed
+        diff between two application runs. Explain WHY metrics changed and
+        provide actionable recommendations.
+
+        Return JSON: {summary, visualization, data, x_column, y_column}""",
+        messages=[{
+            "role": "user",
+            "content": f"Diff:\n{context}\n\nQuestion: {question}"
+        }],
+        max_tokens=1000
+    )
+
+    return AnalysisResult(**json.loads(response.content[0].text))
+```
+
+**API Endpoints:**
+
+```python
+# Endpoint 1: Pre-computed diff (no LLM, instant response)
+@app.post("/api/insight/diff")
+async def diff_applications(app_id_a: str, app_id_b: str) -> DiffResult:
+    """Compare two applications. Returns structured diff without LLM."""
+    return diff_engine.compare(load_app(app_id_a), load_app(app_id_b))
+
+# Endpoint 2: LLM-analyzed diff (uses compact context)
+@app.post("/api/insight/diff/analyze")
+async def analyze_diff(
+    app_id_a: str,
+    app_id_b: str,
+    question: str
+) -> AnalysisResult:
+    """Natural language analysis of diff.
+
+    Uses pre-computed diff as compact context (~500 tokens vs ~10K naive).
+    """
+    diff = diff_engine.compare(load_app(app_id_a), load_app(app_id_b))
+    return await analyze_diff_with_llm(diff, question)
+```
+
+**Example Flow:**
+
+```
+User: "Why is today's run slower than yesterday?"
+    ↓
+1. Compute diff (no LLM): app-yesterday vs app-today
+    ↓
+2. Convert to compact format (~300 tokens):
+   "Duration: +45s (+25%), Stage 5: +180% duration, +250% shuffle..."
+    ↓
+3. LLM analyzes compact diff:
+   {
+     "summary": "The 25% slowdown is caused by stage 5 (AggregateExec).
+                Shuffle data increased 3x, likely due to data skew from
+                the config change reducing partitions from 200 to 100.
+                Recommendation: Revert spark.sql.shuffle.partitions to 200
+                or enable AQE with spark.sql.adaptive.enabled=true",
+     "visualization": "bar_chart",
+     "data": [
+       {"stage": "Stage 5", "yesterday": 120, "today": 336},
+       {"stage": "Stage 3", "yesterday": 85, "today": 123}
+     ],
+     "x_column": "stage",
+     "y_column": "today"
+   }
+    ↓
+4. UI renders: Summary + bar chart comparing stage durations
 ```
 
 ### 6. Application Service (with Caching)
@@ -1783,11 +2155,120 @@ SPARK_INSIGHT_SERVER=http://remote:18080 spark-insight apps
 
 ---
 
-## Web UI Design (Streamlit)
+## Web UI Design
 
-Streamlit allows building the entire UI in Python with minimal code. No React, JavaScript, or CSS knowledge required.
+Two Python-native options are documented below. **Dash is recommended for production**; Streamlit is included for reference and prototyping.
 
-### Complete UI in ~300 Lines of Python
+---
+
+### Option A: Dash (Recommended for Production)
+
+Dash uses a callback-based model that only updates affected components, making it suitable for production workloads with many concurrent users.
+
+```python
+from dash import Dash, html, dcc, callback, Output, Input, State, dash_table
+import dash_bootstrap_components as dbc
+import plotly.express as px
+import plotly.graph_objects as go
+
+# App config
+app = Dash(
+    __name__,
+    external_stylesheets=[dbc.themes.BOOTSTRAP],
+    title="Spark Insight"
+)
+server = app.server  # For Gunicorn deployment
+
+# Layout
+app.layout = dbc.Container([
+    # Header
+    dbc.Row([
+        dbc.Col(html.H1("⚡ Spark Insight"), width=12)
+    ]),
+
+    # Sidebar + Main content
+    dbc.Row([
+        # Sidebar
+        dbc.Col([
+            html.H4("Upload Event Log"),
+            dcc.Upload(
+                id='upload-eventlog',
+                children=html.Div(['Drag and Drop or ', html.A('Select File')]),
+                style={'borderStyle': 'dashed', 'borderRadius': '5px', 'padding': '20px'}
+            ),
+            html.Hr(),
+            html.H4("Or Select Existing"),
+            dcc.Dropdown(id='app-selector', placeholder="Select application..."),
+            html.Button("Load", id='load-btn', className='btn btn-primary mt-2'),
+        ], width=3),
+
+        # Main content with tabs
+        dbc.Col([
+            dcc.Tabs(id='main-tabs', value='dashboard', children=[
+                dcc.Tab(label='📊 Dashboard', value='dashboard'),
+                dcc.Tab(label='📋 Jobs', value='jobs'),
+                dcc.Tab(label='🔄 Stages', value='stages'),
+                dcc.Tab(label='💻 Executors', value='executors'),
+                dcc.Tab(label='🤖 AI Analysis', value='ai'),
+            ]),
+            html.Div(id='tab-content')
+        ], width=9)
+    ])
+], fluid=True)
+
+# Callbacks - only run when specific inputs change
+@callback(
+    Output('tab-content', 'children'),
+    Input('main-tabs', 'value'),
+    State('app-selector', 'value')
+)
+def render_tab(tab, app_id):
+    if tab == 'dashboard':
+        return render_dashboard(app_id)
+    elif tab == 'jobs':
+        return render_jobs_table(app_id)
+    # ... other tabs
+
+def render_jobs_table(app_id):
+    """Jobs table with sorting, filtering, pagination."""
+    jobs_df = get_jobs_dataframe(app_id)
+    return dash_table.DataTable(
+        data=jobs_df.to_dict('records'),
+        columns=[{'name': col, 'id': col} for col in jobs_df.columns],
+        # Sorting
+        sort_action='native',
+        sort_mode='multi',
+        # Filtering
+        filter_action='native',
+        filter_options={'case': 'insensitive'},
+        # Pagination
+        page_action='native',
+        page_size=20,
+        # Styling
+        style_table={'overflowX': 'auto'},
+        style_cell={'textAlign': 'left'},
+        style_data_conditional=[
+            {'if': {'filter_query': '{status} = FAILED'},
+             'backgroundColor': '#ffcccc'}
+        ]
+    )
+
+# Production deployment: gunicorn app:server --workers 4 --bind 0.0.0.0:8050
+if __name__ == '__main__':
+    app.run(debug=True)
+```
+
+**Key Dash Benefits:**
+1. **Callback-based** - Only affected components re-render, not entire page
+2. **DataTable** - Built-in sortable, filterable, paginated tables
+3. **Production-ready** - Standard WSGI deployment with Gunicorn
+4. **Scalable** - Handles 100s of concurrent users
+
+---
+
+### Option B: Streamlit (For Prototyping)
+
+Streamlit allows building the entire UI in Python with minimal code. Best for rapid prototyping and internal tools with <50 users.
 
 ```python
 import streamlit as st
@@ -2068,26 +2549,39 @@ else:
         st.rerun()
 ```
 
-### Running the Streamlit UI
+### Running the UI
 
+**Dash (Production):**
+```bash
+# Install dependencies
+pip install dash dash-bootstrap-components plotly pandas gunicorn
+
+# Development
+python app.py
+
+# Production (with Gunicorn)
+gunicorn app:server --workers 4 --bind 0.0.0.0:8050
+```
+
+**Streamlit (Prototyping):**
 ```bash
 # Install dependencies
 pip install streamlit plotly pandas
 
 # Run the app
 streamlit run app.py
-
-# Or via CLI
-spark-insight serve /path/to/eventlog
 ```
 
-### Key Streamlit Benefits
+### Framework Comparison Summary
 
-1. **No frontend build step** - Just Python
-2. **Hot reload** - Changes appear instantly
-3. **Built-in widgets** - File upload, tables, charts, chat
-4. **Easy deployment** - Streamlit Cloud, Docker, any Python host
-5. **State management** - Simple `st.session_state`
+| Aspect | Dash | Streamlit |
+|--------|------|-----------|
+| **Best for** | Production | Prototyping |
+| **Concurrent users** | 100s | 10-50 |
+| **Update model** | Callback (efficient) | Full re-run |
+| **Tables** | DataTable (sort/filter/paginate) | Basic dataframe |
+| **Deployment** | Standard WSGI (Gunicorn) | Streamlit runtime |
+| **Learning curve** | 1-2 days | Hours |
 
 ---
 
@@ -2119,12 +2613,19 @@ GET  /api/v1/version                                         # API version
 
 ```yaml
 # AI Analysis
-POST /api/insight/analyze                  # LLM analysis
+POST /api/insight/analyze                  # LLM analysis with visualization
      params: app_id, question
+     returns: {summary, visualization, data, x_column, y_column}
 
 # Application Comparison
-POST /api/insight/diff                     # Compare two apps
+POST /api/insight/diff                     # Compare two apps (no LLM, instant)
      params: app_id_1, app_id_2
+     returns: structured DiffResult
+
+POST /api/insight/diff/analyze             # AI diff analysis (token-efficient)
+     params: app_id_1, app_id_2, question
+     returns: {summary, visualization, data, x_column, y_column}
+     note: Uses compact diff context (~500 tokens vs ~10K naive)
 
 # Event Log Upload
 POST /api/insight/upload                   # Upload event log
@@ -2549,16 +3050,17 @@ spark-insight/
     │   ├── __init__.py
     │   └── server.py            # MCP server (REST API client)
     │
-    └── ui/                       # Streamlit UI
+    └── ui/                       # Web UI (Dash or Streamlit)
         ├── __init__.py
-        ├── app.py               # Main Streamlit app
-        └── pages/               # Multi-page Streamlit
-            ├── 1_dashboard.py
-            ├── 2_jobs.py
-            ├── 3_stages.py
-            ├── 4_executors.py
-            ├── 5_ai_analysis.py
-            └── 6_compare.py
+        ├── dash_app.py          # Dash app (production)
+        ├── streamlit_app.py     # Streamlit app (prototyping)
+        └── components/          # Shared UI components
+            ├── dashboard.py
+            ├── jobs.py
+            ├── stages.py
+            ├── executors.py
+            ├── ai_analysis.py
+            └── compare.py
 
 ├── tests/
 │   ├── conftest.py              # Pytest fixtures
@@ -2605,8 +3107,11 @@ mypy src/
 # Run the server
 spark-insight serve --port 18080
 
-# Run Streamlit UI separately (for development)
-streamlit run src/spark_insight/ui/app.py
+# Run Dash UI separately (for development)
+python src/spark_insight/ui/dash_app.py
+
+# Run Streamlit UI separately (for prototyping)
+streamlit run src/spark_insight/ui/streamlit_app.py
 
 # Format code
 ruff format src/
@@ -2632,9 +3137,12 @@ dependencies = [
     # CLI
     "click>=8.0",
     "rich>=13.0",
-    # UI
-    "streamlit>=1.30",
+    # UI (Dash for production)
+    "dash>=2.14",
+    "dash-bootstrap-components>=1.5",
     "plotly>=5.0",
+    # UI (Streamlit for prototyping - optional)
+    "streamlit>=1.30",
     # LLM
     "anthropic>=0.20",
     "mcp>=0.1",
@@ -2680,17 +3188,19 @@ spark-insight = "spark_insight.cli:cli"
 - [ ] Server command
 - [ ] CLI tests
 
-### Phase 4: Streamlit UI (Week 4)
+### Phase 4: Web UI (Week 4)
 - [ ] Dashboard page
-- [ ] Jobs/Stages/Executors pages
+- [ ] Jobs/Stages/Executors pages (with sortable/filterable tables)
 - [ ] Compare page
 - [ ] File upload
 - [ ] Connection to REST API
+- [ ] Dash implementation (production)
+- [ ] Streamlit implementation (optional, for prototyping)
 
 ### Phase 5: LLM Integration (Week 5)
 - [ ] LLM service with Claude API
 - [ ] Analysis endpoint (/api/insight/analyze)
-- [ ] AI chat in Streamlit
+- [ ] AI chat in UI
 - [ ] CLI ask command
 - [ ] Prompts and context building
 
@@ -2709,12 +3219,13 @@ spark-insight = "spark_insight.cli:cli"
 | Core (parser, models, query) | ~800 |
 | REST API server | ~500 |
 | CLI client | ~400 |
-| Streamlit UI | ~600 |
+| Dash UI (production) | ~800 |
+| Streamlit UI (optional) | ~500 |
 | LLM service | ~300 |
 | MCP server | ~300 |
 | Storage backends | ~200 |
 | Tests | ~800 |
-| **Total** | **~4,000** |
+| **Total** | **~4,600** |
 
 ### Comparison with Previous Design
 
@@ -2757,7 +3268,7 @@ spark-insight = "spark_insight.cli:cli"
 | **Architecture** | Single REST API service | One service to deploy, maintain |
 | **API** | SHS-compatible | Drop-in replacement, existing tools work |
 | **Clients** | CLI, UI, MCP all via REST | Consistent behavior, testable |
-| **UI** | Streamlit | Python-native, fast iteration |
+| **UI** | Dash (prod) / Streamlit (proto) | Python-native, scalable |
 
 ---
 
@@ -2768,5 +3279,7 @@ spark-insight = "spark_insight.cli:cli"
 - [Model Context Protocol](https://modelcontextprotocol.io/)
 - [DuckDB Documentation](https://duckdb.org/docs/)
 - [FastAPI Documentation](https://fastapi.tiangolo.com/)
+- [Dash Documentation](https://dash.plotly.com/)
+- [Dash DataTable](https://dash.plotly.com/datatable)
 - [Streamlit Documentation](https://docs.streamlit.io/)
 - [Claude API Documentation](https://docs.anthropic.com/)
